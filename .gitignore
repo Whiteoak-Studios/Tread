@@ -1,0 +1,16 @@
+.claude/state/
+.claude/settings.local.json
+.claude/
+CLAUDE.md
+KB/
+Handoffs/
+Packages/
+ServerPackages/
+DevPackages/
+sourcemap.json
+globalTypes.d.luau
+*.rbxl
+*.rbxlx
+*.rbxl.lock
+*.rbxlx.lock
+Open-Decisions.md
