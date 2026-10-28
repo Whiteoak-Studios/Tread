@@ -14,3 +14,4 @@ globalTypes.d.luau
 *.rbxl.lock
 *.rbxlx.lock
 Open-Decisions.md
+graphify-out/
