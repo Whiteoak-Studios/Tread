@@ -15,3 +15,8 @@ globalTypes.d.luau
 *.rbxlx.lock
 Open-Decisions.md
 graphify-out/
+.env
+.env.*
+*.pem
+*.key
+auth.toml
