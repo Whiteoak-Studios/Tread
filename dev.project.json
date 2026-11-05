@@ -1,0 +1,41 @@
+{
+	"name": "tread-dev",
+	"servePort": 34877,
+	"servePlaceIds": [77473372042446],
+	"tree": {
+		"$className": "DataModel",
+		"Players": {
+			"$properties": { "CharacterAutoLoads": false }
+		},
+		"ReplicatedStorage": {
+			"Packages": {
+				"$path": "Packages",
+				"Tread": { "$path": "src" },
+				"Volt": { "$path": ".volt/src" }
+			},
+			"Shared": {
+				"$className": "Folder",
+				"Network": { "$path": "dev/Network" }
+			}
+		},
+		"ServerScriptService": {
+			"Server": { "$path": "dev/Server" },
+			"Fixtures": { "$path": "tests/Fixtures" }
+		},
+		"StarterPlayer": {
+			"$className": "StarterPlayer",
+			"StarterPlayerScripts": {
+				"$className": "StarterPlayerScripts",
+				"Client": { "$path": { "optional": "dev/Client" } },
+				"PlayerModule": { "$path": { "optional": "dev/PlayerModule.luau" } }
+			}
+		},
+		"Workspace": {
+			"$properties": {
+				"Gravity": 68.1,
+				"StreamingIntegrityMode": "Disabled",
+				"UseFixedSimulation": "Disabled"
+			}
+		}
+	}
+}

@@ -1,0 +1,3 @@
+std = "roblox"
+
+exclude = ["tests/**", "src/Network/**", "dev/Network/**"]
