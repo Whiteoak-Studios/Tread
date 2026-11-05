@@ -1,3 +1,6 @@
 std = "roblox"
 
 exclude = ["tests/**", "src/Network/**", "dev/Network/**"]
+
+[config]
+unused_variable = { ignore_pattern = "^_|^self$" }

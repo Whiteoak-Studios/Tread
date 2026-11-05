@@ -1,15 +1,17 @@
 --[[
-    Checks that the dev place mounts what dev.project.json maps: Tread, Volt
-    and Promise in ReplicatedStorage.Packages with Volt's runtime requiring,
-    the fixtures in ServerScriptService, and characters that never auto-load
+    Checks the dev place against dev.project.json: Tread, Volt and Promise in
+    ReplicatedStorage.Packages with Volt's runtime requiring, the fixtures in
+    ServerScriptService, no auto-loading characters and streaming integrity off
 --]]
 
 --!strict
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+local Workspace = game:GetService("Workspace")
 
 local PACKAGES: { string } = { "Tread", "Volt", "Promise" } -- What a game's install puts in Packages side by side
+local STREAMING_INTEGRITY_MODE: Enum.StreamingIntegrityMode = Enum.StreamingIntegrityMode.Disabled
 local SEPARATOR: string = "; " -- Between the problems in one report
 
 return function (): (boolean, string | nil)
@@ -42,6 +44,15 @@ return function (): (boolean, string | nil)
 
 	if Players.CharacterAutoLoads then
 		table.insert(problems, "Players.CharacterAutoLoads is on")
+	end
+
+	-- A Rojo serve never writes this property, so only this check catches a place that drifts from the project file
+	local mode: Enum.StreamingIntegrityMode = Workspace.StreamingIntegrityMode
+	if mode ~= STREAMING_INTEGRITY_MODE then
+		local found: string = `Workspace.StreamingIntegrityMode is {mode.Name}`
+		local expected: string = `expected {STREAMING_INTEGRITY_MODE.Name}`
+		local cause: string = "it is set in Studio by hand, because a Rojo serve never writes it"
+		table.insert(problems, `{found}, {expected}: {cause}`)
 	end
 
 	if #problems > 0 then
