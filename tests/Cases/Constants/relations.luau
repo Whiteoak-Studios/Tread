@@ -76,10 +76,10 @@ return function (): (boolean, string | nil)
 		},
 
 		{
-			relation = "OwnerState's own fields fill 38 B, and with both game blocks at their bounds 88 B",
-			holds = 2 + 2 + 1 + 3 * 3 + 3 * 2 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 3 + 1 + 1 + 1 + 1 + 2
+			relation = "OwnerState's own fields fill 41 B, and with both game blocks at their bounds 91 B",
+			holds = 2 + 2 + 1 + 3 * 3 + 3 * 2 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 3 + 3 + 1 + 1 + 1 + 1 + 2
 					== constants.OWNER_STATE_BYTES
-				and constants.MAX_OWNER_STATE == 88,
+				and constants.MAX_OWNER_STATE == 91,
 		},
 
 		{
@@ -106,8 +106,18 @@ return function (): (boolean, string | nil)
 		},
 
 		{
-			relation = "the moderator's feed is at most 138 B",
-			holds = constants.MAX_FEED == 138,
+			relation = "the moderator's feed is at most 141 B",
+			holds = constants.MAX_FEED == 141,
+		},
+
+		{
+			relation = "a slide's cast reaches past its move by more than the skin, so a near miss inside the skin is seen",
+			holds = constants.CAST_REACH > constants.SKIN,
+		},
+
+		{
+			relation = "depenetration's distances double from its first to a whole hull width at its last",
+			holds = constants.DEPENETRATION_FIRST * 2 ^ (constants.DEPENETRATION_STEPS - 1) == 1,
 		},
 
 		{

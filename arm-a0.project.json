@@ -1,0 +1,34 @@
+{
+	"name": "tread-arm-a0",
+	"servePort": 34878,
+	"blockedPlaceIds": [77473372042446],
+	"tree": {
+		"$className": "DataModel",
+		"ReplicatedStorage": {
+			"Arm": {
+				"$path": "dev/Arms/A0/Shared",
+				"Config": { "$path": "dev/Arms/A0/Config.luau" }
+			}
+		},
+		"ServerScriptService": {
+			"Arm": { "$path": "dev/Arms/A0/Server" }
+		},
+		"StarterPlayer": {
+			"$className": "StarterPlayer",
+			"StarterPlayerScripts": {
+				"$className": "StarterPlayerScripts",
+				"Arm": { "$path": "dev/Arms/A0/Client" }
+			}
+		},
+		"Workspace": {
+			"$properties": {
+				"AuthorityMode": "Automatic",
+				"NextGenerationReplication": "Default",
+				"PlayerScriptsUseInputActionSystem": "Default",
+				"SignalBehavior": "Default",
+				"StreamingEnabled": true,
+				"UseFixedSimulation": "Default"
+			}
+		}
+	}
+}

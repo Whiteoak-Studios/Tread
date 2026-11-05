@@ -15,6 +15,10 @@ local VELOCITY_LIMIT: number = 2 ^ 15 * VELOCITY_QUANTUM -- 512 studs a second e
 local EYE_QUANTUM: number = 1 / 32 -- Studs the eased eye height and the mantle's rise step by, each a u8
 local SKIN: number = 0.02 -- Studs collide-and-slide keeps between the hull and every surface
 local MAX_BUMPS: number = 4 -- The most bumps one collide-and-slide move takes, each a hit and a slide
+local CAST_REACH: number = 0.5 -- Studs a slide's cast reaches past its move, so a near miss keeps its skin too
+local MIN_CREASE: number = 1e-3 -- How nearly parallel two surfaces may be before the line they meet on gives no way
+local DEPENETRATION_FIRST: number = 1 / 16 -- Hull widths depenetration first tries a spot at, each next one twice that
+local DEPENETRATION_STEPS: number = 5 -- The distances depenetration tries, the last one a whole hull width
 local PLAY_BOUND: number = 8192 -- Studs from 0 a position's X and Z may reach either way, whatever the map's size
 
 -- Angles, which a u16 or i16 counts in steps of the turn
@@ -40,7 +44,7 @@ local MAX_LOOK: number = 64 -- The slot-table fields, a character's look
 local MAX_HELD: number = 16 -- The held-item fields
 
 -- OwnerState, server to owner once a relay tick: Tread's fields, then the two game blocks behind their prefixes
-local OWNER_STATE_BYTES: number = 38
+local OWNER_STATE_BYTES: number = 41
 local MAX_OWNER_STATE: number = OWNER_STATE_BYTES + PREFIX_BYTES + MAX_SERVER_SET + PREFIX_BYTES + MAX_RULE_STATE
 
 -- The state word's fields wider than a bit, beside its sprint, aim and heavy landing flags
@@ -95,6 +99,10 @@ return {
 	EYE_QUANTUM = EYE_QUANTUM,
 	SKIN = SKIN,
 	MAX_BUMPS = MAX_BUMPS,
+	CAST_REACH = CAST_REACH,
+	MIN_CREASE = MIN_CREASE,
+	DEPENETRATION_FIRST = DEPENETRATION_FIRST,
+	DEPENETRATION_STEPS = DEPENETRATION_STEPS,
 	PLAY_BOUND = PLAY_BOUND,
 	ANGLE_STEPS = ANGLE_STEPS,
 	PITCH_LIMIT = PITCH_LIMIT,
