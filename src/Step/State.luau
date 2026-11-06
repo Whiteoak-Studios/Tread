@@ -215,6 +215,7 @@ export type Settings = {
 	leanShift: Vector3, -- The eye's shift at full lean, which the world holds as a vector
 	leanRate: number, -- The fastest lean the server accepts
 	headCone: number, -- The head offset's cone around facing, degrees
+	ladderDrop: number, -- Degrees below level past which a climb loses its up part and a grounded body never mounts
 	swimEnter: number,
 	swimLeave: number,
 	floatDepth: number, -- An idle swimmer's feet below the surface

@@ -51,6 +51,7 @@ local SETTINGS: Settings = {
 	leanShift = Vector3.new(0.57, -0.1, 0),
 	leanRate = 200, -- Frontier Zero's own is unset, and no step case reads it
 	headCone = 75,
+	ladderDrop = 30,
 	swimEnter = 3.25,
 	swimLeave = 2.71,
 	floatDepth = 1.83,

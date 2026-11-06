@@ -137,7 +137,26 @@ return function (): (boolean, string | nil)
 			holds = constants.LEAN_STEPS == 2 ^ 7 - 1
 				and constants.HEAD_STEPS == 2 ^ 7 - 1
 				and constants.RECORD_PITCH_STEPS == 2 ^ 7 - 1
+				and constants.MOVE_STEPS == 2 ^ 7 - 1
+				and constants.PUSH_STEPS == 2 ^ 7 - 1
 				and constants.HEAD_LEVELS == 2 ^ 3 - 1,
+		},
+
+		{
+			relation = "OwnerState's u8 eye height at 1/32 stud reaches the 7.96875 studs Config holds every eye height to",
+			holds = (2 ^ constants.EYE_BITS - 1) * constants.EYE_QUANTUM == 7.96875,
+		},
+
+		{
+			relation = "the step's timers stop at the 255 OwnerState's u8 holds",
+			holds = constants.TIMER_LIMIT == 2 ^ 8 - 1,
+		},
+
+		{
+			relation = "FNV-1a's prime is 2^24 plus a rest small enough that a 32-bit hash times it stays under 2^53",
+			holds = constants.FNV_PRIME > 2 ^ 24
+				and (constants.FNV_PRIME - 2 ^ 24) * 2 ^ 32 < 2 ^ 53
+				and constants.FNV_OFFSET < 2 ^ 32,
 		},
 	}
 

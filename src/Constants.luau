@@ -1,7 +1,7 @@
 --[[
     Tread's wire and parity invariants: the layouts' version, sizes and
-    precisions, and the step's quantum, skin and bounds, which the server,
-    every client and every recorded clip must agree on bit for bit
+    precisions, the step's quantum, skin and bounds, and the hash, which the
+    server, every client and every recorded clip must agree on bit for bit
 --]]
 
 --!strict
@@ -13,6 +13,9 @@ local POSITION_QUANTUM: number = 1 / 512 -- Studs a position's axes and the fall
 local VELOCITY_QUANTUM: number = 1 / 64 -- Studs a second a velocity steps by, each axis an i16
 local VELOCITY_LIMIT: number = 2 ^ 15 * VELOCITY_QUANTUM -- 512 studs a second either way, what that i16 holds
 local EYE_QUANTUM: number = 1 / 32 -- Studs the eased eye height and the mantle's rise step by, each a u8
+local EYE_BITS: number = 8 -- That u8's bits, which bound every eye height and mantle height a game gives
+local TIMER_LIMIT: number = 255 -- Ticks the ground, air and mantle timers stop at, the top of the u8 each rides in
+local EXACT_EVERY: number = 10 -- Command numbers apart that both realms run depenetration's exact overlap check at
 local SKIN: number = 0.02 -- Studs collide-and-slide keeps between the hull and every surface
 local MAX_BUMPS: number = 4 -- The most bumps one collide-and-slide move takes, each a hit and a slide
 local CAST_REACH: number = 0.5 -- Studs a slide's cast reaches past its move, so a near miss keeps its skin too
@@ -33,6 +36,7 @@ local RECORD_PITCH_STEPS: number = 127 -- A record's i8 pitch, steps to 90°
 local MAX_COMMANDS: number = 8
 local MOVE_REPEATS: number = 2 -- The commands each Move repeats before its new ones, so one lost Move costs nothing
 local COMMAND_BYTES: number = 11 -- Tread's own fields in a command, before the game's
+local MOVE_STEPS: number = 127 -- A command's i8 move axes, steps to a full input
 local ACK_MASK_BITS: number = 16 -- The relay sequences before the newest acknowledged one that a Move's mask covers
 local FIRST_SEQUENCE: number = 1 -- The first relay sequence a viewer is sent, so an acknowledgment of 0 means none
 
@@ -79,7 +83,9 @@ local LOOK_ENTRY_BYTES: number = 3 -- A look entry's slot and generation and fla
 local MAX_LOOK_ENTRY: number = LOOK_ENTRY_BYTES + PREFIX_BYTES + MAX_LOOK + PREFIX_BYTES + MAX_HELD
 local FOOTSTEP_BYTES: number = 10 -- X and Z u24, Y u16, then the ground material u16
 
+-- Reliable traffic: the slot table and the death message
 local MAX_SLOT_ENTRIES: number = 255 -- The slot-table entries one Slots message carries
+local PUSH_STEPS: number = 127 -- A death's i8 push components, steps to a unit vector's
 
 -- The moderator's feed: OwnerState behind its length, then a count and at most a Move's worth of command looks
 local FEED_LOOK_BYTES: number = 6 -- One stepped command's yaw, pitch and head offset
@@ -90,6 +96,10 @@ local KEYFRAME_HEADER_BYTES: number = 12 -- The version, the declarations' hash,
 local KEYFRAME_CHARACTER_BYTES: number = 1 + RECORD_BYTES + 2 * PREFIX_BYTES -- Kind, record, look and held prefixes
 local KEYFRAME_PLATFORM_BYTES: number = 5 -- A called platform's id and its latest press tick
 
+-- The 32-bit FNV-1a behind the shared table's hash in the handshake and the declarations' hash in every keyframe
+local FNV_OFFSET: number = 2166136261 -- Its offset basis
+local FNV_PRIME: number = 16777619 -- Its prime, 2 ^ 24 + 403
+
 return {
 	CODEC_VERSION = CODEC_VERSION,
 	PREFIX_BYTES = PREFIX_BYTES,
@@ -97,6 +107,9 @@ return {
 	VELOCITY_QUANTUM = VELOCITY_QUANTUM,
 	VELOCITY_LIMIT = VELOCITY_LIMIT,
 	EYE_QUANTUM = EYE_QUANTUM,
+	EYE_BITS = EYE_BITS,
+	TIMER_LIMIT = TIMER_LIMIT,
+	EXACT_EVERY = EXACT_EVERY,
 	SKIN = SKIN,
 	MAX_BUMPS = MAX_BUMPS,
 	CAST_REACH = CAST_REACH,
@@ -113,6 +126,7 @@ return {
 	MAX_COMMANDS = MAX_COMMANDS,
 	MOVE_REPEATS = MOVE_REPEATS,
 	COMMAND_BYTES = COMMAND_BYTES,
+	MOVE_STEPS = MOVE_STEPS,
 	ACK_MASK_BITS = ACK_MASK_BITS,
 	FIRST_SEQUENCE = FIRST_SEQUENCE,
 	MAX_COMMAND_FIELDS = MAX_COMMAND_FIELDS,
@@ -149,9 +163,12 @@ return {
 	MAX_LOOK_ENTRY = MAX_LOOK_ENTRY,
 	FOOTSTEP_BYTES = FOOTSTEP_BYTES,
 	MAX_SLOT_ENTRIES = MAX_SLOT_ENTRIES,
+	PUSH_STEPS = PUSH_STEPS,
 	FEED_LOOK_BYTES = FEED_LOOK_BYTES,
 	MAX_FEED = MAX_FEED,
 	KEYFRAME_HEADER_BYTES = KEYFRAME_HEADER_BYTES,
 	KEYFRAME_CHARACTER_BYTES = KEYFRAME_CHARACTER_BYTES,
 	KEYFRAME_PLATFORM_BYTES = KEYFRAME_PLATFORM_BYTES,
+	FNV_OFFSET = FNV_OFFSET,
+	FNV_PRIME = FNV_PRIME,
 }

@@ -1,7 +1,7 @@
 --[[
     The step's own arithmetic: the one hand-written lerp every interpolation
-    in Tread calls, the quantizers OwnerState's precisions need, and the fall
-    a moved sleeper draws and is hit along
+    in Tread calls, OwnerState's quantizers, the fall a moved sleeper draws
+    and is hit along, and the sine and cosine in plain arithmetic
 --]]
 
 --!strict
@@ -11,6 +11,12 @@ local Constants = require(script.Parent.Parent.Constants)
 local POSITION_STEPS: number = 1 / Constants.POSITION_QUANTUM -- Quanta a stud, so a quantized value is a whole count
 local VELOCITY_STEPS: number = 1 / Constants.VELOCITY_QUANTUM
 local EYE_STEPS: number = 1 / Constants.EYE_QUANTUM
+
+-- The trig's series, each run on an angle reduced to within an eighth of a turn of a quarter turn's multiple
+local QUARTER_TURN: number = math.pi / 2
+local QUARTERS: number = 4 -- A turn's quarters, which pick the series and its sign
+local SINE_TERMS: number = 7 -- Through x^15, whose next term stays under 5e-17 inside an eighth of a turn
+local COSINE_TERMS: number = 8 -- Through x^16, the same reach
 
 local Math = {}
 
@@ -84,6 +90,72 @@ function Math.fall(from: vector, to: vector, gravity: number, elapsed: number): 
 	local z: number = Math.lerp(from.z, to.z, fraction)
 
 	return vector.create(x, y, z), fraction
+end
+
+-- The sine of an angle within an eighth of a turn of 0, its Taylor series nested from the last term in
+local function sineNear(angle: number): number
+	local squared: number = angle * angle
+	local sum: number = 1
+
+	for term: number = SINE_TERMS, 1, -1 do
+		sum = 1 - squared / ((2 * term) * (2 * term + 1)) * sum
+	end
+
+	return angle * sum
+end
+
+-- The cosine of an angle within an eighth of a turn of 0, the same way
+local function cosineNear(angle: number): number
+	local squared: number = angle * angle
+	local sum: number = 1
+
+	for term: number = COSINE_TERMS, 1, -1 do
+		sum = 1 - squared / ((2 * term - 1) * (2 * term)) * sum
+	end
+
+	return sum
+end
+
+--[[
+    The sine of an angle in radians in plain arithmetic, since the C
+    library's may round apart between the server and a device. The angle is
+    taken to its nearest quarter turn, and the series runs on what is left
+--]]
+
+function Math.sin(angle: number): number
+	local quarter: number = math.round(angle / QUARTER_TURN)
+	local left: number = angle - quarter * QUARTER_TURN
+	local which: number = quarter % QUARTERS
+
+	if which == 0 then
+		return sineNear(left)
+	elseif which == 1 then
+		return cosineNear(left)
+	elseif which == 2 then
+		return -sineNear(left)
+	end
+
+	return -cosineNear(left)
+end
+
+--[[
+    The cosine of an angle in radians, the same way as Math.sin
+--]]
+
+function Math.cos(angle: number): number
+	local quarter: number = math.round(angle / QUARTER_TURN)
+	local left: number = angle - quarter * QUARTER_TURN
+	local which: number = quarter % QUARTERS
+
+	if which == 0 then
+		return cosineNear(left)
+	elseif which == 1 then
+		return -sineNear(left)
+	elseif which == 2 then
+		return -cosineNear(left)
+	end
+
+	return sineNear(left)
 end
 
 return Math

@@ -57,6 +57,9 @@ type Listener = { callback: Callback, connected: boolean }
 -- The game's callbacks, in the order they connected
 local Listeners: { Listener } = {}
 
+local Firing: number = 0 -- Fires running now, nested ones too, during which a disconnect keeps its listener listed
+local Stale: boolean = false -- Whether a disconnect during a fire left a listener for the last fire to remove
+
 local Reports = {}
 
 --[[
@@ -74,7 +77,18 @@ function Reports.connect(callback: Callback): () -> ()
 	table.insert(Listeners, listener)
 
 	return function ()
+		if not listener.connected then
+			return
+		end
+
 		listener.connected = false
+
+		-- A fire running walks the list by index, so the listener stays listed until the last fire ends
+		if Firing > 0 then
+			Stale = true
+
+			return
+		end
 
 		local index: number? = table.find(Listeners, listener)
 		if index then
@@ -97,10 +111,29 @@ local function reportable(player: Player | Bot): boolean
 	return type(player) == "table" and type(player.Name) == "string"
 end
 
+-- Removes every listener disconnected during a fire, the rest kept in the order they connected
+local function sweep()
+	local kept: number = 0
+
+	for index: number = 1, #Listeners do
+		local listener: Listener = Listeners[index]
+		if listener.connected then
+			kept += 1
+			Listeners[kept] = listener
+		end
+	end
+
+	for index: number = #Listeners, kept + 1, -1 do
+		Listeners[index] = nil
+	end
+
+	Stale = false
+end
+
 --[[
-    Reports one event to every callback. Each runs under its own xpcall, so
-    one that throws is warned with its stack and never stops the others or
-    the stage that reported
+    Reports one event to every callback, making no table. Each runs under
+    its own xpcall, so one that throws is warned with its stack and never
+    stops the others or the stage that reported
 --]]
 
 function Reports.fire(player: (Player | Bot)?, kind: Kind, measurement: number | string)
@@ -112,11 +145,22 @@ function Reports.fire(player: (Player | Bot)?, kind: Kind, measurement: number |
 		error(`Reports.fire takes a Player, a bot or nil as the player, not a {typeof(player)}`, 2)
 	end
 
-	-- A copy, so a callback connected mid-fire waits for the next report and one disconnected mid-fire is skipped
-	for _, listener: Listener in table.clone(Listeners) do
+	-- Only the callbacks listed when it starts, so one connected mid-fire waits for the next report, and one
+	-- disconnected mid-fire is skipped while it stays listed
+	local count: number = #Listeners
+	Firing += 1
+
+	for index: number = 1, count do
+		local listener: Listener = Listeners[index]
 		if listener.connected then
 			xpcall(listener.callback, warnFailure, player, kind, measurement)
 		end
+	end
+
+	Firing -= 1
+
+	if Firing == 0 and Stale then
+		sweep()
 	end
 end
 
