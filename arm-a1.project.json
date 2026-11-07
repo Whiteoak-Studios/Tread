@@ -1,7 +1,7 @@
 {
 	"name": "tread-arm-a1",
 	"servePort": 34879,
-	"blockedPlaceIds": [77473372042446],
+	"servePlaceIds": [113304556711044],
 	"tree": {
 		"$className": "DataModel",
 		"ReplicatedStorage": {

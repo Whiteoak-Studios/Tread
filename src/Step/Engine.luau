@@ -289,4 +289,28 @@ function Engine.wrap(functions: GameCollision): Collision
 	}
 end
 
+--[[
+    The step's casts from the shared table's collision key: the game's own
+    functions crossed over through wrap, which names the first one missing
+    from a partial set, or engine casts over its include list when it gives
+    none of them
+--]]
+
+function Engine.casts(collision: GameCollision): Collision
+	if type(collision) ~= "table" then
+		error(`collision must be a table of the four functions or an include list, and got a {typeof(collision)}`)
+	end
+
+	if collision.ray ~= nil or collision.sweep ~= nil or collision.rest ~= nil or collision.sphere ~= nil then
+		return Engine.wrap(collision)
+	end
+
+	local include: { Instance }? = collision.include
+	if include == nil then
+		error("collision gives none of the four functions and no include list for engine casts")
+	end
+
+	return Engine.collision(include)
+end
+
 return Engine

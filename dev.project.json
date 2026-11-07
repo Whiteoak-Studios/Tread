@@ -15,7 +15,8 @@
 			},
 			"Shared": {
 				"$className": "Folder",
-				"Network": { "$path": "dev/Network" }
+				"Network": { "$path": "dev/Network" },
+				"Dev": { "$path": "dev/Shared" }
 			}
 		},
 		"ServerScriptService": {

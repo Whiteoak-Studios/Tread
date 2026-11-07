@@ -12,6 +12,7 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local Animate = require(script.Animate)
+local Config = require(script.Parent.Parent.Config)
 local Constants = require(script.Parent.Parent.Constants)
 local Ragdoll = require(script.Ragdoll)
 local State = require(script.Parent.Parent.Step.State)
@@ -39,37 +40,30 @@ local JOINTS: { string } = {
 }
 
 type Animated = Animate.Animated
+type ClientSettings = Config.ClientSettings
 type Collision = State.Collision
 type Place = Animate.Place
 type State = State.State
-type Values = State.Values
 
-export type Animations = Animate.Animations
-export type Bodies = Ragdoll.Bodies
-export type Limit = Ragdoll.Limit
+-- The client settings' keys the pool reads, each typed where the client settings declare it
+export type Joints = index<ClientSettings, "joints">
+export type Animations = index<ClientSettings, "animations">
+export type Lod = index<ClientSettings, "lod">
+export type Bodies = index<ClientSettings, "bodies">
+export type Limit = index<index<Bodies, "jointLimits">, string>
 
 -- A slot's look and its held item, the game's declared fields by name
-export type Outfit = Values
-export type Held = Values
-
--- Each logical joint's name in the game's rig template
-export type Joints = { [string]: string }
-
--- The animation detail distances, studs: full detail, planted feet and aim pitch
-export type Lod = {
-	full: number,
-	footIk: number,
-	aim: number,
-}
+export type Outfit = State.Values
+export type Held = State.Values
 
 -- The client settings the pool reads, under their own keys
 export type Settings = {
-	rig: Model,
+	rig: index<ClientSettings, "rig">,
 	joints: Joints,
 	animations: Animations,
-	dress: (rig: Model, outfit: Outfit, copy: boolean) -> (),
-	undress: (rig: Model) -> (),
-	hold: (rig: Model, held: Held?) -> (),
+	dress: index<ClientSettings, "dress">,
+	undress: index<ClientSettings, "undress">,
+	hold: index<ClientSettings, "hold">,
 	lod: Lod,
 	bodies: Bodies,
 }

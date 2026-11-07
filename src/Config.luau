@@ -273,7 +273,9 @@ local CLIENT_PAIRS: { Pair } = {
 }
 
 local State = require(script.Parent.Step.State)
+local Types = require(script.Parent.Types)
 
+type Character = Types.Character
 type Command = State.Command
 type Fields = State.Fields
 type GameCollision = State.GameCollision
@@ -297,12 +299,7 @@ type Pair = {
 	equal: boolean?,
 }
 
--- One capsule of a hit shape, in the character's own space: the feet at the origin, facing along -Z
-export type Shape = {
-	from: Vector3,
-	to: Vector3,
-	radius: number,
-}
+export type Shape = Types.Shape
 
 -- A posture's hit shapes: the body capsule, the zones by name, and the height a lean tilts the upper body about
 type PostureShapes = {
@@ -404,8 +401,7 @@ export type ServerSettings = {
 
 	teleport: { timeout: number },
 
-	-- Whiteoak TODO: type character as the server handle's Character once src/Server/Characters.luau declares it
-	beforeCommand: (character: any, command: Command) -> (),
+	beforeCommand: (character: Character, command: Command) -> (),
 	prestream: ((player: Player, at: CFrame) -> any)?, -- Returns a Promise that resolves once the destination is ready
 	bots: { rtt: number }?, -- Seconds a bot's connection reports; only a server that creates bots sets it
 }

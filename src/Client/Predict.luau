@@ -13,6 +13,7 @@ local Fields = require(script.Parent.Parent.Codec.Fields)
 local Math = require(script.Parent.Parent.Step.Math)
 local Move = require(script.Parent.Parent.Codec.Move)
 local OwnerState = require(script.Parent.Parent.Codec.OwnerState)
+local Public = require(script.Parent.Parent.Step.Public)
 local Sequence = require(script.Parent.Parent.Codec.Sequence)
 local State = require(script.Parent.Parent.Step.State)
 local Step = require(script.Parent.Parent.Step)
@@ -23,7 +24,6 @@ local LEAN_STEPS: number = Constants.LEAN_STEPS
 local MAX_COMMANDS: number = Constants.MAX_COMMANDS
 local MOVE_REPEATS: number = Constants.MOVE_REPEATS
 local TURN: number = 2 * math.pi -- Radians a turn, which a u16 angle counts in ANGLE_STEPS
-local PITCH_LIMIT: number = Constants.PITCH_LIMIT / ANGLE_STEPS * TURN -- A quarter turn, a look's pitch either way
 local WRAP: number = 2 ^ 16 -- The numbers a u16 command number or wire tick holds
 local DELAY_LIMIT: number = 2 ^ 8 - 1 -- The most milliseconds the Move's u8 delay holds
 local MILLISECONDS: number = 1000 -- A second's
@@ -100,10 +100,21 @@ local Listeners: { Listener } = {} -- The correction callbacks, in the order the
 
 local Body: boolean = false -- Whether an OwnerState has started the body
 local Newest: number = 0 -- The newest command number issued, skips included
+local Numbered: boolean = false -- Whether any body has numbered a command yet, which a later body numbers past
 local Acked: number = 0 -- The newest command the server says it ran
 local LastTick: number = 0 -- The server tick of the newest OwnerState read
 local TickOffset: number = 0 -- A command's number less the server tick it runs on
 local Trip: number? = nil -- The commands the client makes in one round trip, once a queue has shown it
+local Top: number? = nil -- The furthest tick the server's queue has reached, its tick plus its depth
+local Issued: boolean = false -- Whether a command was made since the last OwnerState read, which a trip counts in
+local Doubt: number = 0 -- OwnerStates judged in a row whose empty queue the trip puts a lead in
+local Searching: boolean = false -- Whether an empty queue proved the trip wrong, and the clock searches for its lead
+local Moved: boolean = false -- Whether that search has moved the clock yet
+local Landing: boolean = false -- Whether a search that moved the clock just ended, so the next state lifts its lead
+local Easing: boolean = false -- Whether the clock then eases down to the band's bottom from above
+local Floor: number = 0 -- While it searches, the least and the most the round trip in commands can be
+local Ceiling: number = math.huge
+local Limit: number = 0 -- The floor past which the search starts again from none
 local Settle: number? = nil -- The first command after a snap, before whose tick the clock judges nothing
 local Hold: number = 0 -- Ticks left that issue no command, after a backward snap
 local Rate: number = 1 -- The clock's nudged rate
@@ -111,8 +122,10 @@ local Clock: number = 0 -- Ticks owed, whose fraction places the drawn body betw
 local RelayDue: number = 0 -- Relay ticks owed
 local Fresh: number = 0 -- Commands made since the last Move
 local Correction: vector = vector.zero -- The visual error offset on the drawn body
-local LookYaw: number = 0 -- This frame's look, the base look turned by the head offset, radians
+local LookYaw: number = 0 -- This frame's base look, radians, and its head offset, degrees
 local LookPitch: number = 0
+local HeadYaw: number = 0
+local HeadPitch: number = 0
 
 local Predict = {}
 
@@ -241,6 +254,7 @@ local function issue(run: Run)
 	end
 
 	Newest = (Newest + 1) % WRAP
+	Numbered = true
 	command.number = Newest
 
 	local pressed: Pressed = command.pressed
@@ -260,6 +274,7 @@ local function issue(run: Run)
 
 	table.insert(Held, entry)
 	Fresh += 1
+	Issued = true
 	release()
 end
 
@@ -321,7 +336,8 @@ end
     Runs the client's clock for a frame: this frame's look read from the
     game, the nudged time added to what is owed, any past the game's time
     debt dropped, a tick for each whole one owed, and the visual error
-    offset shrunk at the game's decay
+    offset shrunk at the game's decay. Between two bodies only the command
+    numbers run on, a number for each tick owed
 --]]
 
 function Predict.frame(dt: number)
@@ -330,15 +346,20 @@ function Predict.frame(dt: number)
 		error(`Predict.frame takes a frame's seconds, finite and 0 or more, not {dt}`, 2)
 	end
 
+	-- Between two bodies the numbers still run with the time, so the next body's commands keep the last one's lead
 	if not Body then
+		if Numbered then
+			Clock = math.min(Clock + dt / run.world.delta, run.settings.ticks.debt)
+			while Clock >= 1 do
+				Clock -= 1
+				Newest = (Newest + 1) % WRAP
+			end
+		end
+
 		return
 	end
 
-	-- The head offset held to the game's cone, as the step holds a command's, and the pitch to a quarter turn
-	local yaw: number, pitch: number, headYaw: number, headPitch: number = run.settings.look()
-	local cone: number = run.world.settings.headCone
-	LookYaw = yaw + math.rad(math.clamp(headYaw, -cone, cone))
-	LookPitch = math.clamp(pitch + math.rad(math.clamp(headPitch, -cone, cone)), -PITCH_LIMIT, PITCH_LIMIT)
+	LookYaw, LookPitch, HeadYaw, HeadPitch = run.settings.look()
 
 	Clock = math.min(Clock + dt / run.world.delta * Rate, run.settings.ticks.debt)
 	while Clock >= 1 do
@@ -554,19 +575,39 @@ end
 
 --[[
     Starts the body from the first OwnerState: the server's state, the next
-    command numbered one past the server's, and each number read as running
-    on the server tick this one names for it
+    command numbered one past the server's, or past where an earlier body's
+    numbers have run on to, and each number read as running on the server
+    tick this one names for it. The round trip is unknown, so the clock
+    searches for its lead as when an empty queue proves a trip wrong, and
+    judges nothing until the server's tick reaches its first command
 --]]
 
-local function adopt()
+local function adopt(run: Run)
 	Body = true
 	State.copy(Server, Current)
 	State.copy(Server, Previous)
-	Newest = Server.command
+
+	-- A number an earlier body sent is never sent again, since the server may still hold that body's command for it,
+	-- and past the trip and lead of any playable link no earlier command can still be in flight
+	local ahead: number = Sequence.difference(Newest, Server.command)
+	if not Numbered or ahead <= 0 or ahead > HELD_LIMIT then
+		Newest = Server.command
+	end
+
 	Acked = Server.command
 	TickOffset = Sequence.difference(Server.command, Server.tick)
 	LookYaw = Current.facing
 	LookPitch = 0
+
+	-- With no round trip known to forget, the search's limit is the queue's reach alone
+	Searching = true
+	Moved = false
+	Landing = false
+	Easing = false
+	Floor = 0
+	Ceiling = math.huge
+	Limit = run.settings.ticks.ahead
+	Settle = (Newest + 1) % WRAP
 end
 
 --[[
@@ -621,19 +662,67 @@ local function reconcile(run: Run)
 end
 
 --[[
+    One move of the search for a lead an empty queue doesn't show, with the
+    round trip known only to lie from Floor to Ceiling, so the lead lies from
+    past less the ceiling to past less the floor. One that may be past the
+    queue's reach holds back until even the most it can be is the target.
+    Otherwise it is at most 0, so the floor rises to past and the clock
+    skips forward by the target. A floor past the search's limit starts the
+    search again from no bounds, with the limit doubled
+--]]
+
+local function search(ticks: Ticks, past: number, target: number)
+	local least: number = past - Ceiling
+	local most: number = past - Floor
+
+	if least > 0 or most >= ticks.ahead then
+		Hold = math.max(math.round(most - target), 0)
+	else
+		Floor = past
+
+		if Floor > Ceiling then
+			Ceiling = math.huge
+		end
+
+		if Floor > Limit then
+			Floor = 0
+			Ceiling = math.huge
+			Limit = math.max(Limit, 1) * 2
+			Hold = math.max(math.round(past - target), 0)
+		else
+			Newest = (Newest + math.max(math.round(target), 1)) % WRAP
+		end
+	end
+
+	Moved = true
+	Settle = (Newest + 1) % WRAP
+	Rate = 1
+end
+
+--[[
     Holds the client's clock at its lead, the commands the server holds
-    queued past the tick it runs. A queue between empty and the ahead limit
-    shows the lead and with it the round trip in commands, and any other
-    shows the lead only through that last trip. More than the game's resync
-    from the band's middle, the clock snaps: forward it skips numbers, and
-    backward it holds its commands back. Until the server's tick reaches
-    the first command after a snap, the clock judges nothing more
+    queued past the tick it runs. A queue its newest commands are feeding,
+    between empty and the ahead limit, shows the lead, and with room left
+    the round trip in commands too; any other shows it only through that
+    trip. A queue left empty past a trip's OwnerStates where the trip puts a
+    lead it would show proves the trip wrong, and the clock searches. A
+    search that moved the clock ends with the lead lifted to the target and
+    eased down from there to the band's bottom. Past the resync from the
+    band's middle it snaps, and judges nothing more until the server's tick
+    reaches the first command after the snap
 --]]
 
 local function clock(run: Run)
 	local ticks: Ticks = run.settings.ticks
 	local depth: number = Server.depth
-	local queued: boolean = depth > 0 and depth < ticks.ahead
+	local top: number = (Server.tick + depth) % WRAP
+	local furthest: number? = Top
+	local fed: boolean = furthest == nil or Sequence.difference(top, furthest) > 0
+	local queued: boolean = fed and depth > 0 and depth < ticks.ahead
+
+	if fed then
+		Top = top
+	end
 
 	if queued then
 		TickOffset = Sequence.difference(Server.command, Server.tick)
@@ -643,8 +732,37 @@ local function clock(run: Run)
 	local past: number = Sequence.difference(Newest, base)
 	local trip: number? = Trip
 	local lead: number = depth
-	if queued then
+
+	-- Commands queued arrived before their ticks, so the round trip is at most past less them
+	if Searching and depth > 0 then
+		Ceiling = math.min(Ceiling, past - depth)
+
+		-- A floor above it was raised before the trip shrank, and holds no more
+		if Floor > Ceiling then
+			Floor = 0
+		end
+	end
+
+	-- A full queue may have dropped newer commands, and an OwnerState read with no command made since the last, as
+	-- after a frozen frame, misses commands its round trip counts, so neither shows the trip
+	if queued and depth < ticks.ahead - 1 and Issued then
 		Trip = past - depth
+
+		-- A search's last skip lands anywhere from the band's bottom up, where a drift under a tick empties the queue
+		if Searching and Moved then
+			Landing = true
+			Easing = true
+		end
+
+		Searching = false
+	end
+
+	Issued = false
+
+	if queued then
+		lead = depth
+	elseif Searching then
+		lead = past - Floor
 	elseif trip then
 		lead = past - trip
 	end
@@ -660,8 +778,35 @@ local function clock(run: Run)
 		Settle = nil
 	end
 
+	-- An empty queue where the trip puts a lead it would show doubts it, until commands in flight would have landed
+	local doubted: boolean = depth == 0 and trip ~= nil and lead > 0 and lead < ticks.ahead
+	if doubted then
+		Doubt += 1
+	else
+		Doubt = 0
+	end
+
+	local landing: boolean = Landing
+	Landing = false
+
+	-- Eased down from above, the clock stops as the queue first reads the band's bottom, most of a tick above it
+	if Easing and not landing and lead <= ticks.leadMin then
+		Easing = false
+	end
+
 	local target: number = (ticks.leadMin + ticks.leadMax) / 2
-	if lead < target - ticks.resync then
+	if depth == 0 and Searching then
+		search(ticks, past, target)
+	elseif doubted and trip and Doubt > trip then
+		Trip = nil
+		Searching = true
+		Moved = false
+		Easing = false
+		Floor = 0
+		Ceiling = math.huge
+		Limit = math.max(trip, 0) + ticks.ahead
+		search(ticks, past, target)
+	elseif lead < target - ticks.resync or (landing and math.round(target - lead) >= 1) then
 		Newest = (Newest + math.round(target - lead)) % WRAP
 		Settle = (Newest + 1) % WRAP
 		Rate = 1
@@ -671,7 +816,7 @@ local function clock(run: Run)
 		Rate = 1
 	elseif lead < ticks.leadMin then
 		Rate = 1 + ticks.nudge
-	elseif lead > ticks.leadMax then
+	elseif lead > ticks.leadMax or (Easing and lead > ticks.leadMin) then
 		Rate = 1 - ticks.nudge
 	else
 		Rate = 1
@@ -694,7 +839,10 @@ function Predict.receive(data: buffer)
 	OwnerState.read(data, 0, buffer.len(data), Server, run.settings.layout, run.limits)
 
 	if not Body then
-		adopt()
+		adopt(run)
+		LastTick = Server.tick
+
+		return
 	elseif Sequence.difference(Server.tick, LastTick) <= 0 then
 		return
 	else
@@ -730,13 +878,6 @@ local function draw(): State
 	return Drawn
 end
 
--- This frame's look as a direction, along -Z at a yaw and pitch of 0, as the step walks
-local function look(): vector
-	local level: number = Math.cos(LookPitch)
-
-	return vector.create(-Math.sin(LookYaw) * level, Math.sin(LookPitch), -Math.cos(LookYaw) * level)
-end
-
 --[[
     The drawn body's cleared eye and the look it publishes: the base look
     the game gave this frame, turned by its head offset, so a turn never
@@ -749,7 +890,9 @@ function Predict.eye(): (vector, vector)
 		error("Predict.eye has no body until the first OwnerState starts one", 2)
 	end
 
-	return Eye.clear(draw(), run.world), look()
+	local cone: number = run.world.settings.headCone
+
+	return Eye.clear(draw(), run.world), Public.look(LookYaw, LookPitch, HeadYaw, HeadPitch, cone)
 end
 
 --[[
@@ -764,6 +907,52 @@ function Predict.state(): State?
 	end
 
 	return draw()
+end
+
+--[[
+    Ends the body, as when its character dies or the game replaces it, and
+    puts prediction back as it was before the first OwnerState: no command
+    is kept, no Move goes, and the next OwnerState starts a new body as the
+    first did. The command numbers alone run on with the time, so the next
+    body sends none again and keeps the lead, and the correction callbacks
+    stay connected
+--]]
+
+function Predict.reset()
+	started()
+
+	for index: number = #Held, 1, -1 do
+		local entry: Entry = Held[index]
+		entry.predicted = false
+		Held[index] = nil
+		table.insert(Spare, entry)
+	end
+
+	Body = false
+	Acked = 0
+	LastTick = 0
+	TickOffset = 0
+	Trip = nil
+	Top = nil
+	Issued = false
+	Doubt = 0
+	Searching = false
+	Moved = false
+	Landing = false
+	Easing = false
+	Floor = 0
+	Ceiling = math.huge
+	Limit = 0
+	Settle = nil
+	Hold = 0
+	Rate = 1
+	RelayDue = 0
+	Fresh = 0
+	Correction = vector.zero
+	Last.jump = false
+	Last.crouch = false
+	Last.sprint = false
+	Last.aim = false
 end
 
 --[[

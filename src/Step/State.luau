@@ -137,13 +137,13 @@ export type GameHit = {
 
 -- The shared table's collision key: a game's own four functions, or none of them and the instances engine casts may
 -- hit. Beside its own functions, include narrows the overlap probe to those parts, which otherwise tests every part
--- with CanCollide on
+-- with CanCollide on. Tread only reads each key, so a table of the functions a game builds in its own module fits
 export type GameCollision = {
-	ray: ((origin: Vector3, direction: Vector3) -> GameHit?)?,
-	sweep: ((center: Vector3, size: Vector3, direction: Vector3) -> GameHit?)?,
-	rest: ((center: Vector3, size: Vector3) -> number?)?,
-	sphere: ((center: Vector3, radius: number, direction: Vector3) -> GameHit?)?,
-	include: { Instance }?,
+	read ray: ((origin: Vector3, direction: Vector3) -> GameHit?)?,
+	read sweep: ((center: Vector3, size: Vector3, direction: Vector3) -> GameHit?)?,
+	read rest: ((center: Vector3, size: Vector3) -> number?)?,
+	read sphere: ((center: Vector3, radius: number, direction: Vector3) -> GameHit?)?,
+	read include: { Instance }?,
 }
 
 -- The water surface's height at a point, or nil for none

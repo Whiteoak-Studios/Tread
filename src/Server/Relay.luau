@@ -206,6 +206,8 @@ local Heard: { number } = { SILENT, SILENT, SILENT, SILENT } -- Each footstep ki
 
 local Run: number = 0 -- The relay runs so far, which every timing counts in
 local TickWire: number = 0 -- The relay tick this run's blocks carry, a u16
+local RecordsSent: number = 0 -- The records the tier ticks' lists placed in a block, since start
+local RecordsCut: number = 0 -- And those a viewer's room left out
 
 -- Each slot this run, by slot: whether it is present, its life, its kind and its encoded record
 local Present: buffer = buffer.create(SLOTS * 4) -- u32: the last run it was handed in with an entry
@@ -1090,10 +1092,12 @@ local function placeRecords(view: View, list: { number }, count: number, room: n
 	for index: number = 1, count do
 		local slot: number = list[index]
 		if not fits(view, RECORD_BYTES, 0, room) then
+			RecordsCut += count - index + 1
 			break
 		end
 
 		writeRecord(view, slot)
+		RecordsSent += 1
 	end
 
 	for index: number = 1, count do
@@ -1636,6 +1640,15 @@ end
 
 function Relay.remove(key: Key)
 	Views[key] = nil
+end
+
+--[[
+    The running totals since start of the records the tier ticks placed in
+    a viewer's blocks, and of those the viewer's room left out
+--]]
+
+function Relay.counts(): (number, number)
+	return RecordsSent, RecordsCut
 end
 
 return Relay

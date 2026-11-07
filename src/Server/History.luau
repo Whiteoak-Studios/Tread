@@ -123,6 +123,7 @@ local Scratch: Word = {
 
 local Present: number? = nil -- The newest relay tick any sample was written or seeded at
 local Capacity: number = 0 -- Samples a slot's ring holds, the history's length in relay ticks and the tick at its end
+local Bytes: number = 0 -- The bytes every slot's ring holds together, each ring kept from its first write
 local StartedAt: number = 0 -- The os.clock a sample's server time counts from
 local Started: boolean = false
 
@@ -216,6 +217,7 @@ local function bufferFor(slot: number): buffer
 
 	local made: buffer = buffer.create(Capacity * SAMPLE_BYTES)
 	Buffers[slot] = made
+	Bytes += buffer.len(made)
 
 	return made
 end
@@ -728,6 +730,15 @@ function History.rewindFor(
 	end
 
 	return math.max(math.min(chosen, latest), earliest), inside, offset
+end
+
+--[[
+    The bytes the history holds, every slot's ring of samples together,
+    which stats reads
+--]]
+
+function History.bytes(): number
+	return Bytes
 end
 
 return History
