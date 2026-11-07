@@ -14,6 +14,7 @@ local Promise: any = require(Packages.Promise)
 local Tread = require(Packages.Tread)
 
 local Corrections = require(ServerScriptService.Server.Corrections)
+local Forward = require(ServerScriptService.Server.Forward)
 local Shared = require(ReplicatedStorage.Shared.Dev.Config)
 local Spawns = require(ServerScriptService.Server.Spawns)
 
@@ -112,7 +113,8 @@ end
     Starts the dev game once a server: lays the plaza's spawn points, which
     fails at once in a place without them, starts Tread's server with the
     dev shared table and the dev game's server settings, binds the
-    correction telemetry, and builds a character for each player who joins
+    correction telemetry, forwards each player's reports to them, and
+    builds a character for each player who joins
 --]]
 
 function Game.start()
@@ -142,9 +144,11 @@ function Game.start()
 		beforeCommand = beforeCommand,
 	}
 
-	Running = Tread.startServer(Shared, settings)
+	local server: Tread.Server = Tread.startServer(Shared, settings)
+	Running = server
 	Settings = settings
 	Corrections.start()
+	Forward.start(server)
 
 	-- Each lives as long as the server, and a player's teardown ends their character
 	Players.PlayerAdded:Connect(join)

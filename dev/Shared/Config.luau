@@ -19,6 +19,7 @@ local CRAWL_SPEED: number = 2 -- Studs/s a downed body crawls at
 local JUMP_COOLDOWN: number = 0.5 -- Seconds between jumps, and after a body is built
 local LANDING_LOCK: number = 0.1 -- Seconds after landing before a jump
 local SHOT_LOCK: number = 0.5 -- Seconds after a shot before a sprint
+local FORWARD_ONLY_SPRINT: boolean = true -- Sprint only straight ahead; off, a strafe or a backward move sprints too
 local CONTENT_WAIT: number = 10 -- Seconds a client waits at boot for the test content's folder
 
 local COYOTE_TICKS: number = math.round(COYOTE * SIMULATION_RATE)
@@ -33,9 +34,10 @@ assert(TestContent, `Workspace.TestContent did not arrive within {CONTENT_WAIT} 
 
 --[[
     Frontier Zero's movement rules, run inside Tread's step on the server
-    and in the owner's prediction: the jump pacing, forward-only sprint with
-    its post-shot lock, the aim speed, and the downed crawl, which stops
-    while someone revives the body. They allocate nothing and never yield
+    and in the owner's prediction: the jump pacing, sprint forward only
+    while the flag holds, its post-shot lock, the aim speed, and the downed
+    crawl, which stops while someone revives the body. They allocate
+    nothing and never yield
 --]]
 
 local function rules(step: Tread.RuleStep, allow: Tread.Allow): number
@@ -80,9 +82,9 @@ local function rules(step: Tread.RuleStep, allow: Tread.Allow): number
 		block.sinceJump = 0
 	end
 
-	-- Forward only, never while aiming and never inside the post-shot lock
-	local forward: boolean = command.forward > 0 and command.right == 0
-	allow.sprint = allow.sprint and forward and not command.aim and block.sinceShot >= SHOT_LOCK_TICKS
+	-- Forward only while the flag holds, never while aiming and never inside the post-shot lock
+	local heading: boolean = not FORWARD_ONLY_SPRINT or (command.forward > 0 and command.right == 0)
+	allow.sprint = allow.sprint and heading and not command.aim and block.sinceShot >= SHOT_LOCK_TICKS
 
 	if command.aim then
 		return AIM_SPEED
@@ -147,6 +149,7 @@ local Shared: Tread.Shared = {
 		crouchDepth = 2.22,
 		mantleHeight = 4,
 		mantleTime = 0.5,
+		mantleArc = 0.5, -- Studs the mantle's path arches over the top before it settles onto it
 		ladderJump = 25,
 		headSlide = 4, -- Studs/s a body slides off another's head
 		lyingBox = { length = 5, width = 2, height = 2, lift = 1 },

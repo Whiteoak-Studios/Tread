@@ -39,6 +39,9 @@ export type Exported<T> = {
 }
 
 local runtime: Volt.Runtime
+local beginReliable: (number) -> (number, buffer)
+local trimReliable: (number) -> ()
+local refuseReliable: (string) -> never
 
 local function readpress(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
 	if cursor + 1 > length then
@@ -96,9 +99,46 @@ local function readshot(player: (Player | Bot)?, packet: buffer, cursor: number,
 	return runtime:deliver(3, player, cursor, sideCursor, sequence, target)
 end
 
+local function writereport(kind: string, detail: string, dropped: number)
+	local offset: number, out: buffer = beginReliable(87)
+	buffer.writeu8(out, offset, 1)
+
+	if type(kind) ~= "string" then
+		refuseReliable("report.kind: expected string")
+	end
+
+	if #kind < 1 or #kind > 16 then
+		refuseReliable("report.kind: length out of range")
+	end
+
+	buffer.writeu8(out, offset + 1, #kind - 1)
+
+	if type(detail) ~= "string" then
+		refuseReliable("report.detail: expected string")
+	end
+
+	if #detail > 64 then
+		refuseReliable("report.detail: length out of range")
+	end
+
+	buffer.writeu8(out, offset + 2, #detail)
+
+	if type(dropped) ~= "number" or bit32.band(dropped, 4294967295) ~= dropped then
+		refuseReliable("report.dropped: expected u32")
+	end
+
+	buffer.writeu32(out, offset + 3, dropped)
+	offset += 7
+	buffer.writestring(out, offset, kind)
+	offset += #kind
+	buffer.writestring(out, offset, detail)
+	offset += #detail
+	trimReliable(offset)
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x28BB1F53,
+	hash = 0x1B5F716C,
 	scope = "Dev",
 	side = "server",
 	idBytes = 1,
@@ -118,8 +158,16 @@ runtime = Volt.start({
 		[3] = { name = "shot", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readshot },
 	},
 
-	outgoing = {},
+	outgoing = {
+		[1] = { name = "report", kind = "event", reliable = true, minBytes = 8, maxBytes = 87 },
+	},
 })
+
+beginReliable = runtime.reliable.begin
+trimReliable = runtime.reliable.trim
+refuseReliable = runtime.reliable.refuse
+
+local before: { [number]: Volt.Hook } = runtime.before
 
 local Network = {
 	press = table.freeze({
@@ -151,6 +199,30 @@ local Network = {
 			return runtime:iter(3)
 		end,
 	}) :: ServerListener<(number, number?)>,
+
+	report = table.freeze({
+		fire = function (player: Player | Bot, kind: string, detail: string, dropped: number)
+			if (before[1] == nil or before[1](player, kind, detail, dropped)) and runtime:target(player) then
+				writereport(kind, detail, dropped)
+			end
+		end,
+
+		fireAll = function (kind: string, detail: string, dropped: number)
+			runtime:broadcast(1, nil, nil, writereport, kind, detail, dropped)
+		end,
+
+		fireList = function (players: { Player | Bot }, kind: string, detail: string, dropped: number)
+			runtime:broadcast(1, players, nil, writereport, kind, detail, dropped)
+		end,
+
+		fireExcept = function (player: Player | Bot, kind: string, detail: string, dropped: number)
+			runtime:broadcast(1, nil, player, writereport, kind, detail, dropped)
+		end,
+
+		fireSet = function (players: { [Player | Bot]: true }, kind: string, detail: string, dropped: number)
+			runtime:broadcast(1, players, nil, writereport, kind, detail, dropped)
+		end,
+	}) :: ServerEvent<(string, string, number)>,
 
 	version = "0.1.0",
 
@@ -200,6 +272,7 @@ Network.events = table.freeze({
 	["press"] = Network.press,
 	["corrected"] = Network.corrected,
 	["shot"] = Network.shot,
+	["report"] = Network.report,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

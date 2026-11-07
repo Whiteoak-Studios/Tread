@@ -1,7 +1,7 @@
 --[[
     The client's rig pool: rigs cloned from the game's template, dressed for
     a slot and given back, posed from a step state at the detail their
-    distance earns, and ragdolled when they die
+    distance earns, ragdolled when they die, and the owner's first-person copy
 --]]
 
 --!strict
@@ -14,11 +14,16 @@ local Workspace = game:GetService("Workspace")
 local Animate = require(script.Animate)
 local Config = require(script.Parent.Parent.Config)
 local Constants = require(script.Parent.Parent.Constants)
+local FirstPerson = require(script.FirstPerson)
 local Ragdoll = require(script.Ragdoll)
 local State = require(script.Parent.Parent.Step.State)
 
 local SLOTS: number = Constants.SLOTS
 local MOVE_EVENTS: Enum.BulkMoveMode = Enum.BulkMoveMode.FireCFrameChanged -- A placed root fires only its CFrame change
+local WORLD_RIG: boolean = false -- The dress hook's copy flag for a world rig, the body other viewers see
+local FIRST_PERSON: boolean = true -- Its flag for the owner's copy, which leaves off what the copy never shows
+local NEAR: number = 0 -- Studs from the eye the copy is posed at, since the eye is inside it, so at full detail
+local LEVEL: number = 0 -- The copy's aim pitch, radians: the torso turns with the camera for other viewers only
 
 -- The 15 R15 joints mode A's adapter maps, each a logical name the game's joints map names an instance for
 local JOINTS: { string } = {
@@ -99,8 +104,13 @@ type Fields = {
 	_layering: RBXScriptConnection?, -- The PreSimulation layer, from the first draw until destroy
 	_moved: { BasePart }, -- BulkMoveTo's lists, reused for every pose
 	_targets: { CFrame },
+	_own: number?, -- The slot checked out as the local player's own, nil while none is
+	_copy: Entry?, -- Its first-person copy, held apart from every slot, nil while it has none
+	_firstPerson: FirstPerson.FirstPerson, -- What the local player sees of their own rigs
 	_destroyed: boolean,
 }
+
+local Thrown: string = "" -- The last world rig's dress hook error, with its stack, which checkout raises again
 
 -- Errors naming a value that is no slot, from the caller of the member named
 local function checkSlot(slot: number, member: string)
@@ -161,6 +171,37 @@ end
 -- Runs where a callback's error was raised, so its warning keeps the callback's stack
 local function warnFailure(message: any)
 	warn(`A marker callback threw, and the other callbacks still ran: {debug.traceback(tostring(message), 2)}`)
+end
+
+-- Runs where a rig hook raised an error for the owner's first-person copy, so its warning keeps the hook's stack
+local function warnCopy(message: unknown)
+	local stack: string = debug.traceback(tostring(message), 2)
+	warn(`A rig hook threw for the first-person copy, and its world rig carried on without it: {stack}`)
+end
+
+-- Runs where an undress hook raised an error on a rig whose dress threw, so its warning keeps the hook's stack
+local function warnUndress(message: unknown)
+	local stack: string = debug.traceback(tostring(message), 2)
+	warn(`A rig's undress hook threw after its dress hook did, so the rig was destroyed: {stack}`)
+end
+
+-- Keeps the error a world rig's dress hook raised with the stack that raised it, taken before the stack unwinds
+local function keep(message: unknown)
+	Thrown = debug.traceback(tostring(message), 2)
+end
+
+-- Takes a rig's look off and puts a new one on
+local function restyle(settings: Settings, rig: Model, outfit: Outfit, copy: boolean)
+	settings.undress(rig)
+	settings.dress(rig, outfit, copy)
+end
+
+-- The aim and lean layer and the planted legs of one rig, if it is drawn
+local function layer(entry: Entry)
+	local animated: Animated? = entry.animated
+	if animated and entry.drawn then
+		Animate.layer(animated)
+	end
 end
 
 --[[
@@ -230,6 +271,9 @@ function Rigs.new(settings: Settings, drawDistance: number, collision: Collision
 		_layering = nil :: RBXScriptConnection?,
 		_moved = {} :: { BasePart },
 		_targets = {} :: { CFrame },
+		_own = nil :: number?,
+		_copy = nil :: Entry?,
+		_firstPerson = FirstPerson.new(),
 		_destroyed = false,
 	}, Rigs)
 end
@@ -237,25 +281,82 @@ end
 --[[
     A rig dressed for a slot with the slot's look: one back from the pool,
     or a new clone of the template when the pool is empty. It stays out of
-    Workspace until its first pose draws it
+    Workspace until its first pose draws it. The local player's own rig is
+    hidden on this screen, and a second rig from the pool comes out with it
+    as its first-person copy. A dress hook that throws gives the rig back
+    and raises its error again, with the hook's stack
+
+    @ own | whether the slot is the local player's own
 --]]
 
-function Rigs.checkout(self: Self, slot: number, outfit: Outfit): Model
+function Rigs.checkout(self: Self, slot: number, outfit: Outfit, own: boolean?): Model
 	checkSlot(slot, "checkout")
 	if self._slots[slot] then
 		error(`Slot {slot} already has a rig checked out`, 2)
 	elseif type(outfit) ~= "table" then
 		error(`Rigs.checkout takes the slot's look as a table, not a {typeof(outfit)}`, 2)
+	elseif own and self._own ~= nil then
+		error(`Slot {self._own}'s rig is already the local player's own, so slot {slot}'s can't be`, 2)
 	end
 
 	local entry: Entry = table.remove(self._pool) or self:_build()
-	local copy: boolean = false -- A world rig, never the first-person copy
+	local dressed: boolean = xpcall(self._settings.dress, keep, entry.rig, outfit, WORLD_RIG)
+	if not dressed then
+		self:_giveBack(entry)
+		error(Thrown, 0)
+	end
 
-	self._settings.dress(entry.rig, outfit, copy)
 	entry.slot = slot
 	self._slots[slot] = entry
 
+	if own then
+		local copy: Entry? = self:_take(outfit)
+		self._own = slot
+		self._copy = copy
+		self._firstPerson:build(entry.rig, copy)
+	end
+
 	return entry.rig
+end
+
+--[[
+    The local player's first-person copy, a rig from the pool dressed with
+    their look as the copy and held apart from every slot, so its markers
+    reach nobody. A dress hook that throws is warned, and gives the rig back
+    with no copy
+--]]
+
+function Rigs._take(self: Self, outfit: Outfit): Entry?
+	local entry: Entry = table.remove(self._pool) or self:_build()
+	local dressed: boolean = xpcall(self._settings.dress, warnCopy, entry.rig, outfit, FIRST_PERSON)
+	if not dressed then
+		self:_giveBack(entry)
+		return nil
+	end
+
+	return entry
+end
+
+--[[
+    Gives back a rig whose dress hook threw before any slot held it:
+    undressed under its own guard and pooled, or, when its undress throws
+    too, destroyed and dropped from the pool's rigs
+--]]
+
+function Rigs._giveBack(self: Self, entry: Entry)
+	local undressed: boolean = xpcall(self._settings.undress, warnUndress, entry.rig)
+	if undressed then
+		table.insert(self._pool, entry)
+		return
+	end
+
+	local animated: Animated? = entry.animated
+	if animated then
+		Animate.release(animated)
+	end
+
+	forget(self._rigs, entry)
+	entry.rig:Destroy()
 end
 
 function Rigs._build(self: Self): Entry
@@ -294,7 +395,9 @@ function Rigs._entry(self: Self, slot: number, member: string): Entry
 end
 
 --[[
-    Puts a new look on a slot's rig, the old one taken off first
+    Puts a new look on a slot's rig, the old one taken off first, and on
+    the local player's own first-person copy too, each of their parts then
+    hidden on this screen as before
 --]]
 
 function Rigs.dress(self: Self, slot: number, outfit: Outfit)
@@ -303,34 +406,82 @@ function Rigs.dress(self: Self, slot: number, outfit: Outfit)
 		error(`Rigs.dress takes the slot's look as a table, not a {typeof(outfit)}`, 2)
 	end
 
-	local copy: boolean = false -- A world rig, never the first-person copy
-	self._settings.undress(entry.rig)
-	self._settings.dress(entry.rig, outfit, copy)
+	local settings: Settings = self._settings
+	restyle(settings, entry.rig, outfit, WORLD_RIG)
+
+	if slot == self._own then
+		local copy: Entry? = self._copy
+		if copy then
+			xpcall(restyle, warnCopy, settings, copy.rig, outfit, FIRST_PERSON)
+		end
+
+		self._firstPerson:refresh()
+	end
 end
 
 --[[
     Puts the held item a slot's held-item fields name on its rig, or clears
-    the hands with nil
+    the hands with nil, and on the local player's own first-person copy
+    too, each of their parts then hidden on this screen as before
 --]]
 
 function Rigs.hold(self: Self, slot: number, held: Held?)
 	local entry: Entry = self:_entry(slot, "hold")
-	self._settings.hold(entry.rig, held)
+	local settings: Settings = self._settings
+	settings.hold(entry.rig, held)
 	entry.holding = held ~= nil
+
+	if slot == self._own then
+		local copy: Entry? = self._copy
+		if copy then
+			local holds: boolean = xpcall(settings.hold, warnCopy, copy.rig, held)
+			if holds then
+				copy.holding = held ~= nil
+			end
+		end
+
+		self._firstPerson:refresh()
+	end
 end
 
 --[[
     Undresses a slot's rig and gives it back to the pool, its held item
-    cleared first. A rig that ragdolled is a body, which leaves the pool, so
-    it is destroyed instead
+    cleared first, and the local player's own first-person copy with it. A
+    rig that ragdolled is a body, which leaves the pool, so it is destroyed
+    instead
 --]]
 
 function Rigs.release(self: Self, slot: number)
 	local entry: Entry = self:_entry(slot, "release")
-	local settings: Settings = self._settings
+	if slot == self._own then
+		self:_disown()
+	end
 
 	self._slots[slot] = nil
 	entry.slot = nil
+	self:_put(entry)
+end
+
+--[[
+    Ends the local player's own rig as their own: both their rigs shown on
+    this screen again, as the pool and a body need them, and the copy back
+    in the pool, its hooks under their own guard
+--]]
+
+function Rigs._disown(self: Self)
+	self._own = nil
+	self._firstPerson:release()
+
+	local copy: Entry? = self._copy
+	if copy then
+		self._copy = nil
+		xpcall(self._put, warnCopy, self, copy)
+	end
+end
+
+-- Stops, clears and undresses a rig no slot holds any more, then pools it, or destroys it once it is a body
+function Rigs._put(self: Self, entry: Entry)
+	local settings: Settings = self._settings
 
 	local animated: Animated? = entry.animated
 	if animated then
@@ -361,7 +512,9 @@ end
     out of Workspace past the draw distance, and inside it placed by its
     root, playing the state's track, with its lean, its aim within lod.aim,
     full detail within lod.full and its feet planted within lod.footIk. A
-    ragdoll is left to its physics. Past a rig's first draw it makes no
+    ragdoll is left to its physics. The local player's own first-person
+    copy is posed from the same state where its world rig stands, at full
+    detail, leaning with no aim pitch. Past a rig's first draw it makes no
     table, closure or string; a move, a new aim or lean and a planted foot's
     cast make the engine's own CFrames and results
 
@@ -371,6 +524,15 @@ end
 
 function Rigs.pose(self: Self, slot: number, state: State, distance: number, pitch: number)
 	local entry: Entry = self:_entry(slot, "pose")
+	self:_draw(entry, state, distance, pitch)
+
+	local copy: Entry? = self._copy
+	if copy and slot == self._own then
+		self:_draw(copy, state, NEAR, LEVEL)
+	end
+end
+
+function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pitch: number)
 	if entry.body then
 		return
 	end
@@ -506,13 +668,15 @@ function Rigs._read(self: Self, id: string, animation: Animation)
 	end)
 end
 
--- The aim and lean layer and the planted legs of every drawn rig, at each simulation step
+-- The aim and lean layer and the planted legs of every drawn rig, the copy's included, at each simulation step
 function Rigs._layer(self: Self)
 	for _, entry: Entry in self._slots do
-		local animated: Animated? = entry.animated
-		if animated and entry.drawn then
-			Animate.layer(animated)
-		end
+		layer(entry)
+	end
+
+	local copy: Entry? = self._copy
+	if copy then
+		layer(copy)
 	end
 end
 
@@ -539,7 +703,9 @@ end
 --[[
     Ragdolls a dying slot's rig, re-keyed to its body's slot: its tracks
     stop at once and its joints go limp under the bodies settings, pushed
-    along the death's attack direction, none for a death with no push
+    along the death's attack direction, none for a death with no push. The
+    local player's own rig shows on this screen again as a body, and its
+    first-person copy goes back to the pool
 
     @ body | the body's slot, which the rig is drawn for from now on
     @ push | the attack's direction, nil for no push
@@ -554,6 +720,10 @@ function Rigs.ragdoll(self: Self, slot: number, body: number, push: vector?)
 	checkSlot(body, "ragdoll")
 	if body ~= slot and self._slots[body] then
 		error(`Slot {body} already has a rig, so slot {slot}'s body can't take its rig`, 2)
+	end
+
+	if slot == self._own then
+		self:_disown()
 	end
 
 	self._slots[slot] = nil
@@ -575,6 +745,21 @@ function Rigs.ragdoll(self: Self, slot: number, body: number, push: vector?)
 	local bodies: Bodies = self._settings.bodies
 	local torso: BasePart = partOf(entry.joints.Waist)
 	entry.body = Ragdoll.start(entry.rig, entry.joints, torso, bodies, Ragdoll.push(push, bodies))
+end
+
+--[[
+    Shows or hides part of the local player's own body on this screen: the
+    first-person copy's arms or chest, the whole copy, or the world rig,
+    each setting kept from one body to the next
+--]]
+
+function Rigs.show(self: Self, part: FirstPerson.Part, shown: boolean)
+	local problem: string? = FirstPerson.refuse(part, shown)
+	if problem then
+		error(`Rigs.show {problem}`, 2)
+	end
+
+	self._firstPerson:show(part, shown)
 end
 
 --[[
@@ -629,6 +814,8 @@ function Rigs.destroy(self: Self)
 	table.clear(self._pool)
 	table.clear(self._slots)
 	table.clear(self._listeners)
+	self._own = nil
+	self._copy = nil
 	self._folder:Destroy()
 end
 

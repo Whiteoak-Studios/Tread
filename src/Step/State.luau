@@ -222,6 +222,7 @@ export type Settings = {
 	crouchDepth: number, -- The depth past which crouch is refused
 	mantleHeight: number, -- The mantle's reach above the last ground
 	mantleTime: number,
+	mantleArc: number, -- How far the mantle's path arches over the point where its feet clear the top
 	ladderJump: number,
 	headSlide: number, -- How fast a character slides off another's head
 	lyingBox: LyingBox,

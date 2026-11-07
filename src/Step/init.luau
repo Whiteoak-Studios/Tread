@@ -23,6 +23,7 @@ local COUNTERS: number = 2 ^ Constants.COUNTER_BITS -- The jump and land counter
 local TURN: number = 2 * math.pi -- Radians a turn, which a u16 angle counts in ANGLE_STEPS
 local TIMER_LIMIT: number = Constants.TIMER_LIMIT
 local EXACT_EVERY: number = Constants.EXACT_EVERY
+local CUT: number = Constants.POSITION_QUANTUM -- How far short of its move a rise ends when cut, past float32 rounding
 local AIR: Enum.Material = Enum.Material.Air -- The ground's material off the ground
 local WATER: Enum.Material = Enum.Material.Water -- The material a body meets entering water
 
@@ -258,9 +259,23 @@ local function land(state: State, world: World, falling: number)
 end
 
 --[[
+    A rise something above cut short ends there: when a move up from feet
+    at from came short of up, a ceiling, an overhang or another body's hull
+    stopped it, so the upward speed drops to 0 and the body falls from the
+    next tick
+--]]
+
+local function bump(state: State, from: number, up: number)
+	local velocity: vector = state.velocity
+	if up > 0 and velocity.y > 0 and state.position.y - from < up - CUT then
+		state.velocity = vector.create(velocity.x, 0, velocity.z)
+	end
+end
+
+--[[
     Ground: the level velocity set to the move at once, a jump taking the
-    body into the air, then the walk with its step up and snap, or the fall
-    a jump starts
+    body into the air and ending its rise against anything above, then the
+    walk with its step up and snap, or the fall a jump starts
 --]]
 
 local function ground(state: State, _: Command, world: World)
@@ -274,8 +289,10 @@ local function ground(state: State, _: Command, world: World)
 		state.jumps = (state.jumps + 1) % COUNTERS
 	end
 
+	local from: number = state.position.y
 	state.velocity = vector.create(targetX, rise, targetZ)
 	local below: State? = Collide.move(state, vector.create(targetX * delta, rise * delta, targetZ * delta), world)
+	bump(state, from, rise * delta)
 
 	if state.grounded then
 		state.mode = "Ground"
@@ -289,7 +306,8 @@ end
 --[[
     Air: the level velocity eased toward the move at the game's air ease,
     gravity to the terminal speed or a jump the rules allow, then the fall
-    with its ground probe, and a landing when it finds ground
+    with its ground probe, a rise ended against anything above, and a
+    landing when it finds ground
 --]]
 
 local function air(state: State, _: Command, world: World)
@@ -308,8 +326,10 @@ local function air(state: State, _: Command, world: World)
 		vy = math.max(velocity.y - settings.gravity * delta, -settings.terminal)
 	end
 
+	local from: number = state.position.y
 	state.velocity = vector.create(vx, vy, vz)
 	local below: State? = Collide.move(state, vector.create(vx * delta, vy * delta, vz * delta), world)
+	bump(state, from, vy * delta)
 	if not state.grounded then
 		return
 	end

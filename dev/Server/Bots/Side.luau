@@ -26,8 +26,6 @@ type Network = typeof(require(Packages.Tread.Network.Client))
 --]]
 
 return function (bot: Volt.Bot): Network
-	-- Whiteoak TODO: start the copy on the bot's transport through Volt itself once Volt can start a generated
-	-- module on a transport it is handed, a Volt task, in place of handing Volt.start the transport for one require
 	local transport: Volt.Transport = Volt.connectBot(bot, SCOPE)
 	local copy: ModuleScript = ClientModule:Clone()
 	local start = Volt.start
@@ -35,6 +33,8 @@ return function (bot: Volt.Bot): Network
 	-- A server-only home while it loads, so no client ever sees the copy
 	copy.Parent = ServerStorage
 
+	-- A generated module starts itself through Volt.start with no transport of its own, so the one require of the copy
+	-- gets a Volt.start that hands it the bot's
 	Volt.start = function (schema: Volt.Schema, _: Volt.Transport?): Volt.Runtime
 		return start(schema, transport)
 	end

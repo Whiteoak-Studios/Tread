@@ -1,7 +1,7 @@
 --[[
     The mantle: a jump press facing a ledge in reach finds it with the hull's
-    sweeps, then a fixed path runs straight up and forward onto its top
-    over the game's mantle time, swept each tick it moves
+    sweeps, then a fixed path rises beside the face and arches over onto its
+    top over the game's mantle time, swept each tick it moves
 --]]
 
 --!strict
@@ -16,11 +16,13 @@ local SKIN: number = Constants.SKIN
 local RISE_QUANTUM: number = Constants.EYE_QUANTUM -- The step the state's mantle rise rides in
 local RISE_LIMIT: number = (2 ^ Constants.EYE_BITS - 1) * RISE_QUANTUM -- The highest rise that u8 holds
 local MIN_MOVE: number = Constants.POSITION_QUANTUM -- A path tick shorter than one quantum moves without a sweep
+local CLEARS_AT: number = 0.5 -- How far into its tick the feet reach the rise, so that tick turns half the corner
 local AIR: Enum.Material = Enum.Material.Air
 
 type Collision = State.Collision
 type Command = State.Command
 type Hit = State.Hit
+type Mode = State.Mode
 type Posture = State.Posture
 type Settings = State.Settings
 type State = State.State
@@ -28,24 +30,41 @@ type World = State.World
 
 local Mantle = {}
 
+-- How far the path goes ahead from the face: the hull's width and a skin either side, so it ends a skin past the face
+local function overOf(settings: Settings): number
+	return settings.radius + settings.radius + SKIN + SKIN
+end
+
 --[[
     Whether a hull of size has room for the path from feet at x, y, z: up
-    by the rise beside the face and then ahead by the path's move at the
-    top's height, each with a skin past it, and space with a skin over its
-    top where the path ends
+    beside the face by the rise and the arc, ahead by the path's move at
+    every height from the rise to the arc over it, each with a skin past
+    it, and space with a skin over its top where the path ends
 --]]
 
-local function room(world: World, size: vector, x: number, y: number, z: number, rise: number, ahead: vector): boolean
+local function room(
+	world: World,
+	size: vector,
+	x: number,
+	y: number,
+	z: number,
+	rise: number,
+	arc: number,
+	ahead: vector
+): boolean
 	local collision: Collision = world.collision
 	local half: number = size.y / 2
 
-	if collision.sweep(vector.create(x, y + half, z), size, vector.create(0, rise + SKIN, 0)) then
+	-- To the arc's height, so the tall sweep ahead never starts inside a part it would then skip
+	if collision.sweep(vector.create(x, y + half, z), size, vector.create(0, rise + arc + SKIN, 0)) then
 		return false
 	end
 
+	-- One box the hull's height and the arc's together covers the hull at every height the path goes ahead at
+	local tall: vector = vector.create(size.x, size.y + arc, size.z)
 	local length: number = math.sqrt(ahead.x * ahead.x + ahead.z * ahead.z)
 	local reach: vector = ahead * ((length + SKIN) / length)
-	if collision.sweep(vector.create(x, y + rise + half, z), size, reach) then
+	if collision.sweep(vector.create(x, y + rise + tall.y / 2, z), tall, reach) then
 		return false
 	end
 
@@ -56,15 +75,24 @@ local function room(world: World, size: vector, x: number, y: number, z: number,
 end
 
 --[[
-    Starts a mantle on a jump press when the body faces a ledge: a face
-    too steep to walk within its hull's radius ahead, a walkable top past
-    it no higher than the game's reach above the ground it last stood on,
-    or above its feet for a swimmer, and higher than a step, and room for
-    the path. It ends standing where the standing hull fits, or crouched,
-    and crouched for a body crouched now. Does nothing otherwise
+    The ledge a jump press would mantle onto from where the body is, found
+    as a press finds it and changing nothing: a walking body on the ground,
+    in the air or swimming and not downed, facing a face too steep to walk
+    within its hull's radius ahead with no body nearer, a walkable top past
+    it higher than a step and no higher than the game's reach above the
+    ground it last stood on, or above its feet for a swimmer, and room for
+    the path. Gives back the posture it would end in, nil for no mantle,
+    then the feet's x and z at the face, where the path starts, and its rise
 --]]
 
-function Mantle.start(state: State, world: World)
+function Mantle.find(state: State, world: World): (Posture?, number, number, number)
+	local mode: Mode = state.mode
+	if state.moveMode ~= "Walk" or state.posture == "Downed" then
+		return nil, 0, 0, 0
+	elseif mode ~= "Ground" and mode ~= "Air" and mode ~= "Swim" then
+		return nil, 0, 0, 0
+	end
+
 	local settings: Settings = world.settings
 	local collision: Collision = world.collision
 	local radius: number = settings.radius
@@ -80,7 +108,7 @@ function Mantle.start(state: State, world: World)
 	local toward: vector = vector.create(aheadX * radius, 0, aheadZ * radius)
 	local face: Hit? = collision.sweep(center, size, toward)
 	if not face then
-		return
+		return nil, 0, 0, 0
 	end
 
 	-- Read before the next cast reuses the hit
@@ -88,30 +116,31 @@ function Mantle.start(state: State, world: World)
 	local distance: number = face.distance
 	local facing: number = -(aheadX * normal.x + aheadZ * normal.z)
 	if facing <= 0 or normal.y >= settings.walkable then
-		return
+		return nil, 0, 0, 0
 	end
 
 	local travel: number = math.max(distance - SKIN / facing, 0)
 	local bodies: number, _: vector, _: State? = Hulls.sweep(state, center, size, toward, world)
 	if bodies <= distance then
-		return
+		return nil, 0, 0, 0
 	end
 
 	-- 2) The top, swept down from above the reach just past the face, to a step's height over the feet
 	local base: number = state.groundHeight
-	if state.mode == "Swim" then
+	if mode == "Swim" then
 		base = feet.y
 	end
 
 	local reach: number = base + settings.mantleHeight
 	local lowest: number = feet.y + settings.stepHeight
 	if reach <= lowest then
-		return
+		return nil, 0, 0, 0
 	end
 
-	local x: number = feet.x + aheadX * travel
-	local z: number = feet.z + aheadZ * travel
-	local over: number = width + SKIN + SKIN -- Past the face by a skin
+	-- On the position quanta, so every tick of the path from here lands on them too
+	local x: number = Math.quantize(feet.x + aheadX * travel)
+	local z: number = Math.quantize(feet.z + aheadZ * travel)
+	local over: number = overOf(settings)
 	local ahead: vector = vector.create(aheadX * over, 0, aheadZ * over)
 
 	-- A plate the hull's footprint and a skin thick, which finds the ledge rising past the reach as no clear spot
@@ -119,39 +148,51 @@ function Mantle.start(state: State, world: World)
 	local probeBottom: number = reach + SKIN
 	local probe: vector = vector.create(x + ahead.x, probeBottom + SKIN / 2, z + ahead.z)
 	if not Collide.clear(probe, probeSize, world) then
-		return
+		return nil, 0, 0, 0
 	end
 
 	local found: Hit? = collision.sweep(probe, probeSize, vector.create(0, lowest - probeBottom, 0))
 	if not found or found.normal.y < settings.walkable then
-		return
+		return nil, 0, 0, 0
 	end
 
 	-- On the position quanta, so a top at the reach is in it on every realm
 	local top: number = Math.quantize(probeBottom - found.distance)
 	if top - base > settings.mantleHeight or top <= lowest then
-		return
+		return nil, 0, 0, 0
 	end
 
 	-- 3) The rise to a skin over the top, rounded up to the step the state carries it in
 	local rise: number = math.ceil((top + SKIN - feet.y) / RISE_QUANTUM) * RISE_QUANTUM
 	if rise > RISE_LIMIT then
-		return
+		return nil, 0, 0, 0
 	end
 
 	-- 4) The posture it ends in
-	local posture: Posture
+	local arc: number = settings.mantleArc
 	local standing: vector = vector.create(width, settings.standing, width)
 	local crouched: vector = vector.create(width, settings.crouched, width)
-	if state.posture ~= "Crouch" and room(world, standing, x, feet.y, z, rise, ahead) then
-		posture = "Stand"
-	elseif room(world, crouched, x, feet.y, z, rise, ahead) then
-		posture = "Crouch"
-	else
+	if state.posture ~= "Crouch" and room(world, standing, x, feet.y, z, rise, arc, ahead) then
+		return "Stand", x, z, rise
+	elseif room(world, crouched, x, feet.y, z, rise, arc, ahead) then
+		return "Crouch", x, z, rise
+	end
+
+	return nil, 0, 0, 0
+end
+
+--[[
+    Starts a mantle on a jump press where find gives one: the body moves to
+    the face, at rest, in the posture it will end in. Does nothing otherwise
+--]]
+
+function Mantle.start(state: State, world: World)
+	local posture: Posture?, x: number, z: number, rise: number = Mantle.find(state, world)
+	if not posture then
 		return
 	end
 
-	state.position = vector.create(x, feet.y, z)
+	state.position = vector.create(x, state.position.y, z)
 	state.velocity = vector.zero
 	state.mode = "Mantle"
 	state.posture = posture
@@ -160,6 +201,25 @@ function Mantle.start(state: State, world: World)
 	state.groundMaterial = AIR
 	state.mantleTicks = 0
 	state.mantleRise = rise
+end
+
+--[[
+    Where a jump press now would end the feet, on the path's last tick
+    before the walk's ground snap stands them on the top, or nil when no
+    press would start a mantle. Changes nothing on the body
+--]]
+
+function Mantle.ending(state: State, world: World): vector?
+	local posture: Posture?, x: number, z: number, rise: number = Mantle.find(state, world)
+	if not posture then
+		return nil
+	end
+
+	local over: number = overOf(world.settings)
+	local aheadX: number = Math.quantize(-Math.sin(state.facing) * over)
+	local aheadZ: number = Math.quantize(-Math.cos(state.facing) * over)
+
+	return vector.create(x + aheadX, state.position.y + rise, z + aheadZ)
 end
 
 --[[
@@ -172,6 +232,37 @@ function Mantle.cancel(state: State)
 	state.velocity = vector.zero
 	state.mantleTicks = 0
 	state.mantleRise = 0
+end
+
+--[[
+    The feet's place on the path after done of its ticks, ahead along the
+    facing and up from where it started. They rise at one pace until
+    halfway through the tick that clears the rise, the rise's share of the
+    path in whole ticks, keeping one before the last. Then they go ahead at
+    one pace while a parabola either side lifts them to the arc over the
+    rise on the tick nearest the middle of the rest, and down onto it again
+--]]
+
+local function place(done: number, ticks: number, rise: number, arc: number, over: number): (number, number)
+	if done >= ticks then
+		return over, rise
+	end
+
+	local rising: number = math.max(math.min(math.floor(rise / (rise + over) * ticks), ticks - 2), 0)
+	local clears: number = rising + CLEARS_AT
+	if done <= rising then
+		return 0, rise * done / clears
+	end
+
+	local peak: number = math.clamp(math.round((clears + ticks) / 2), rising + 1, ticks - 1)
+	local side: number -- How far from the peak toward the end of the arch it is on, 0 to 1
+	if done <= peak then
+		side = (peak - done) / (peak - clears)
+	else
+		side = (done - peak) / (ticks - peak)
+	end
+
+	return over * (done - clears) / (ticks - clears), rise + arc * (1 - side * side)
 end
 
 --[[
@@ -218,12 +309,13 @@ local function sweep(state: State, world: World, x: number, y: number, z: number
 end
 
 --[[
-    One tick of the path, which runs from where it started at one pace
-    over the game's mantle time: up by the rise, then ahead past the face
-    along the facing it holds. Each tick's place is on the position quanta
-    from the start, so its replay lands on the same numbers. A block drops
-    it into the air where it stopped, going down cancels it, and its last
-    tick stands it on the top through the walk's ground snap
+    One tick of the path, over the game's mantle time, along the facing it
+    holds. Each tick's place is on the position quanta from the start, so
+    its replay lands on the same numbers. The tick's climb below the rise
+    goes first, so the path never cuts the ledge's edge, then its move
+    ahead, then what the arch lifts or lowers it by. A block drops it into
+    the air where it stopped, going down cancels it, and its last tick
+    stands it on the top through the walk's ground snap
 --]]
 
 function Mantle.run(state: State, _: Command, world: World)
@@ -238,27 +330,30 @@ function Mantle.run(state: State, _: Command, world: World)
 	local ticks: number = math.round(settings.mantleTime / delta) -- From 1 to 255, which Config holds the game's time to
 	local done: number = state.mantleTicks + 1
 	local rise: number = state.mantleRise
-	local over: number = settings.radius + settings.radius + SKIN + SKIN
-	local length: number = rise + over
-	local from: number = (done - 1) / ticks * length
-	local to: number = done / ticks * length
+	local arc: number = settings.mantleArc
+	local over: number = overOf(settings)
 	local aheadX: number = -Math.sin(state.facing)
 	local aheadZ: number = -Math.cos(state.facing)
 
-	local fromAhead: number = math.max(from - rise, 0)
-	local toAhead: number = math.max(to - rise, 0)
+	local fromAhead: number, fromUp: number = place(done - 1, ticks, rise, arc, over)
+	local toAhead: number, toUp: number = place(done, ticks, rise, arc, over)
 	local x: number = Math.quantize(aheadX * toAhead) - Math.quantize(aheadX * fromAhead)
-	local y: number = Math.quantize(math.min(to, rise)) - Math.quantize(math.min(from, rise))
 	local z: number = Math.quantize(aheadZ * toAhead) - Math.quantize(aheadZ * fromAhead)
+	local fromY: number = Math.quantize(fromUp)
+	local toY: number = Math.quantize(toUp)
+	local climb: number = math.max(math.min(toY, rise) - fromY, 0)
 
-	-- The tick that tops the rise rises first and then goes ahead, so the path never cuts the ledge's edge
-	if not sweep(state, world, 0, y, 0) or not sweep(state, world, x, 0, z) then
+	if
+		not sweep(state, world, 0, climb, 0)
+		or not sweep(state, world, x, 0, z)
+		or not sweep(state, world, 0, toY - fromY - climb, 0)
+	then
 		Mantle.cancel(state)
 
 		return
 	end
 
-	state.velocity = vector.create(x / delta, y / delta, z / delta)
+	state.velocity = vector.create(x / delta, (toY - fromY) / delta, z / delta)
 	state.mantleTicks = done
 	if done < ticks then
 		return

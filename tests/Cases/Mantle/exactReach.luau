@@ -1,6 +1,6 @@
 --[[
     A top exactly the game's reach over the ground last stood on is mantled
-    on a jump press, straight up beside the face and then ahead onto it,
+    on a jump press, up beside the face and then arching over onto it,
     ending there standing once the game's mantle time has run
 --]]
 

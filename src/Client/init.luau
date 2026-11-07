@@ -17,6 +17,7 @@ local Block = require(script.Parent.Codec.Block)
 local Config = require(script.Parent.Config)
 local Engine = require(script.Parent.Step.Engine)
 local Fields = require(script.Parent.Codec.Fields)
+local FirstPerson = require(script.Rigs.FirstPerson)
 local Interpolate = require(script.Interpolate)
 local Move = require(script.Parent.Codec.Move)
 local Predict = require(script.Predict)
@@ -38,6 +39,7 @@ type ClientSettings = Config.ClientSettings
 type Collision = State.Collision
 type Footstep = Types.Footstep
 type Kind = Block.Kind
+type Part = FirstPerson.Part
 type PublicState = Public.State
 type Shared = Config.Shared
 type Slot = Types.Slot
@@ -411,13 +413,15 @@ end
 
 --[[
     Takes a rig out of the pool for a slot, dressed and holding its item,
-    and tells the spawn. A dress hook that throws leaves the slot with no
-    rig, so its next reveal tries again
+    and tells the spawn. The local player's own rig comes out with its
+    first-person copy, and is hidden on their screen. A dress hook that
+    throws leaves the slot with no rig, so its next reveal tries again
 --]]
 
 function Client._spawn(self: Self, slot: number, kind: Kind, player: Player?, outfit: Values, held: Values?)
 	local rigs: Rigs.Rigs = self._rigs
-	local checked: boolean, rig: Model? = xpcall(rigs.checkout, warnHook, rigs, slot, outfit)
+	local own: boolean = slot == self._own
+	local checked: boolean, rig: Model? = xpcall(rigs.checkout, warnHook, rigs, slot, outfit, own)
 	if not checked or not rig then
 		return
 	end
@@ -476,7 +480,7 @@ function Client._dress(self: Self, slot: number, outfit: Values)
 		self._outfit = outfit
 	end
 
-	-- Whiteoak TODO: dress the owner's first-person copy too, once Rigs/FirstPerson.luau builds it
+	-- The pool dresses the local player's own first-person copy with their world rig
 	if self._rigged[slot] then
 		local rigs: Rigs.Rigs = self._rigs
 		xpcall(rigs.dress, warnHook, rigs, slot, outfit)
@@ -489,7 +493,7 @@ function Client._hold(self: Self, slot: number, held: Values?)
 		self._held = held
 	end
 
-	-- Whiteoak TODO: hold the item on the owner's first-person copy too, once Rigs/FirstPerson.luau builds it
+	-- The pool puts it in the local player's own first-person copy's hands too
 	if self._rigged[slot] then
 		local rigs: Rigs.Rigs = self._rigs
 		xpcall(rigs.hold, warnHook, rigs, slot, held)
@@ -508,10 +512,10 @@ end
 
 --[[
     One rendered frame: the owner's tick and Move, the render clock, the
-    owner's own rig out once its body starts, then every drawn rig posed at
-    its distance from the owner's eye, and the live players and NPCs drawn
-    handed to the owner's prediction to block against. Nothing in the walk
-    over the drawn rigs makes a table
+    owner's own rig and its first-person copy out once its body starts,
+    then every drawn rig posed at its distance from the owner's eye, and
+    the live players and NPCs drawn handed to the owner's prediction to
+    block against. Nothing in the walk over the drawn rigs makes a table
 --]]
 
 function Client._frame(self: Self, dt: number)
@@ -540,7 +544,8 @@ function Client._frame(self: Self, dt: number)
 	for _, slot: number in self._posed do
 		if slot == own then
 			if body then
-				-- The owner's aim pitch from the look it publishes, since its state holds none
+				-- The owner's aim pitch from the look it publishes, since its state holds none; the pool poses its
+				-- first-person copy beside it with none
 				local pitch: number = math.asin(math.clamp(self._look.y, -1, 1))
 				rigs:pose(slot, body, vector.magnitude(body.position - eye), pitch)
 			end
@@ -607,6 +612,45 @@ end
 
 function Client.getRenderTime(self: Self): number
 	return Interpolate.renderTime()
+end
+
+--- Where the feet would end if jump were pressed now: the point on the
+--- ledge's top a mantle from the owner's newest predicted tick would end
+--- at, or nil when a press would start none or before the owner has a
+--- body, for the game's mantle prompt. It runs the press's own ledge
+--- search at most once a predicted tick, and never throws.
+--- @method getMantle
+--- @within Client
+--- @return Vector3? -- Where the feet would end, or nil
+
+function Client.getMantle(self: Self): Vector3?
+	local ending: vector? = Predict.mantle()
+	if ending == nil then
+		return nil
+	end
+
+	return Engine.toVector3(ending)
+end
+
+--- Shows or hides part of the local player's own body on their own
+--- screen: "arms" both arms of the first-person copy, upper arm, lower arm
+--- and hand, "chest" its upper torso, "copy" the whole copy, and "rig" the
+--- world rig other players see, hidden here until the game shows it, for a
+--- camera that leaves the eye. The copy's head always stays out of view.
+--- Each setting holds from one body to the next, so a view the game set
+--- stays through a respawn.
+--- @method showBody
+--- @within Client
+--- @param part "arms" | "chest" | "copy" | "rig" -- What to show or hide
+--- @param shown boolean -- Whether it shows
+
+function Client.showBody(self: Self, part: Part, shown: boolean)
+	local problem: string? = FirstPerson.refuse(part, shown)
+	if problem then
+		error(`client:showBody {problem}`, 2)
+	end
+
+	self._rigs:show(part, shown)
 end
 
 --- Registers a ladder for the owner's prediction, as the server registers
@@ -697,7 +741,8 @@ end
 
 --- @class Client
 --- The client handle a game holds once Tread's client has started: the
---- eye, the state, the render time, ladders and the client's signals.
+--- eye, the state, the render time, where a mantle would end, the local
+--- player's own body on their screen, ladders and the client's signals.
 
 export type Client = Self
 type Self = typeof(setmetatable({} :: Fields, Client))

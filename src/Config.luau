@@ -113,6 +113,7 @@ local SHARED: Specs = {
 		crouchDepth = "positive",
 		mantleHeight = "height",
 		mantleTime = "positive",
+		mantleArc = "nonNegative",
 		ladderJump = "speed",
 		headSlide = "positive",
 		lyingBox = { length = "positive", width = "positive", height = "positive", lift = "nonNegative" },

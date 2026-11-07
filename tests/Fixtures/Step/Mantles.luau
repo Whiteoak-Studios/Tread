@@ -64,7 +64,7 @@ end
 
 local TRIALS: { Trial } = {
 	{
-		-- A top exactly the reach over the ground last stood on is mantled: straight up beside the face, then ahead
+		-- A top exactly the reach over the ground last stood on is mantled: up beside the face, then arching over
 		-- onto the top, ending there standing once the game's mantle time has run
 		name = "exactReach",
 		run = function (collision: Collision): string?

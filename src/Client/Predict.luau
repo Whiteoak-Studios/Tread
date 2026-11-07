@@ -10,6 +10,7 @@ local Command = require(script.Parent.Parent.Codec.Command)
 local Constants = require(script.Parent.Parent.Constants)
 local Eye = require(script.Parent.Parent.Step.Eye)
 local Fields = require(script.Parent.Parent.Codec.Fields)
+local Mantle = require(script.Parent.Parent.Step.Mantle)
 local Math = require(script.Parent.Parent.Step.Math)
 local Move = require(script.Parent.Parent.Codec.Move)
 local OwnerState = require(script.Parent.Parent.Codec.OwnerState)
@@ -126,6 +127,8 @@ local LookYaw: number = 0 -- This frame's base look, radians, and its head offse
 local LookPitch: number = 0
 local HeadYaw: number = 0
 local HeadPitch: number = 0
+local Ledge: vector? = nil -- Where a jump press at the newest predicted tick would end a mantle, nil for none
+local Searched: boolean = false -- Whether Ledge answers for the newest predicted tick
 
 local Predict = {}
 
@@ -211,6 +214,7 @@ local function advance(run: Run, command: Command): boolean
 	local world: World = run.world
 	world.tick = (command.number - TickOffset) % WRAP
 	State.copy(Current, Previous)
+	Searched = false
 
 	local stepped: boolean, failure: unknown = pcall(Step.advance, Current, command, world)
 	if not stepped then
@@ -504,6 +508,7 @@ local function shift(server: State, predicted: State)
 
 	move(Current, moved, sped, raised, lowered)
 	move(Previous, moved, sped, raised, lowered)
+	Searched = false
 
 	for _, entry: Entry in Held do
 		if entry.predicted and Sequence.difference(entry.command.number, server.command) > 0 then
@@ -528,6 +533,7 @@ end
 local function replay(run: Run): boolean
 	State.copy(Server, Current)
 	State.copy(Server, Previous)
+	Searched = false
 
 	local ran: number = Server.command
 	for index: number, entry: Entry in Held do
@@ -586,6 +592,7 @@ local function adopt(run: Run)
 	Body = true
 	State.copy(Server, Current)
 	State.copy(Server, Previous)
+	Searched = false
 
 	-- A number an earlier body sent is never sent again, since the server may still hold that body's command for it,
 	-- and past the trip and lead of any playable link no earlier command can still be in flight
@@ -907,6 +914,35 @@ function Predict.state(): State?
 	end
 
 	return draw()
+end
+
+--[[
+    Where the feet would end if jump were pressed at the newest predicted
+    tick: the search a press runs, from that tick's state in prediction's
+    own world, at most once a predicted tick. Nil before the first
+    OwnerState, where no press would start a mantle, and when the search
+    throws, which it warns of
+--]]
+
+function Predict.mantle(): vector?
+	local run: Run? = Running
+	if not run or not Body then
+		return nil
+	end
+
+	if not Searched then
+		Searched = true
+
+		local ran: boolean, answer: unknown = pcall(Mantle.ending, Current, run.world)
+		if ran then
+			Ledge = answer :: vector?
+		else
+			Ledge = nil
+			warn(`Predict's mantle search threw on command {Current.command}: {answer}`)
+		end
+	end
+
+	return Ledge
 end
 
 --[[

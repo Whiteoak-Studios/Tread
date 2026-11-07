@@ -31,6 +31,9 @@ local TURN: number = 2 * math.pi -- Radians a turn, which the yaw wraps at
 local PITCH_LIMIT: number = math.rad(PITCH_DEGREES)
 local RING: number = 2 * STICK_RADIUS -- Pixels across the stick's ring, whose rim a full input reaches
 local THUMB: number = STICK_RADIUS -- Pixels across the stick's thumb, half the ring
+local RING_LAYER: number = 1 -- The ring's ZIndex, under the thumb
+local THUMB_LAYER: number = 2
+local JUMP_LAYER: number = 1
 
 -- The action each key and mouse button drives, by its KeyCode's name or, for a mouse button, its UserInputType's
 local BINDINGS: { [string]: string } = {
@@ -307,12 +310,13 @@ function Input._show(self: Self, shown: boolean)
 	thumb.Visible = shown
 end
 
--- A circle of a diameter in pixels, for the stick's ring and thumb, hidden until a touch drives the stick
-local function circle(diameter: number, parent: ScreenGui): Frame
+-- A circle of a diameter in pixels on a layer, for the stick's ring and thumb, hidden until a touch drives the stick
+local function circle(diameter: number, layer: number, parent: ScreenGui): Frame
 	local frame: Frame = Instance.new("Frame")
 	frame.AnchorPoint = Vector2.new(0.5, 0.5)
 	frame.Size = UDim2.fromOffset(diameter, diameter)
 	frame.BackgroundTransparency = 0.5
+	frame.ZIndex = layer
 	frame.Visible = false
 	frame.Parent = parent
 
@@ -341,8 +345,8 @@ function Input._controls(self: Self)
 	screen.ResetOnSpawn = false
 	screen.Parent = playerGui
 
-	self._ring = circle(RING, screen)
-	self._thumb = circle(THUMB, screen)
+	self._ring = circle(RING, RING_LAYER, screen)
+	self._thumb = circle(THUMB, THUMB_LAYER, screen)
 
 	local button: TextButton = Instance.new("TextButton")
 	button.Name = "Jump"
@@ -351,6 +355,7 @@ function Input._controls(self: Self)
 	button.Position = UDim2.new(1, -JUMP_MARGIN, 1, -JUMP_MARGIN)
 	button.Size = UDim2.fromOffset(JUMP_SIZE, JUMP_SIZE)
 	button.BackgroundTransparency = 0.5
+	button.ZIndex = JUMP_LAYER
 	button.Parent = screen
 
 	-- Lives for the client session, as the button does; the touch's end reaches _ended through UserInputService

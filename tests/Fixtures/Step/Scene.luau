@@ -58,6 +58,7 @@ local SETTINGS: Settings = {
 	crouchDepth = 2.22,
 	mantleHeight = 4,
 	mantleTime = 0.5,
+	mantleArc = 0.5,
 	ladderJump = 25,
 	headSlide = 4, -- Frontier Zero's own is unset, and no step case reads it
 	lyingBox = { length = 5, width = 2, height = 2, lift = 1 },

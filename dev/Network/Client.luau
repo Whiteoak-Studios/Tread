@@ -93,9 +93,46 @@ local function writeshot(sequence: number, target: number?)
 	trimReliable(offset)
 end
 
+local function readreport(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 6 > length then
+		error("report: truncated")
+	end
+
+	local kindLength: number = 1 + buffer.readu8(packet, cursor)
+
+	if kindLength > 16 then
+		error("report.kind: length out of range")
+	end
+
+	local detailLength: number = buffer.readu8(packet, cursor + 1)
+
+	if detailLength > 64 then
+		error("report.detail: length out of range")
+	end
+
+	local dropped: number = buffer.readu32(packet, cursor + 2)
+	cursor += 6
+
+	if cursor + kindLength > length then
+		error("report.kind: truncated")
+	end
+
+	local kind: string = buffer.readstring(packet, cursor, kindLength)
+	cursor += kindLength
+
+	if cursor + detailLength > length then
+		error("report.detail: truncated")
+	end
+
+	local detail: string = buffer.readstring(packet, cursor, detailLength)
+	cursor += detailLength
+
+	return runtime:deliver(1, player, cursor, sideCursor, kind, detail, dropped)
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x28BB1F53,
+	hash = 0x1B5F716C,
 	scope = "Dev",
 	side = "client",
 	idBytes = 1,
@@ -109,7 +146,9 @@ runtime = Volt.start({
 		writeValidation = true,
 	},
 
-	messages = {},
+	messages = {
+		[1] = { name = "report", kind = "event", mode = "SingleSync", queue = 64, read = readreport },
+	},
 
 	outgoing = {
 		[1] = { name = "press", kind = "event", reliable = true, minBytes = 2, maxBytes = 2 },
@@ -149,6 +188,16 @@ local Network = {
 		end,
 	}) :: ClientEvent<(number, number?)>,
 
+	report = table.freeze({
+		on = function (listener: (kind: string, detail: string, dropped: number) -> ()): () -> ()
+			return runtime:on(1, listener)
+		end,
+
+		iter = function (): () -> (number, string, string, number)
+			return runtime:iter(1)
+		end,
+	}) :: ClientListener<(string, string, number)>,
+
 	version = "0.1.0",
 
 	hooks = table.freeze({
@@ -175,6 +224,7 @@ Network.events = table.freeze({
 	["press"] = Network.press,
 	["corrected"] = Network.corrected,
 	["shot"] = Network.shot,
+	["report"] = Network.report,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }
