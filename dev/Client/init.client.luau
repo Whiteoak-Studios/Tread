@@ -1,7 +1,7 @@
 --[[
     The dev place's client: starts Tread's client as a game does, with the
     dev game's shared table and Frontier Zero's client settings, then the
-    exploit kit, the input, the camera, the mantle prompt and G2's corrections
+    exploit kit, the test elevator, input, camera, mantle prompt and G2 counts
 --]]
 
 --!strict
@@ -18,6 +18,7 @@ local Tread = require(packages.Tread)
 local Network = require(ReplicatedStorage.Shared.Network.Client)
 
 local Config = require(script.Config)
+local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
 local Exploits = require(script.Exploits)
 local Input = require(script.Input)
 local Rig = require(script.Rig)
@@ -27,6 +28,7 @@ local Shared = require(ReplicatedStorage.Shared.Dev.Config)
 local Camera = Workspace.CurrentCamera
 
 local VIEW_KEY: Enum.KeyCode = Enum.KeyCode.V -- The dev place's own bind, which no game shares
+local PRESS_KEY: Enum.KeyCode = Config.elevator.key
 local PROMPT_WAIT: number = Config.prompt.wait
 
 local input = Input.new()
@@ -87,6 +89,59 @@ local function prompt(): TextLabel
 	return label
 end
 
+--[[
+    Builds the test elevator's car and call button from the numbers the
+    server checks a press by, outside the test content so none of Tread's
+    casts meets them, and registers the car with Tread, which moves its
+    pivot, the platform's origin, every frame. Gives back the button
+--]]
+
+local function elevator(tread: Tread.Client): Part
+	local folder: Folder = Instance.new("Folder")
+	folder.Name = "Elevator"
+
+	local platform: Tread.Platform = Elevator.platform
+	local origin: Vector3 = platform.path(0, nil) -- Where it rests before any call
+	local car: Model = Instance.new("Model")
+	car.Name = "Car"
+
+	for _, box: { center: Vector3, size: Vector3 } in platform.boxes do
+		local deck: Part = Instance.new("Part")
+		deck.Name = "Deck"
+		deck.Anchored = true
+		deck.CanCollide = false
+		deck.CanQuery = false
+		deck.CanTouch = false
+		deck.Size = box.size
+		deck.CFrame = CFrame.new(origin + box.center)
+		deck.Color = Color3.fromRGB(90, 140, 200)
+		deck.Parent = car
+	end
+
+	car.WorldPivot = CFrame.new(origin)
+	car.Parent = folder
+
+	-- Queried, since the press's ray meets it, but it neither collides nor is touched
+	local button: Part = Instance.new("Part")
+	button.Name = "Button"
+	button.Anchored = true
+	button.CanCollide = false
+	button.CanQuery = true
+	button.CanTouch = false
+	button.Size = Elevator.buttonSize
+	button.CFrame = Elevator.button
+	button.Color = Color3.fromRGB(220, 50, 50)
+	button.Parent = folder
+
+	folder.Parent = Workspace
+
+	-- Registered for the client session
+	platform.model = car
+	tread:addPlatform(platform)
+
+	return button
+end
+
 local clientSettings: Tread.ClientSettings = {
 	sample = function (command: Tread.Command)
 		input:sample(command)
@@ -107,12 +162,22 @@ local clientSettings: Tread.ClientSettings = {
 	smoothing = Config.smoothing,
 	drawDistance = Config.drawDistance,
 	lod = Config.lod,
+	spectate = Config.spectate,
 }
 
 local client: Tread.Client = Tread.startClient(Shared, clientSettings)
 Exploits.start({ client = client, shared = Shared }) -- In this frame, so the ESP hears the first slot table
 local view: View.View = View.new(client, Config.view, cast)
 local mantle: TextLabel? = nil -- The prompt, once the PlayerGui it waits for has come
+local button: Part = elevator(client)
+
+-- The press's ray meets the elevator's button and the world the server's own cast of the press meets
+local reached: { Instance } = table.clone(include)
+table.insert(reached, button)
+
+local pressParams: RaycastParams = RaycastParams.new()
+pressParams.FilterType = Enum.RaycastFilterType.Include
+pressParams.FilterDescendantsInstances = reached
 
 Camera.CameraType = Enum.CameraType.Scriptable
 
@@ -133,10 +198,19 @@ RunService.PreRender:Connect(function (dt: number)
 	end
 end)
 
--- The view switches on the press, and a press while it blends turns it back
+-- The view switches on its key, and a press while it blends turns it back. The elevator's key sends the press when a
+-- ray from the eye along the look meets the button within reach before any world part, as the server checks again
 UserInputService.InputBegan:Connect(function (pressed: InputObject, processed: boolean)
-	if not processed and pressed.KeyCode == VIEW_KEY then
+	if processed then
+		return
+	elseif pressed.KeyCode == VIEW_KEY then
 		view:toggle()
+	elseif pressed.KeyCode == PRESS_KEY then
+		local eye: Vector3, look: Vector3 = client:getEye()
+		local hit: RaycastResult? = Workspace:Raycast(eye, look * Elevator.reach, pressParams)
+		if hit and hit.Instance == button then
+			Network.press.fire(Elevator.platform.id)
+		end
 	end
 end)
 

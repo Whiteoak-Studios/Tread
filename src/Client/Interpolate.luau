@@ -1,7 +1,7 @@
 --[[
     Remote characters drawn at one render time behind the relay: each slot's
-    8-record ring, the adaptive delay and time scale, the reveals, hides and
-    looks held against the slot table, and a culled enemy's footstep entries
+    8-record ring, the adaptive delay, reveals, hides and looks held against
+    the slot table, sleepers' falls, footsteps and spectate's withheld block
 --]]
 
 --!strict
@@ -27,6 +27,7 @@ local GENERATIONS: number = 2 ^ Constants.GENERATION_BITS -- A generation wraps 
 local HALF_GENERATIONS: number = GENERATIONS / 2
 local YAW_STEPS: number = Constants.ANGLE_STEPS / (2 * math.pi) -- Steps a radian of yaw, the units Sequence wraps
 local REACH: number = 2 -- The last two samples' fraction one interval past the newer, where extrapolation stops
+local WITHHELD_INTERVALS: number = 4 -- Relay intervals a withheld character goes unrefreshed before it is dropped
 
 -- A slot's look entry parts, the look then the held item, each at most its declarations' bound
 local LOOK_REGION: number = 0
@@ -77,6 +78,7 @@ local ScaleMax: number = 0
 local Rate: number = 0 -- Relay ticks a second
 local LookLimits: Limits = { lean = 0, headCone = 0 } -- The lean and head cone a record's last byte steps to
 local Declared: Layout? = nil -- The game's compiled declarations, which a look entry's parts unpack against
+local Gravity: number = 0 -- The shared table's step.gravity, which a moved sleeper falls under
 local Started: boolean = false
 
 -- The render clock: the render time and the newest tick both count relay ticks, unwrapped from the first block's
@@ -87,9 +89,11 @@ local NewestAt: number = 0 -- The clock when it arrived
 local Delay: number = 0 -- Seconds the render time aims to run behind the newest tick
 local RenderTime: number = 0
 local Rendering: boolean = false -- Whether a frame has set the render time
+local Since: number? = nil -- The tick the newest spectate start or end began its view at, older blocks dropped
 
 -- What each Move acknowledges
-local Acknowledged: number = 0 -- The newest relay sequence received
+local Acking: boolean = false -- Whether a block has set it since start or the newest spectate start or end
+local Acknowledged: number = 0 -- The newest relay sequence received, 0 for none
 local Mask: number = 0 -- The 16 sequences before it, bit 0 for the one just before
 
 -- The slot table, as its entries announce each slot
@@ -102,6 +106,16 @@ local Kinds: { [number]: Kind } = {} -- An open stretch's kind
 local Changed: { [number]: number } = {} -- The tick of the newest reveal or hide this life applied
 local Hides: { [number]: number } = {} -- A hide's tick, which closes the stretch once the render time passes it
 local Hiding: { number } = {} -- The slots that may have a hide waiting
+local Withheld: { [number]: number } = {} -- A withheld stretch's newest withheld record's tick, while it is withheld
+
+-- Each sleeper's place, from the records of its stretch, and the fall its newest move draws, by slot
+local Places: { [number]: vector } = {} -- Where its newest record lies
+local PlaceYaws: { [number]: number } = {} -- Radians
+local FallTicks: { [number]: number } = {} -- The tick its fall starts at, nil while it never moved
+local FallFrom: { [number]: vector } = {}
+local FallFromYaws: { [number]: number } = {}
+local FallTo: { [number]: vector } = {}
+local FallToYaws: { [number]: number } = {}
 
 -- Each slot's ring, by slot in buffers: the samples' ticks and records, the newest's place and how many it holds
 local RingTicks: buffer = buffer.create(0)
@@ -134,6 +148,7 @@ local Read: Block.Block = Block.new()
 local Older: Record = Record.new()
 local Newer: Record = Record.new()
 local Earlier: Record = Record.new()
+local Moved: Record = Record.new()
 local Step: Footstep = { at = vector.zero, kind = "Walk", material = Enum.Material.Air }
 local Other: Word = {
 	mode = "Ground",
@@ -161,13 +176,18 @@ local Interpolate = {}
     and the shared table's rates, with the lean and head cone a record's
     last byte steps to and the compiled declarations a look entry's parts
     unpack against. It runs once
+
+    @ gravity | the shared table's step.gravity, above 0, which a moved sleeper falls under
 --]]
 
-function Interpolate.start(settings: Settings, rates: Rates, limits: Limits, layout: Layout)
+function Interpolate.start(settings: Settings, rates: Rates, limits: Limits, layout: Layout, gravity: number)
 	if Started then
 		error("Interpolate.start runs once, and it has already run", 2)
+	elseif not (gravity > 0 and gravity < math.huge) then
+		error(`Interpolate.start takes a gravity above 0, not {gravity}`, 2)
 	end
 
+	Gravity = gravity
 	DelayBase = settings.delay
 	DelayMax = settings.delayMax
 	ScaleMin = settings.scaleMin
@@ -196,7 +216,8 @@ end
 
 -- Moves the acknowledgment to a block's sequence, newer ones shifting the mask and older ones setting their bit
 local function acknowledge(sequence: number)
-	if not Receiving then
+	if not Acking then
+		Acking = true
 		Acknowledged = sequence
 		Mask = 0
 
@@ -245,6 +266,22 @@ local function arrive(wire: number): number
 	end
 
 	return tick
+end
+
+--[[
+    Whether a block's u16 tick is older than the tick the newest spectate
+    start or end began its view at, so it is a straggler of the view before
+--]]
+
+local function stale(wire: number): boolean
+	local since: number? = Since
+	if since == nil then
+		return false
+	end
+
+	local reference: number = Receiving and Newest or since
+
+	return reference + Sequence.difference(wire, reference % WIRE) < since
 end
 
 -- The signed difference a - b of two generations, the shorter way round their wrap
@@ -490,10 +527,29 @@ local function dress(slot: number, tick: number, look: Look)
 	end
 end
 
+-- Forgets where a sleeper lay and the fall it was drawn along, so its next record lies where it puts it
+local function forgetPlace(slot: number)
+	Places[slot] = nil
+	PlaceYaws[slot] = nil
+	FallTicks[slot] = nil
+end
+
+-- Tells every reveal callback of a stretch opened or a kind changed, with the slot's player, look and held item
+local function publishReveal(slot: number, kind: Kind)
+	local player: Instance? = Players[slot]
+	local outfit: Values = outfitOf(slot)
+	local held: Values? = holding(slot)
+
+	for _, callback: RevealCallback in RevealListeners do
+		callback(slot, kind, player, outfit, held)
+	end
+end
+
 --[[
     Applies a reveal: a newer one than the life's last reveal or hide opens
-    a stretch with an empty ring, marks a change of kind or takes back a
-    hide still waiting, and an older one is a repeat from before it
+    a stretch with an empty ring, marks a change of kind, takes back a hide
+    still waiting or ends a withholding, since the target is sent the slot
+    again, and an older one is a repeat from before it
 --]]
 
 local function reveal(slot: number, kind: Kind, tick: number)
@@ -504,6 +560,7 @@ local function reveal(slot: number, kind: Kind, tick: number)
 
 	Changed[slot] = tick
 	Hides[slot] = nil
+	Withheld[slot] = nil
 
 	local open: Kind? = Kinds[slot]
 	if open == kind then
@@ -513,17 +570,16 @@ local function reveal(slot: number, kind: Kind, tick: number)
 	end
 
 	Kinds[slot] = kind
-
-	local player: Instance? = Players[slot]
-	local outfit: Values = outfitOf(slot)
-	local held: Values? = holding(slot)
-
-	for _, callback: RevealCallback in RevealListeners do
-		callback(slot, kind, player, outfit, held)
-	end
+	forgetPlace(slot)
+	publishReveal(slot, kind)
 end
 
--- A hide newer than the life's last reveal or hide waits for the render time to pass its tick
+--[[
+    A hide newer than the life's last reveal or hide waits for the render
+    time to pass its tick. One no newer than a withheld record of the slot
+    changes nothing, since a spectating moderator still draws it
+--]]
+
 local function hideAt(slot: number, tick: number)
 	local last: number? = Changed[slot]
 	if last ~= nil and tick <= last then
@@ -543,10 +599,12 @@ local function hideAt(slot: number, tick: number)
 	end
 end
 
--- Ends a slot's stretch and empties its ring
+-- Ends a slot's stretch, its withholding and its fall, and empties its ring
 local function close(slot: number)
 	Kinds[slot] = nil
 	Hides[slot] = nil
+	Withheld[slot] = nil
+	forgetPlace(slot)
 	buffer.writeu8(RingCounts, slot, 0)
 end
 
@@ -557,8 +615,66 @@ local function publishHide(slot: number)
 end
 
 --[[
+    Where a moved sleeper's fall puts it at a tick, with its yaw, turned the
+    shortest way from where it lay by the share of the fall done. Before
+    the move's tick it lies where it was, since a move that isn't downward
+    is done at once
+--]]
+
+local function falling(slot: number, tick: number): (vector, number)
+	local elapsed: number = (tick - FallTicks[slot]) / Rate
+	if elapsed < 0 then
+		return FallFrom[slot], FallFromYaws[slot]
+	end
+
+	local at: vector, fraction: number = Math.fall(FallFrom[slot], FallTo[slot], Gravity, elapsed)
+	local fromYaw: number = FallFromYaws[slot] * YAW_STEPS
+	local toYaw: number = fromYaw + Sequence.difference(FallToYaws[slot] * YAW_STEPS, fromYaw)
+
+	return at, (Math.lerp(fromYaw, toYaw, fraction) % Constants.ANGLE_STEPS) / YAW_STEPS
+end
+
+--[[
+    Takes a sleeper's record lying at another place or yaw than its
+    stretch's newest as a move, since a reveal repeats on later blocks until
+    acknowledged and a repeat must not start the fall again. The fall starts
+    at the record's block's tick, from where an earlier fall puts it then,
+    or from where it lay
+--]]
+
+local function move(slot: number, tick: number, data: buffer, offset: number)
+	Record.read(data, offset, Moved, LookLimits)
+
+	local place: vector? = Places[slot]
+	local yaw: number = Moved.yaw
+	if place == nil then
+		Places[slot] = Moved.position
+		PlaceYaws[slot] = yaw
+
+		return
+	elseif place == Moved.position and PlaceYaws[slot] == yaw then
+		return
+	end
+
+	local from: vector = place
+	local fromYaw: number = PlaceYaws[slot]
+	if FallTicks[slot] ~= nil then
+		from, fromYaw = falling(slot, tick)
+	end
+
+	FallTicks[slot] = tick
+	FallFrom[slot] = from
+	FallFromYaws[slot] = fromYaw
+	FallTo[slot] = Moved.position
+	FallToYaws[slot] = yaw
+	Places[slot] = Moved.position
+	PlaceYaws[slot] = yaw
+end
+
+--[[
     Adds a record to an open stretch's ring as its newest sample. One no
-    newer than the ring's newest, or past a hide still waiting, is dropped
+    newer than the ring's newest, or past a hide still waiting, is dropped,
+    and a sleeper's is checked for a move
 --]]
 
 local function push(slot: number, tick: number, data: buffer, offset: number)
@@ -589,6 +705,56 @@ local function push(slot: number, tick: number, data: buffer, offset: number)
 	buffer.copy(RingRecords, (base + head) * RECORD_BYTES, data, offset, RECORD_BYTES)
 	buffer.writeu8(RingHeads, slot, head)
 	buffer.writeu8(RingCounts, slot, math.min(count + 1, RING))
+
+	if Kinds[slot] == "Sleeper" then
+		move(slot, tick, data, offset)
+	end
+end
+
+--[[
+    Draws a record a withheld block carries. One older than the slot's
+    newest reveal or hide is a straggler; any other opens a stretch for a
+    slot not drawn, with no reveal of its own, takes back a hide still
+    waiting, and keeps the slot withheld until a reveal or until its
+    records stop
+--]]
+
+local function withhold(slot: number, tick: number, data: buffer, offset: number)
+	local last: number? = Changed[slot]
+	if last ~= nil and tick < last then
+		return
+	end
+
+	Changed[slot] = tick
+	Hides[slot] = nil
+
+	local newest: number? = Withheld[slot]
+	if newest == nil or tick > newest then
+		Withheld[slot] = tick
+	end
+
+	if Kinds[slot] == nil then
+		Kinds[slot] = "Player"
+		buffer.writeu8(RingCounts, slot, 0)
+		forgetPlace(slot)
+		publishReveal(slot, "Player")
+	end
+
+	push(slot, tick, data, offset)
+end
+
+-- Applies a block's look entries, holding those for a generation the slot table hasn't announced
+local function applyLooks(tick: number)
+	for index: number = 1, Read.lookCount do
+		local look: Look = Read.looks[index]
+		local verdict: Verdict = judge(look.slot, look.generation)
+
+		if verdict == "Apply" then
+			dress(look.slot, tick, look)
+		elseif verdict == "Hold" and hold(look.slot, look.generation) then
+			holdLook(look.slot, tick, look)
+		end
+	end
 end
 
 --[[
@@ -596,13 +762,18 @@ end
     and the delay, then applies its hides, looks, reveals, records and
     footstep entries in that order, so a reveal carries the look its block
     brought. An entry for a generation the slot table hasn't announced
-    waits for it, and one for an older generation is dropped. It errors on
-    a block that isn't one
+    waits for it, and one for an older generation is dropped, as is a block
+    older than the newest spectate start or end. It errors on a block that
+    isn't one
 --]]
 
 function Interpolate.receive(data: buffer)
 	begun("receive")
 	Block.read(data, Read)
+	if stale(Read.tick) then
+		return
+	end
+
 	acknowledge(Read.sequence)
 
 	local tick: number = arrive(Read.tick)
@@ -618,16 +789,7 @@ function Interpolate.receive(data: buffer)
 		end
 	end
 
-	for index: number = 1, Read.lookCount do
-		local look: Look = Read.looks[index]
-		local verdict: Verdict = judge(look.slot, look.generation)
-
-		if verdict == "Apply" then
-			dress(look.slot, tick, look)
-		elseif verdict == "Hold" and hold(look.slot, look.generation) then
-			holdLook(look.slot, tick, look)
-		end
-	end
+	applyLooks(tick)
 
 	for index: number = 1, Read.revealCount do
 		local entry: Block.Reveal = Read.reveals[index]
@@ -664,9 +826,50 @@ function Interpolate.receive(data: buffer)
 end
 
 --[[
+    Reads one withheld block, which a spectating moderator gets beside the
+    target's copy: its look entries as a relay block's, and each record of
+    a live player anti-ESP withheld from the target, which opens that slot
+    with no reveal and keeps it withheld while its records keep coming. It
+    never moves the acknowledgment, and errors on a block that isn't one
+--]]
+
+function Interpolate.withheld(data: buffer)
+	begun("withheld")
+	Block.read(data, Read)
+	if Read.revealCount ~= 0 or Read.hideCount ~= 0 or Read.footstepCount ~= 0 then
+		error("A withheld block carries no reveal, hide or footstep entries", 2)
+	elseif stale(Read.tick) then
+		return
+	end
+
+	local tick: number = arrive(Read.tick)
+	applyLooks(tick)
+
+	-- A record for a generation the slot table hasn't announced is dropped, since the next comes at its tier rate
+	local records: buffer = Read.recordData
+	for index: number = 1, Read.recordCount do
+		local offset: number = Read.records[index]
+		local slot: number, generation: number = Record.split(buffer.readu16(records, offset))
+
+		if judge(slot, generation) == "Apply" then
+			withhold(slot, tick, records, offset)
+		end
+	end
+end
+
+--[[
+    Whether a slot is drawn only because anti-ESP withheld it from the
+    spectated target, as the withheld block carries it
+--]]
+
+function Interpolate.isWithheld(slot: number): boolean
+	return Withheld[slot] ~= nil
+end
+
+--[[
     The newest relay sequence received and the mask of the 16 before it,
     bit 0 for the one just before, which each Move sends back; 0 and 0
-    before any block
+    before any block, and again from a spectate's start or end to the next
 --]]
 
 function Interpolate.received(): (number, number)
@@ -677,7 +880,8 @@ end
     Advances the render time by a frame toward the delay behind the newest
     tick the clock estimates, at the time scale that closes its drift in
     seconds within the scale's range. The delay eases back toward its
-    floor, and each hide the render time passes closes its stretch
+    floor, each hide the render time passes closes its stretch, and so does
+    a withheld slot no record has refreshed for a few relay intervals
 
     @ dt | the frame's seconds, 0 or more
 --]]
@@ -729,6 +933,14 @@ function Interpolate.frame(dt: number)
 			end
 		end
 	end
+
+	-- A withheld character the block stopped carrying has left the target's relevancy
+	for slot: number, last: number in Withheld do
+		if newest - last > WITHHELD_INTERVALS then
+			close(slot)
+			publishHide(slot)
+		end
+	end
 end
 
 --[[
@@ -759,12 +971,62 @@ local function recordOf(base: number, head: number, back: number): number
 end
 
 --[[
+    Lays a drawn state down as a sleeper or a body lies: on the ground in
+    the Downed posture and at rest, with no sprint, aim or lean, so its rig
+    plays the game's downed clip whatever the record holds
+--]]
+
+function Interpolate.lying(into: State)
+	into.mode = "Ground"
+	into.posture = "Downed"
+	into.grounded = true
+	into.velocity = vector.zero
+	into.sprint = false
+	into.aim = false
+	into.lean = 0
+end
+
+--[[
+    Fills into with a sleeper's or a body's drawn state, lying: at the
+    record at or before the render time, or along its newest move's fall,
+    which holds where it lay until the render time reaches the move's tick
+--]]
+
+local function poseLying(slot: number, into: State, base: number, head: number, count: number): boolean
+	local back: number = 0
+	while back < count and tickOf(base, head, back) > RenderTime do
+		back += 1
+	end
+
+	local falls: boolean = FallTicks[slot] ~= nil
+	if back == count and not falls then
+		return false
+	end
+
+	Record.read(RingRecords, recordOf(base, head, math.min(back, count - 1)), Older, LookLimits)
+	StateWord.unpack(Older.word, into)
+	into.platform = Older.platform
+
+	if falls then
+		into.position, into.facing = falling(slot, RenderTime)
+	else
+		into.position = Older.position
+		into.facing = Older.yaw
+	end
+
+	Interpolate.lying(into)
+
+	return true
+end
+
+--[[
     Fills into with a remote slot's drawn state at the render time and
     gives whether it has one, with the aim pitch in radians, which a state
     holds none of. Every value goes through the one lerp, yaw on the
     shortest arc, and velocity comes from the two samples drawn between.
     The state word, its epoch the 2-bit parity, the platform and grounded
-    come from the sample at or before the render time; nothing else changes
+    come from the sample at or before the render time; nothing else changes.
+    A sleeper or a body is drawn lying, with no aim pitch
 --]]
 
 function Interpolate.pose(slot: number, into: State): (boolean, number)
@@ -780,6 +1042,11 @@ function Interpolate.pose(slot: number, into: State): (boolean, number)
 
 	local base: number = slot * RING
 	local head: number = buffer.readu8(RingHeads, slot)
+
+	local kind: Kind? = Kinds[slot]
+	if kind == "Sleeper" or kind == "Body" then
+		return poseLying(slot, into, base, head, count), 0
+	end
 
 	-- How far back from the newest the last sample at or before the render time sits
 	local back: number = 0
@@ -858,6 +1125,56 @@ function Interpolate.pose(slot: number, into: State): (boolean, number)
 	end
 
 	return true, Math.lerp(Older.pitch, Newer.pitch, t)
+end
+
+--[[
+    Begins a spectate's view, or the moderator's own once it ends, at the
+    relay tick the Spectate message names: each slot whose newest record is
+    older closes, told to every hide callback, a block older than the tick
+    is dropped from then on, and the acknowledgment starts again from the
+    next block, acknowledging none until it comes
+
+    @ tick | the u16 relay tick the view starts at
+--]]
+
+function Interpolate.restart(tick: number)
+	begun("restart")
+	if not (tick >= 0 and tick < WIRE and tick % 1 == 0) then
+		error(`Interpolate.restart takes a u16 relay tick, not {tick}`, 2)
+	end
+
+	local since: number = tick
+	if Receiving then
+		since = Newest + Sequence.difference(tick, Newest % WIRE)
+	end
+	Since = since
+
+	for slot: number in Kinds do
+		local count: number = buffer.readu8(RingCounts, slot)
+		if count == 0 or tickOf(slot * RING, buffer.readu8(RingHeads, slot), 0) < since then
+			close(slot)
+			publishHide(slot)
+		end
+	end
+
+	Acking = false
+	Acknowledged = 0
+	Mask = 0
+end
+
+--[[
+    Who the slot table names in a slot, and its look and held item as the
+    look entries last gave them, nil for nothing held, for a rig drawn from
+    something other than the slot's records, as a spectated target's is
+--]]
+
+function Interpolate.occupant(slot: number): (Instance?, Values, Values?)
+	begun("occupant")
+	if not (slot >= 0 and slot < SLOTS and slot % 1 == 0) then
+		error(`Interpolate.occupant takes a slot from 0 to {SLOTS - 1}, not {slot}`, 2)
+	end
+
+	return Players[slot], outfitOf(slot), holding(slot)
 end
 
 --[[
@@ -947,9 +1264,11 @@ end
 
 --[[
     Takes a death message as Volt's Death sends it. The dying life's
-    stretch ends with no hide, since the rig drawing it becomes the body's
-    ragdoll, and later entries for that life are ignored. Gives the dying
-    slot, the body's slot and the push for the ragdoll
+    stretch ends with no hide, since the rig drawing it becomes the body's,
+    and later entries for that life are ignored. Gives the dying slot, the
+    body's slot, the push for the ragdoll, and the dying life's newest
+    record's age in seconds by the newest tick the clock estimates, an
+    infinite age for a life with none
 --]]
 
 function Interpolate.death(
@@ -958,13 +1277,20 @@ function Interpolate.death(
 	pushX: number,
 	pushY: number,
 	pushZ: number
-): (number, number, vector)
+): (number, number, vector, number)
 	begun("death")
 
 	local slot: number, generation: number, bodySlot: number, _: number, direction: vector =
 		Reliable.readDeath(character, body, pushX, pushY, pushZ)
 
+	local age: number = math.huge
 	if Generations[slot] == generation then
+		if buffer.readu8(RingCounts, slot) > 0 and Receiving then
+			local newest: number = Newest + (Clock - NewestAt) * Rate
+			local last: number = tickOf(slot * RING, buffer.readu8(RingHeads, slot), 0)
+			age = math.max(newest - last, 0) / Rate
+		end
+
 		Taken[slot] = false
 		close(slot)
 	end
@@ -973,7 +1299,7 @@ function Interpolate.death(
 		clearHold(slot)
 	end
 
-	return slot, bodySlot, direction
+	return slot, bodySlot, direction, age
 end
 
 local function connect<T>(listeners: { [{ nil }]: T }, callback: T, member: string): () -> ()

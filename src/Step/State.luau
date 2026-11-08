@@ -242,6 +242,34 @@ export type Ladder = {
 	box: Box,
 }
 
+-- A moving platform as a game builds it alike on both realms. Its path gives where it stands on a server simulation
+-- tick, counted unwrapped from the server's start, and from the tick of its last call for one that moves when called
+export type Platform = {
+	id: number, -- 1 up to MAX_PLATFORMS, the same on every realm
+	boxes: { { center: Vector3, size: Vector3 } }, -- Its collision boxes, each centered in the platform's own space
+	path: (tick: number, calledAt: number?) -> Vector3,
+	model: Model?, -- The client's copy, which Tread moves each frame
+}
+
+-- One of a registered platform's boxes in the step's numbers
+export type PlatformBox = {
+	center: vector, -- From the platform's position
+	half: vector, -- Half its size
+}
+
+-- One registered platform: its id and its calls, which the handles read, then what only the step reads
+export type PlatformEntry = {
+	id: number,
+	calledAt: number?, -- The latest call's tick, unwrapped, nil before any
+	calledBefore: number?, -- The call before it, which the ticks before the latest run from
+	_path: (tick: number, calledAt: number?) -> Vector3,
+	_boxes: { PlatformBox },
+	_tick: number, -- The unwrapped tick _position stands on, math.huge before any
+	_position: vector, -- Where it stands on that tick, on the 1/512 quantum
+	_under: Collision, -- The world's casts under the platforms' boxes
+	_casts: Collision, -- Those casts wrapped to meet the boxes, which the world holds while it holds a platform
+}
+
 -- The read-only context the step reads, which World.new builds
 export type World = {
 	settings: Settings,
@@ -254,6 +282,8 @@ export type World = {
 	leanShift: vector, -- The settings' leanShift, crossed once
 	ladders: { Ladder },
 	bodies: { State }, -- The live players and NPCs this tick, each body's state where it stands now
+	platforms: { [number]: PlatformEntry }, -- By id
+	clock: number, -- An unwrapped simulation tick within 32,767 of every tick the step runs until it is next set
 }
 
 local State = {}

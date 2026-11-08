@@ -1,7 +1,7 @@
 --[[
-    What the local player sees of their own body: their world rig hidden on
-    their own screen until the game shows it, and their first-person copy
-    with its head out of view and its arms, chest or whole self as asked
+    What the local player sees of their own body: their world rig, and the
+    spectated target's, hidden on their own screen until the game shows it,
+    and their first-person copy, head out of view, arms and chest as asked
 --]]
 
 --!strict
@@ -43,6 +43,7 @@ type Shown = { [Part]: boolean }
 type Fields = {
 	_shown: Shown, -- The game's settings, kept from one body to the next
 	_world: Model?, -- The local player's world rig, while it has one
+	_watched: Model?, -- The spectated target's world rig, which takes the same setting, while there is one
 	_copy: Copy?, -- Its first-person copy, nil when none could be dressed
 	_regions: { [BasePart | Decal]: number }, -- Each of the copy's parts and decals by the regions it falls in
 }
@@ -142,6 +143,7 @@ function FirstPerson.new(): Self
 	return setmetatable({
 		_shown = { arms = true, chest = true, copy = true, rig = false },
 		_world = nil :: Model?,
+		_watched = nil :: Model?,
 		_copy = nil :: Copy?,
 		_regions = {} :: { [BasePart | Decal]: number },
 	}, FirstPerson)
@@ -237,13 +239,19 @@ function FirstPerson._read(self: Self, copy: Copy)
 	end
 end
 
--- Sets every part of both rigs as the settings say: the world rig's all alike, and the copy's by their regions
+-- Sets every part of the rigs as the settings say: each world rig's all alike, and the copy's by their regions
 function FirstPerson._apply(self: Self)
 	local shown: Shown = self._shown
+	local rig: number = shown.rig and SHOWN or HIDDEN
 
 	local world: Model? = self._world
 	if world then
-		level(world, shown.rig and SHOWN or HIDDEN)
+		level(world, rig)
+	end
+
+	local watched: Model? = self._watched
+	if watched then
+		level(watched, rig)
 	end
 
 	-- The copy's head always hides, since the eye sits inside it
@@ -274,6 +282,24 @@ function FirstPerson.show(self: Self, part: Part, shown: boolean)
 	end
 
 	self._shown[part] = shown
+	self:_apply()
+end
+
+--[[
+    Takes the spectated target's world rig, which takes the rig setting as
+    the local player's own does, or nil for none. The one it replaces is
+    shown again, as the pool and a body need it
+--]]
+
+function FirstPerson.watch(self: Self, world: Model?)
+	local watched: Model? = self._watched
+	if watched == world then
+		return
+	elseif watched then
+		level(watched, SHOWN)
+	end
+
+	self._watched = world
 	self:_apply()
 end
 

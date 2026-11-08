@@ -1,7 +1,7 @@
 --[[
     What the server handle's cases share: Tread's server in a fresh environment
     over Volt.mock on the example's tables, its casts on the step's fixture
-    geometry, every report it raises kept, and its frames run by the case
+    geometry and anti-ESP's on walls a case sets, its reports kept, its frames
 --]]
 
 --!strict
@@ -33,6 +33,18 @@ export type Heard = {
 	measurement: number | string,
 }
 
+-- An axis-aligned occluder anti-ESP's rays meet, by its two corners
+type Wall = {
+	low: vector,
+	high: vector,
+}
+
+-- What anti-ESP's stand-in cast sees: the walls a case set, and the include list the server handed it
+type Sight = {
+	walls: { Wall },
+	include: { any }?,
+}
+
 type Fields = {
 	globals: any, -- The environment's game, script and require
 	tread: any, -- The package's ModuleScript in it
@@ -46,12 +58,44 @@ type Fields = {
 	frames: Frames.Frames,
 	rate: number, -- The simulation rate, ticks a second
 	heard: { Heard },
+	sight: Sight,
 }
+
+-- The shares of a segment's move at which it enters and leaves a slab between low and high on one axis
+local function span(low: number, high: number, from: number, move: number): (number, number)
+	if move == 0 then
+		if from > low and from < high then
+			return -math.huge, math.huge
+		end
+
+		return math.huge, -math.huge
+	end
+
+	local enter: number = (low - from) / move
+	local leave: number = (high - from) / move
+	if enter > leave then
+		return leave, enter
+	end
+
+	return enter, leave
+end
+
+-- Whether a ray from origin along direction, its whole length, passes through a wall
+local function crosses(wall: Wall, origin: vector, direction: vector): boolean
+	local enterX: number, leaveX: number = span(wall.low.x, wall.high.x, origin.x, direction.x)
+	local enterY: number, leaveY: number = span(wall.low.y, wall.high.y, origin.y, direction.y)
+	local enterZ: number, leaveZ: number = span(wall.low.z, wall.high.z, origin.z, direction.z)
+	local enter: number = math.max(enterX, enterY, enterZ, 0)
+	local leave: number = math.min(leaveX, leaveY, leaveZ, 1)
+
+	return enter < leave
+end
 
 --[[
     A rig with the example's tables, which tweak may change before start,
     the environment's Engine answering with the fixture casts in place of
-    the engine's, and overrides answering any other require given
+    the engine's and anti-ESP's rays meeting only the walls a case sets,
+    and overrides answering any other require given
 --]]
 
 function Rig.new(tweak: ((shared: any, settings: any) -> ())?, overrides: { [string]: any }?): Self
@@ -60,6 +104,7 @@ function Rig.new(tweak: ((shared: any, settings: any) -> ())?, overrides: { [str
 	local casts: any = Environment.load(CASTS)
 	local geometry: any = Environment.load(GEOMETRY)
 	local down: vector = vector.create(0, SHIFT, 0)
+	local sight: Sight = { walls = {}, include = nil }
 
 	local parts: { any } = {}
 	for _, part: any in geometry.parts do
@@ -82,6 +127,21 @@ function Rig.new(tweak: ((shared: any, settings: any) -> ())?, overrides: { [str
 
 			casts = function (_: any): any
 				return casts(parts)
+			end,
+
+			-- Lune casts no ray on the engine, so anti-ESP's occlusion meets the walls the case set
+			occlusion = function (include: { any }): any
+				sight.include = include
+
+				return function (origin: vector, direction: vector): boolean
+					for _, wall: Wall in sight.walls do
+						if crosses(wall, origin, direction) then
+							return true
+						end
+					end
+
+					return false
+				end
 			end,
 		},
 	}
@@ -119,6 +179,7 @@ function Rig.new(tweak: ((shared: any, settings: any) -> ())?, overrides: { [str
 		frames = frames,
 		rate = shared.rates.simulation,
 		heard = {} :: { Heard },
+		sight = sight,
 	}, Rig)
 end
 
@@ -157,6 +218,24 @@ end
 -- A CFrame over the fixture floor at x and z, looking along -Z
 function Rig.at(self: Self, x: number, z: number): any
 	return roblox.CFrame.new(x, self.floor + LIFT, z)
+end
+
+-- Stands an occluder anti-ESP's rays meet, centered at a point with a size, and gives back the closure that removes it
+function Rig.wall(self: Self, center: vector, size: vector): () -> ()
+	local wall: Wall = { low = center - size / 2, high = center + size / 2 }
+	table.insert(self.sight.walls, wall)
+
+	return function ()
+		local index: number? = table.find(self.sight.walls, wall)
+		if index then
+			table.remove(self.sight.walls, index)
+		end
+	end
+end
+
+-- The include list the server handed anti-ESP's occlusion, nil before start
+function Rig.occluders(self: Self): { any }?
+	return self.sight.include
 end
 
 -- The measurements of every report of a kind heard, in the order they were raised

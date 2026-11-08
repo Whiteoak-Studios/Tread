@@ -14,22 +14,33 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local Block = require(script.Parent.Codec.Block)
+local ClientPlatforms = require(script.Platforms)
 local Config = require(script.Parent.Config)
+local Constants = require(script.Parent.Constants)
 local Engine = require(script.Parent.Step.Engine)
+local Eye = require(script.Parent.Step.Eye)
+local Feed = require(script.Parent.Codec.Feed)
 local Fields = require(script.Parent.Codec.Fields)
 local FirstPerson = require(script.Rigs.FirstPerson)
 local Interpolate = require(script.Interpolate)
+local Math = require(script.Parent.Step.Math)
 local Move = require(script.Parent.Codec.Move)
+local OwnerState = require(script.Parent.Codec.OwnerState)
+local Platforms = require(script.Parent.Step.Platforms)
 local Predict = require(script.Predict)
 local Public = require(script.Parent.Step.Public)
 local Record = require(script.Parent.Codec.Record)
 local Reliable = require(script.Parent.Codec.Reliable)
 local Rigs = require(script.Rigs)
+local Sequence = require(script.Parent.Codec.Sequence)
 local State = require(script.Parent.Step.State)
 local Types = require(script.Parent.Types)
 local World = require(script.Parent.Step.World)
 
 local AHEAD: vector = vector.create(0, 0, -1) -- The look before the owner has a body, along -Z as a yaw of 0 looks
+local YAW_STEPS: number = Constants.ANGLE_STEPS / (2 * math.pi) -- Steps a radian of facing, the units Sequence wraps
+local WIRE: number = 2 ^ 16 -- The values a u16 wire tick holds
+local CALLS_KEPT: number = 2 -- A platform's calls its path runs from, the latest and the one before
 
 -- The frame's render step runs just ahead of a camera bound at Camera priority, and Roblox runs every render step
 -- before any PreRender connection, so a camera in either place reads this frame's eye
@@ -40,6 +51,7 @@ type Collision = State.Collision
 type Footstep = Types.Footstep
 type Kind = Block.Kind
 type Part = FirstPerson.Part
+type Platform = State.Platform
 type PublicState = Public.State
 type Shared = Config.Shared
 type Slot = Types.Slot
@@ -53,6 +65,28 @@ type Marker = (slot: Slot, marker: string, value: string) -> ()
 type Heard = (step: Footstep) -> ()
 type Corrected = (size: number, flagged: boolean) -> ()
 
+-- The lean and head cone a feed's OwnerState and looks step to
+type Limits = { lean: number, headCone: number }
+
+-- A spectate's target as the moderator draws it, from the last two OwnerStates its feed brought
+type Watch = {
+	slot: number,
+	generation: number,
+	states: number, -- The feed states held, up to two
+	older: StepState,
+	newer: StepState,
+	spare: StepState, -- What the next feed is read into
+	drawn: StepState, -- Between the two, as the last frame or eye drew it
+	tick: number, -- The u16 tick with its fraction it was drawn at
+	arrived: number, -- The handle's clock when the newer came
+	yaw: number, -- The newest stepped command's base look, radians, and head offset, degrees
+	pitch: number,
+	headYaw: number,
+	headPitch: number,
+	rig: Model?, -- The rig the pool was last told is the target's
+	died: boolean, -- Whether its death came, after which its rig is the body's and none is drawn for it
+}
+
 type Fields = {
 	_player: Player,
 	_hash: number, -- The shared table's hash, which the server's handshake must match
@@ -60,18 +94,28 @@ type Fields = {
 	_refused: boolean, -- Whether it didn't, after which the client reads and sends nothing more
 	_world: World,
 	_rigs: Rigs.Rigs,
+	_simulation: number, -- The shared table's simulation rate, which an OwnerState's ticks count in
+	_limits: Limits,
+	_radius: number, -- The client settings' bodies.radius and bodies.late, past which a death draws its body lying
+	_late: number,
 	_own: number?, -- The local player's slot, nil while it has none
 	_generation: number, -- That slot's generation
 	_outfit: Values?, -- Its look and held item, as the relay last gave them, for its rig
 	_held: Values?,
-	_rigged: { [number]: Slot }, -- Every slot with a rig out, ragdolls included
+	_rigged: { [number]: Slot }, -- Every slot with a rig out, bodies included
 	_models: { [number]: Model },
-	_ragdolls: { [number]: number }, -- Each ragdoll's body slot and the body's generation, which the slot table ends
+	_deaths: { [number]: number }, -- Each body a death drew and the body's generation, which the slot table ends
 	_posed: { number }, -- The slots posed each frame: every rigged one but a ragdoll
+	_outlined: { [number]: true }, -- The slots whose rigs are drawn under the spectate outline
 	_states: { [number]: StepState }, -- Each remote slot's drawn state, refilled each frame
 	_bodies: { StepState }, -- The live players and NPCs drawn this frame, which the owner's prediction blocks against
-	_eye: vector, -- The owner's eye and look as last drawn, which stay while it has no body
+	_eye: vector, -- The eye and look as last drawn, the owner's or a spectated target's, which stay while it has none
 	_look: vector,
+	_clock: number, -- Seconds the frames have advanced
+	_ticks: number?, -- The server's simulation tick unwrapped with its fraction, nil until the handshake names it
+	_calls: { [number]: { number } }, -- Each platform's calls heard, by id, the latest two oldest first
+	_watching: Watch?, -- The spectated target, nil while the client spectates none
+	_feedRead: Feed.Feed, -- What each feed is read into
 	_public: PublicState,
 	_spawned: { [{ nil }]: Spawned },
 	_despawned: { [{ nil }]: Despawned },
@@ -143,6 +187,33 @@ local function drawDistance(distances: index<ClientSettings, "drawDistance">): n
 	return distances.tablet
 end
 
+-- The aim pitch a look direction gives, radians, up positive
+local function pitchOf(look: vector): number
+	return math.asin(math.clamp(look.y, -1, 1))
+end
+
+--[[
+    Moves a remote state drawn in its platform's space onto that
+    platform's copy as this frame placed it, so a rider stands on the
+    platform drawn. False while no copy of its platform has a place
+--]]
+
+local function placeRider(state: StepState): boolean
+	local id: number = state.platform
+	if id == 0 then
+		return true
+	end
+
+	local copy: vector? = ClientPlatforms.position(id)
+	if copy == nil then
+		return false
+	end
+
+	state.position += copy
+
+	return true
+end
+
 --- Starts Tread's client, once: checks the shared table and the client
 --- settings, starts the owner's prediction, the remote interpolation and
 --- the rig pool, and connects Tread's own Volt scope, whose handshake goes
@@ -171,12 +242,12 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 
 	local collision: Collision = Engine.casts(shared.collision)
 	local world: World = World.new(shared.step, shared.rates.simulation, collision, shared.water, shared.rules, false)
-	local rigs: Rigs.Rigs = Rigs.new(client, drawDistance(client.drawDistance), collision)
+	local rigs: Rigs.Rigs = Rigs.new(client, drawDistance(client.drawDistance), collision, world)
 
 	Started = true
 
-	local limits: { lean: number, headCone: number } = { lean = shared.step.lean, headCone = shared.step.headCone }
-	Interpolate.start(client.interpolation, shared.rates, limits, layout)
+	local limits: Limits = { lean = shared.step.lean, headCone = shared.step.headCone }
+	Interpolate.start(client.interpolation, shared.rates, limits, layout, shared.step.gravity)
 
 	local Network = require(script.Parent.Network.Client)
 
@@ -204,18 +275,28 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 		_refused = false,
 		_world = world,
 		_rigs = rigs,
+		_simulation = shared.rates.simulation,
+		_limits = limits,
+		_radius = client.bodies.radius,
+		_late = client.bodies.late,
 		_own = nil :: number?,
 		_generation = 0,
 		_outfit = nil :: Values?,
 		_held = nil :: Values?,
 		_rigged = {} :: { [number]: Slot },
 		_models = {} :: { [number]: Model },
-		_ragdolls = {} :: { [number]: number },
+		_deaths = {} :: { [number]: number },
 		_posed = {} :: { number },
+		_outlined = {} :: { [number]: true },
 		_states = {} :: { [number]: StepState },
 		_bodies = {} :: { StepState },
 		_eye = vector.zero,
 		_look = AHEAD,
+		_clock = 0,
+		_ticks = nil :: number?,
+		_calls = {} :: { [number]: { number } },
+		_watching = nil :: Watch?,
+		_feedRead = Feed.new(),
 		_public = Public.new(),
 		_spawned = {} :: { [{ nil }]: Spawned },
 		_despawned = {} :: { [{ nil }]: Despawned },
@@ -225,9 +306,12 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 	World.setBodies(world, handle._bodies)
 
 	-- Every connection below lives for the client session
-	-- Whiteoak TODO: Platform, Spectate, Withheld and Feed get their listeners with step 3's platforms and spectate
-	Network.Shared.on(function (hash: number, _: number)
-		handle:_handshake(hash)
+	Network.Shared.on(function (hash: number, tick: number)
+		handle:_handshake(hash, tick)
+	end)
+
+	Network.Platform.on(function (id: number, tick: number)
+		handle:_call(id, tick)
 	end)
 
 	Network.Slots.on(function (entries: { Reliable.Entry })
@@ -238,15 +322,31 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 		handle:_death(character, body, pushX, pushY, pushZ)
 	end)
 
+	Network.Spectate.on(function (target: number?, tick: number)
+		handle:_spectate(target, tick)
+	end)
+
 	Network.Relay.on(function (data: buffer)
 		if handle._verified then
 			Interpolate.receive(data)
 		end
 	end)
 
+	Network.Withheld.on(function (data: buffer)
+		if handle._verified then
+			Interpolate.withheld(data)
+		end
+	end)
+
 	Network.Owner.on(function (data: buffer)
 		if handle._verified and handle._own ~= nil then
 			Predict.receive(data)
+		end
+	end)
+
+	Network.Feed.on(function (data: buffer)
+		if handle._verified then
+			handle:_feed(data)
 		end
 	end)
 
@@ -282,16 +382,24 @@ end
 
 --[[
     Holds the server's hash of its shared table against this one's: a match
-    lets the client play, and a mismatch stops it for good, warns with both
-    hashes and kicks the local player with them, so a client with other
-    declarations or values never plays
+    lets the client play and starts the clock at the server's tick, and a
+    mismatch stops it for good, warns with both hashes and kicks the local
+    player with them, so a client with other declarations or values never
+    plays
+
+    @ tick | the server's simulation tick, unwrapped from its start
 --]]
 
-function Client._handshake(self: Self, hash: number)
+function Client._handshake(self: Self, hash: number, tick: number)
 	if self._refused then
 		return
 	elseif hash == self._hash then
 		self._verified = true
+
+		-- What every later u16 tick unwraps against, a step's included
+		self._ticks = tick
+		self._world.clock = tick
+
 		return
 	end
 
@@ -305,10 +413,41 @@ function Client._handshake(self: Self, hash: number)
 end
 
 --[[
+    Takes a platform's call as Volt's Platform sends it, applied at once to
+    a platform registered now, and kept with the call before it, as the
+    step keeps them, for one the game registers later or again
+
+    @ tick | the press's simulation tick, unwrapped from the server's start
+--]]
+
+function Client._call(self: Self, id: number, tick: number)
+	if self._refused then
+		return
+	end
+
+	local calls: { number } = self._calls[id] or {}
+	self._calls[id] = calls
+	if table.find(calls, tick) then
+		return
+	end
+
+	table.insert(calls, tick)
+	table.sort(calls)
+	if #calls > CALLS_KEPT then
+		table.remove(calls, 1)
+	end
+
+	local world: World = self._world
+	if world.platforms[id] ~= nil then
+		Platforms.call(world, id, tick)
+	end
+end
+
+--[[
     Takes the slot table's entries as Volt's Slots sends them: the local
     player's own slot first, ending its body when its slot is freed, given
-    to another or replaced, and a ragdoll whose body's slot the table ends,
-    then every entry to the remote interpolation
+    to another or replaced, and a body a death drew whose slot the table
+    ends, then every entry to the remote interpolation
 --]]
 
 function Client._slots(self: Self, entries: { Reliable.Entry })
@@ -319,8 +458,8 @@ function Client._slots(self: Self, entries: { Reliable.Entry })
 	for _, entry: Reliable.Entry in entries do
 		local slot: number, generation: number, rig: Reliable.Rig?, player: Instance? = Reliable.read(entry)
 
-		-- A ragdoll's slot keeps no stretch of its own the interpolation would end, so the table ends it here
-		local lying: number? = self._ragdolls[slot]
+		-- A body a death drew may have no stretch of its own the interpolation would end, so the table ends it here
+		local lying: number? = self._deaths[slot]
 		if lying ~= nil and (rig == nil or generation ~= lying) then
 			self:_despawn(slot)
 		end
@@ -360,8 +499,8 @@ end
 
 --[[
     Takes a death message as Volt's Death sends it. A rig out for the dying
-    slot becomes its body's ragdoll, keyed to the body's slot, and a death
-    of the local player's own character ends its body
+    slot becomes its body's, keyed to the body's slot, and a death of the
+    local player's own character ends its body
 --]]
 
 function Client._death(self: Self, character: number, body: number, pushX: number, pushY: number, pushZ: number)
@@ -369,25 +508,24 @@ function Client._death(self: Self, character: number, body: number, pushX: numbe
 		return
 	end
 
-	local slot: number, bodySlot: number, push: vector = Interpolate.death(character, body, pushX, pushY, pushZ)
+	local slot: number, bodySlot: number, push: vector, age: number =
+		Interpolate.death(character, body, pushX, pushY, pushZ)
 	local _, bodyGeneration: number = Record.split(body)
 	local dying: Slot? = self._rigged[slot]
-	local free: boolean = bodySlot == slot or not self._rigged[bodySlot]
 
-	-- Whiteoak TODO: draw the body lying, with no ragdoll, past bodies.radius or bodies.late and for a body first
-	-- met by its reveal, once step 3's bodies give the lying pose
-	if dying and self._ragdolls[slot] == nil and free then
-		local model: Model = self._models[slot]
-		self._rigs:ragdoll(slot, bodySlot, push)
-		self:_forget(slot)
+	if dying and self._deaths[slot] == nil then
+		-- A body its own reveal drew before the death came gives its rig back for the one that died, which would
+		-- otherwise stay out with nothing to pose it
+		if bodySlot ~= slot and self._rigged[bodySlot] then
+			self:_despawn(bodySlot)
+		end
 
-		local lying: Slot = { id = bodySlot, kind = "Body", player = nil }
-		self._rigged[bodySlot] = lying
-		self._models[bodySlot] = model
-		self._ragdolls[bodySlot] = bodyGeneration
+		self:_bury(dying, slot, bodySlot, bodyGeneration, push, age)
+	end
 
-		fire(self._despawned, dying)
-		fire(self._spawned, lying, model)
+	local watching: Watch? = self._watching
+	if watching and slot == watching.slot then
+		watching.died = true
 	end
 
 	if slot == self._own then
@@ -396,9 +534,250 @@ function Client._death(self: Self, character: number, body: number, pushX: numbe
 end
 
 --[[
+    Turns a dying slot's rig into its body's, keyed to the body's slot: a
+    ragdoll pushed along the death's attack for a client within
+    bodies.radius of where it was drawn, which the death reached within
+    bodies.late of its newest record, and otherwise laid down at once where
+    it was drawn. The owner's own body and a spectated target are drawn
+    from states the server sends live, so their deaths are never late
+
+    @ age | seconds since the dying life's newest record, by the clock's estimate
+--]]
+
+function Client._bury(
+	self: Self,
+	dying: Slot,
+	slot: number,
+	body: number,
+	generation: number,
+	push: vector,
+	age: number
+)
+	local watching: Watch? = self._watching
+	local from: StepState? = self._states[slot]
+	local late: number = age
+
+	if slot == self._own then
+		from = Predict.state()
+		late = 0
+	elseif watching and slot == watching.slot then
+		from = nil
+		if watching.states > 0 then
+			from = watching.drawn
+		end
+		late = 0
+	end
+
+	local distance: number = math.huge
+	if from then
+		distance = vector.magnitude(from.position - self._eye)
+	end
+
+	local rigs: Rigs.Rigs = self._rigs
+	local model: Model = self._models[slot]
+	local ragdolls: boolean = distance <= self._radius and late <= self._late
+
+	if ragdolls then
+		rigs:ragdoll(slot, body, push)
+	else
+		rigs:lie(slot, body)
+	end
+
+	self:_forget(slot)
+
+	local lying: Slot = { id = body, kind = "Body", player = nil, withheld = false }
+	self._rigged[body] = lying
+	self._models[body] = model
+	self._deaths[body] = generation
+
+	-- A body laid down is posed with every other rig, lying where the dying rig was drawn until its own records come
+	if not ragdolls then
+		table.insert(self._posed, body)
+
+		local state: StepState = self._states[body] or State.new()
+		self._states[body] = state
+
+		if from then
+			State.copy(from, state)
+			Interpolate.lying(state)
+			rigs:pose(body, state, distance, 0)
+		end
+	end
+
+	fire(self._despawned, dying)
+	fire(self._spawned, lying, model)
+end
+
+--[[
+    Takes a spectate's start, switch or end as Volt's Spectate sends it:
+    the characters drawn from before the new view's first tick close, the
+    old target's rig goes back to the pool, and a new target is drawn from
+    its feed from then on, its world rig taking the local player's own rig
+    setting on this screen
+--]]
+
+function Client._spectate(self: Self, target: number?, tick: number)
+	if self._refused then
+		return
+	end
+
+	Interpolate.restart(tick)
+
+	local watching: Watch? = self._watching
+	if watching then
+		self._watching = nil
+		self:_despawn(watching.slot)
+	end
+
+	if target == nil then
+		return
+	end
+
+	local slot: number, generation: number = Record.split(target)
+	self._watching = {
+		slot = slot,
+		generation = generation,
+		states = 0,
+		older = State.new(),
+		newer = State.new(),
+		spare = State.new(),
+		drawn = State.new(),
+		tick = 0,
+		arrived = 0,
+		yaw = 0,
+		pitch = 0,
+		headYaw = 0,
+		headPitch = 0,
+		rig = nil,
+		died = false,
+	}
+end
+
+--[[
+    Takes one feed as Volt's Feed sends it while the client spectates: the
+    target's OwnerState becomes the newer of the two it is drawn between,
+    one no newer than that is a straggler and dropped, and the newest
+    stepped command's look is the one its eye looks along
+--]]
+
+function Client._feed(self: Self, data: buffer)
+	local watching: Watch? = self._watching
+	if not watching then
+		return
+	end
+
+	local feed: Feed.Feed = self._feedRead
+	Feed.read(data, feed, self._limits)
+
+	local spare: StepState = watching.spare
+	OwnerState.read(feed.ownerData, feed.ownerAt, feed.ownerLength, spare, nil, self._limits)
+
+	if watching.states > 0 and Sequence.difference(spare.tick, watching.newer.tick) <= 0 then
+		return
+	end
+
+	watching.spare = watching.older
+	watching.older = watching.newer
+	watching.newer = spare
+	watching.states = math.min(watching.states + 1, 2)
+	watching.arrived = self._clock
+
+	if feed.count > 0 then
+		local look: Feed.Look = feed.looks[1]
+		watching.yaw = look.yaw
+		watching.pitch = look.pitch
+		watching.headYaw = look.headYaw
+		watching.headPitch = look.headPitch
+	end
+end
+
+--[[
+    The spectated target as drawn now, between its last two feed states
+    over the ticks between them from the newer's arrival on, never across
+    a teleport or a change of platform, with the tick it is drawn at, and
+    its cleared eye and newest look made the eye the client views; nil
+    before its first feed. It makes no table
+--]]
+
+function Client._view(self: Self): StepState?
+	local watching: Watch? = self._watching
+	if not watching or watching.states == 0 then
+		return nil
+	end
+
+	local drawn: StepState = watching.drawn
+	local older: StepState = watching.older
+	local newer: StepState = watching.newer
+
+	local t: number = 1
+	if watching.states > 1 then
+		local span: number = Sequence.difference(newer.tick, older.tick) / self._simulation
+		t = math.clamp((self._clock - watching.arrived) / span, 0, 1)
+	end
+
+	if t >= 1 then
+		State.copy(newer, drawn)
+		watching.tick = newer.tick
+	else
+		State.copy(older, drawn)
+		watching.tick = older.tick
+
+		if older.epoch == newer.epoch and older.platform == newer.platform then
+			local fromTick: number = older.tick
+			watching.tick = Math.lerp(fromTick, fromTick + Sequence.difference(newer.tick, fromTick), t) % WIRE
+
+			local from: vector = older.position
+			local to: vector = newer.position
+			local moving: vector = older.velocity
+			local moved: vector = newer.velocity
+			local fromYaw: number = older.facing * YAW_STEPS
+			local toYaw: number = fromYaw + Sequence.difference(newer.facing * YAW_STEPS, fromYaw)
+
+			drawn.position =
+				vector.create(Math.lerp(from.x, to.x, t), Math.lerp(from.y, to.y, t), Math.lerp(from.z, to.z, t))
+			drawn.velocity = vector.create(
+				Math.lerp(moving.x, moved.x, t),
+				Math.lerp(moving.y, moved.y, t),
+				Math.lerp(moving.z, moved.z, t)
+			)
+			drawn.facing = (Math.lerp(fromYaw, toYaw, t) % Constants.ANGLE_STEPS) / YAW_STEPS
+			drawn.lean = Math.lerp(older.lean, newer.lean, t)
+			drawn.eyeHeight = Math.lerp(older.eyeHeight, newer.eyeHeight, t)
+		end
+	end
+
+	local world: World = self._world
+	self._eye = Eye.clear(drawn, world)
+	self._look =
+		Public.look(watching.yaw, watching.pitch, watching.headYaw, watching.headPitch, world.settings.headCone)
+
+	return drawn
+end
+
+--[[
+    Takes the spectated target's rig out once its first feed has come,
+    dressed as the look entries last gave it, and tells the pool it is the
+    target's, whose world rig takes the local player's own rig setting
+--]]
+
+function Client._watch(self: Self, watching: Watch)
+	local slot: number = watching.slot
+	if not self._rigged[slot] then
+		local occupant: Instance?, outfit: Values, held: Values? = Interpolate.occupant(slot)
+		self:_spawn(slot, "Player", occupant :: Player?, outfit, held)
+	end
+
+	local model: Model? = self._models[slot]
+	if model and model ~= watching.rig then
+		watching.rig = model
+		self._rigs:watch(slot)
+	end
+end
+
+--[[
     Draws a slot a reveal starts: a rig out with its look and held item and
     the spawn told, or, for a slot that already has one, as after a change
-    of kind or a ragdoll, the kind kept and nothing told again
+    of kind or a death, the kind kept and nothing told again
 --]]
 
 function Client._reveal(self: Self, slot: number, kind: Kind, player: Player?, outfit: Values, held: Values?)
@@ -430,7 +809,7 @@ function Client._spawn(self: Self, slot: number, kind: Kind, player: Player?, ou
 		xpcall(rigs.hold, warnHook, rigs, slot, held)
 	end
 
-	local drawn: Slot = { id = slot, kind = kind, player = player }
+	local drawn: Slot = { id = slot, kind = kind, player = player, withheld = Interpolate.isWithheld(slot) }
 	self._rigged[slot] = drawn
 	self._models[slot] = rig
 	table.insert(self._posed, slot)
@@ -446,7 +825,13 @@ end
 function Client._forget(self: Self, slot: number)
 	self._rigged[slot] = nil
 	self._models[slot] = nil
-	self._ragdolls[slot] = nil
+	self._deaths[slot] = nil
+	self._outlined[slot] = nil
+
+	local watching: Watch? = self._watching
+	if watching and slot == watching.slot then
+		watching.rig = nil
+	end
 
 	local posed: { number } = self._posed
 	local index: number? = table.find(posed, slot)
@@ -510,12 +895,71 @@ function Client._footstep(self: Self, step: Block.Footstep)
 	fire(self._heard, heard)
 end
 
+-- Draws a slot's rig under the spectate outline or out of it, telling the pool only of a change
+function Client._outline(self: Self, slot: number, outlined: boolean)
+	if (self._outlined[slot] == true) == outlined then
+		return
+	end
+
+	if outlined then
+		self._outlined[slot] = true
+	else
+		self._outlined[slot] = nil
+	end
+
+	self._rigs:outline(slot, outlined)
+end
+
+--[[
+    Moves the clock on a frame and places every platform's copy. The clock
+    follows the tick the owner's body is drawn at, unwrapped, and runs on at
+    the simulation rate while it has none, and the world's clock is its
+    floor, so every step and replay unwraps its tick against it. The copies
+    stand at the owner's drawn tick, a viewed target's while the client
+    spectates, or the clock with no body. Before the handshake names the
+    server's tick nothing moves
+--]]
+
+function Client._place(self: Self, dt: number, viewed: StepState?)
+	local started: number? = self._ticks
+	if started == nil then
+		return
+	end
+
+	local world: World = self._world
+	local ticks: number = started
+	local drawn: number? = Predict.drawn()
+
+	if drawn ~= nil then
+		ticks += Sequence.difference(drawn, ticks % WIRE)
+	else
+		ticks += dt * self._simulation
+
+		-- With no body nothing steps, so the casts outside the step meet the platforms where the clock stands
+		world.tick = math.floor(ticks) % WIRE
+	end
+
+	self._ticks = ticks
+	world.clock = math.floor(ticks)
+
+	local at: number = ticks
+	local watching: Watch? = self._watching
+	if watching and viewed then
+		at = ticks + Sequence.difference(watching.tick, ticks % WIRE)
+	end
+
+	ClientPlatforms.frame(world, at)
+end
+
 --[[
     One rendered frame: the owner's tick and Move, the render clock, the
-    owner's own rig and its first-person copy out once its body starts,
-    then every drawn rig posed at its distance from the owner's eye, and
-    the live players and NPCs drawn handed to the owner's prediction to
-    block against. Nothing in the walk over the drawn rigs makes a table
+    owner's own rig and its first-person copy out once its body starts, a
+    spectated target drawn from its feed, the clock and the platforms'
+    copies, then every drawn rig posed at its distance from the eye viewed,
+    a remote rider on its platform's copy, each other player outlined while
+    the client spectates, and the live players and NPCs drawn handed to the
+    owner's prediction to block against. Nothing in the walk over the drawn
+    rigs makes a table
 --]]
 
 function Client._frame(self: Self, dt: number)
@@ -523,6 +967,7 @@ function Client._frame(self: Self, dt: number)
 		return
 	end
 
+	self._clock += dt
 	xpcall(Predict.frame, warnFrame, dt)
 	Interpolate.frame(dt)
 
@@ -536,6 +981,19 @@ function Client._frame(self: Self, dt: number)
 		end
 	end
 
+	-- The owner's aim pitch from the look it publishes, since its state holds none, before a target's eye replaces it
+	local ownPitch: number = pitchOf(self._look)
+
+	local watching: Watch? = self._watching
+	local viewed: StepState? = self:_view()
+	self:_place(dt, viewed)
+
+	local target: number? = nil
+	if watching and viewed and not watching.died then
+		target = watching.slot
+		self:_watch(watching)
+	end
+
 	local rigs: Rigs.Rigs = self._rigs
 	local eye: vector = self._eye
 	local bodies: { StepState } = self._bodies
@@ -543,33 +1001,43 @@ function Client._frame(self: Self, dt: number)
 
 	for _, slot: number in self._posed do
 		if slot == own then
+			-- The pool poses the owner's first-person copy beside its world rig with no aim pitch
 			if body then
-				-- The owner's aim pitch from the look it publishes, since its state holds none; the pool poses its
-				-- first-person copy beside it with none
-				local pitch: number = math.asin(math.clamp(self._look.y, -1, 1))
-				rigs:pose(slot, body, vector.magnitude(body.position - eye), pitch)
+				rigs:pose(slot, body, vector.magnitude(body.position - eye), ownPitch)
 			end
 
 			continue
 		end
 
+		local drawn: Slot = self._rigged[slot]
+		if slot == target and viewed then
+			rigs:pose(slot, viewed, vector.magnitude(viewed.position - eye), pitchOf(self._look))
+			table.insert(bodies, viewed)
+
+			continue
+		end
+
+		drawn.withheld = Interpolate.isWithheld(slot)
+		self:_outline(slot, watching ~= nil and drawn.kind == "Player")
+
 		local state: StepState = self._states[slot]
-		local drawn: boolean, pitch: number = Interpolate.pose(slot, state)
-		if not drawn then
+		local shown: boolean, pitch: number = Interpolate.pose(slot, state)
+		if not shown or not placeRider(state) then
 			continue
 		end
 
 		rigs:pose(slot, state, vector.magnitude(state.position - eye), pitch)
 
-		local kind: Kind = self._rigged[slot].kind
-		if kind == "Player" or kind == "Npc" then
+		if drawn.kind == "Player" or drawn.kind == "Npc" then
 			table.insert(bodies, state)
 		end
 	end
 end
 
---- The cleared eye and look of what the client views: the owner's own body
---- as drawn this frame, or where it was last drawn while it has none. Tread
+--- The cleared eye and look of what the client views: a spectated
+--- target's from its feed, drawn between its last two states and looking
+--- along its newest command's look, else the owner's own body as drawn
+--- this frame, or where the eye was last drawn while there is none. Tread
 --- draws each frame in a render step just ahead of Camera priority, so a
 --- camera bound at Camera priority or later, or connected to PreRender,
 --- reads this frame's eye.
@@ -579,7 +1047,7 @@ end
 --- @return Vector3 -- The look, a unit vector
 
 function Client.getEye(self: Self): (Vector3, Vector3)
-	if Predict.state() then
+	if self:_view() == nil and Predict.state() then
 		self._eye, self._look = Predict.eye()
 	end
 
@@ -636,9 +1104,10 @@ end
 --- screen: "arms" both arms of the first-person copy, upper arm, lower arm
 --- and hand, "chest" its upper torso, "copy" the whole copy, and "rig" the
 --- world rig other players see, hidden here until the game shows it, for a
---- camera that leaves the eye. The copy's head always stays out of view.
---- Each setting holds from one body to the next, so a view the game set
---- stays through a respawn.
+--- camera that leaves the eye. While the client spectates, the target's
+--- world rig takes the "rig" setting too. The copy's head always stays out
+--- of view. Each setting holds from one body to the next, so a view the
+--- game set stays through a respawn.
 --- @method showBody
 --- @within Client
 --- @param part "arms" | "chest" | "copy" | "rig" -- What to show or hide
@@ -667,6 +1136,32 @@ function Client.addLadder(self: Self, cframe: CFrame, size: Vector3): () -> ()
 	end
 
 	return World.addLadder(self._world, cframe, size)
+end
+
+--- Registers a moving platform for the owner's prediction and this
+--- screen, as the server registers the same one: its boxes join the casts
+--- prediction steps against where its path puts them, every call already
+--- heard for its id applies, and its model, if it has one, moves each
+--- frame to where its path puts it at the tick the owner's body is drawn
+--- at. It refuses what the server's refuses, and a model part with
+--- CanCollide on.
+--- @method addPlatform
+--- @within Client
+--- @param platform Platform -- Its id, its boxes in its own space, its path and its model
+--- @return () -> () -- The closure that removes it
+
+function Client.addPlatform(self: Self, platform: Platform): () -> ()
+	local world: World = self._world
+	local remove: () -> () = ClientPlatforms.add(world, platform)
+
+	local calls: { number }? = self._calls[platform.id]
+	if calls then
+		for _, tick: number in calls do
+			Platforms.call(world, platform.id, tick)
+		end
+	end
+
+	return remove
 end
 
 --- Calls back on every replay of the owner's prediction, with the
@@ -717,8 +1212,9 @@ function Client.onFootstep(self: Self, callback: Heard): () -> ()
 end
 
 --- Calls back when a slot's rig is drawn: a character, sleeper or body
---- revealed, the owner's own body started, or a dying rig turned into its
---- body's ragdoll.
+--- revealed, the owner's own body started, a spectated target's first
+--- feed, or a dying rig turned into its body. While the client spectates,
+--- a slot's withheld says whether anti-ESP withheld it from the target.
 --- @method onSpawned
 --- @within Client
 --- @param callback (slot: Slot, rig: Model) -> ()
@@ -729,7 +1225,8 @@ function Client.onSpawned(self: Self, callback: Spawned): () -> ()
 end
 
 --- Calls back when a slot's rig is put away: hidden, its slot freed or
---- given a new life, or turned into its body's ragdoll.
+--- given a new life, dropped by a spectate's start or end, or turned into
+--- its body.
 --- @method onDespawned
 --- @within Client
 --- @param callback (slot: Slot) -> ()
@@ -742,7 +1239,8 @@ end
 --- @class Client
 --- The client handle a game holds once Tread's client has started: the
 --- eye, the state, the render time, where a mantle would end, the local
---- player's own body on their screen, ladders and the client's signals.
+--- player's own body on their screen, ladders, platforms and the client's
+--- signals.
 
 export type Client = Self
 type Self = typeof(setmetatable({} :: Fields, Client))

@@ -23,22 +23,58 @@ export type CharacterFields = {
 	player: Player | Bot,
 	_slot: number,
 	_generation: number,
-	_live: boolean, -- Until destroy
+	_live: boolean, -- Until it dies, sleeps or is destroyed
+	_kept: boolean, -- Whether it still holds its slot, which a sleep hands the sleeper and a destroy releases
+	_destroyed: boolean,
 }
 
 -- The character's methods, which Characters.luau defines
 export type CharacterOwn = {
 	getState: (self: Character) -> PublicState,
 	setMode: (self: Character, mode: MoveMode) -> (),
+	teleport: (self: Character, at: CFrame) -> (),
 	setDowned: (self: Character, downed: boolean) -> (),
 	setField: (self: Character, name: string, value: number | boolean) -> (),
 	setOutfit: (self: Character, outfit: Values) -> (),
 	setHeld: (self: Character, held: Values?) -> (),
+	setTeam: (self: Character, team: number?) -> (),
 	setInvisible: (self: Character, invisible: boolean) -> (),
+	sleep: (self: Character) -> Sleeper?,
+	die: (self: Character, push: Vector3?) -> Body,
 	destroy: (self: Character) -> (),
 }
 
 export type Character = CharacterFields & CharacterOwn
+
+-- What a sleeper holds: the slot and life it keeps through a wake, which its methods read and write
+export type SleeperFields = {
+	_slot: number,
+	_generation: number,
+	_live: boolean, -- Until it wakes or is destroyed
+}
+
+-- The sleeper's methods, which Characters.luau defines
+export type SleeperOwn = {
+	wake: (self: Sleeper, player: Player | Bot) -> Character,
+	moveTo: (self: Sleeper, at: CFrame) -> (),
+	destroy: (self: Sleeper) -> (),
+}
+
+export type Sleeper = SleeperFields & SleeperOwn
+
+-- What a body holds: its own slot and life, until the game removes it
+export type BodyFields = {
+	_slot: number,
+	_generation: number,
+	_live: boolean, -- Until destroy
+}
+
+-- The body's one method, which Characters.luau defines
+export type BodyOwn = {
+	destroy: (self: Body) -> (),
+}
+
+export type Body = BodyFields & BodyOwn
 
 -- One capsule of a hit shape: in the character's own space in the shared table's hit shapes, its feet at the origin
 -- facing along -Z, and placed in the world in a sample
@@ -64,6 +100,7 @@ export type Slot = {
 	id: number,
 	kind: Kind, -- Changes in place when a drawn character changes kind, as a player falling asleep does
 	player: Player?, -- A live player's, nil for any other kind
+	withheld: boolean, -- While a spectating moderator is sent it only because anti-ESP withheld it from the target
 }
 
 -- A culled enemy's step the viewer can hear: where it fell, its kind and the ground's material, and no player

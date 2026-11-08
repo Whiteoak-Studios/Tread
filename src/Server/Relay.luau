@@ -1,7 +1,7 @@
 --[[
     The relay: which characters each viewer is sent and how often inside its
-    byte budget, and the blocks of their records, a culled enemy's
-    footsteps, and the reveals, hides and looks that ride until acknowledged
+    budget, its blocks of records, footsteps and pending entries, copied to
+    each moderator watching it, and the withheld block those moderators get
 --]]
 
 --!strict
@@ -53,15 +53,24 @@ local PITCH_CHANGE: number = Constants.RECORD_PITCH_STEPS * TURN_CHANGE / QUARTE
 -- logged as its slot times ENTRY_PARTS plus its part
 local RING: number = 64
 local LOG: number = 4096
-local ENTRY_PARTS: number = 4
+local ENTRY_PARTS: number = 5
 local VISIBILITY: number = 0 -- A reveal or a hide
 local LOOK_PART: number = 1
 local HELD_PART: number = 2
+local WITHHELD_LOOK_PART: number = 3 -- A withheld character's look, which rides the withheld block beside the copy
+local WITHHELD_HELD_PART: number = 4
+
+-- Each block keeps the recipients still to acknowledge it as a mask, a bit each: SELF its own viewer, and each
+-- moderator watching that viewer the bit it was given, 1 to MAX_WATCHERS
+-- Whiteoak TODO: the mask is a u32, so one target takes at most 31 watchers; more needs a wider mask per block, two
+-- u32s or a buffer of bits a block, once a game puts more than 31 moderators on one target
+local SELF: number = 2 ^ 0
+local MAX_WATCHERS: number = Constants.MAX_WATCHERS
 
 local STEP_START: number = 256 -- The steps one run holds before its buffers grow
 local SILENT: number = -1 -- A squared range no step falls inside, for a kind the game gives no range
 
-local UNSTARTED: string = "The relay sends nothing until Relay.start hands it its settings and its three functions"
+local UNSTARTED: string = "The relay sends nothing until Relay.start hands it its settings and its four functions"
 
 -- What a sent target's tier tick lists its record as
 local UNLISTED: number = 0
@@ -84,6 +93,13 @@ local OWN: number = 2 ^ 11 -- The viewer's own character, whose looks it is give
 local LOOKS: number = LOOK + LOOK_CARRIED + HELD + HELD_CARRIED
 local STRETCH: number = SENT + REVEAL + HIDE + VISIBILITY_CARRIED + LOOKS -- All a stretch of being sent holds
 local KEEP: number = RELEVANT + SENT + REVEAL + HIDE + LOOK + HELD + OWN -- Any of these keeps a slot tracked
+
+-- What a watched target's withheld block holds for a slot, a bit each
+local WITHHELD: number = 2 ^ 0 -- A culled player the target is not sent, which its watchers get
+local WITHHELD_LOOK: number = 2 ^ 1 -- Its look pending for the watchers
+local WITHHELD_LOOK_CARRIED: number = 2 ^ 2
+local WITHHELD_HELD: number = 2 ^ 3 -- Its held item pending for them
+local WITHHELD_HELD_CARRIED: number = 2 ^ 4
 
 -- Each kind's code, its place in Block's list from 0, which a reveal and a keyframe carry
 local KIND_CODES: { [string]: number } = {}
@@ -112,6 +128,7 @@ type Values = State.Values
 
 type Bot = { Name: string }
 type Key = Player | Bot
+type Platforms = { [number]: vector } -- Each platform's place at the tick, by its id
 
 -- What the server handle starts the relay with: the game's checked tables and its compiled declarations
 export type Settings = {
@@ -127,14 +144,29 @@ export type Viewer = {
 	position: vector, -- Where its relevancy, tiers and earshot are measured from
 	acknowledged: number, -- The newest relay sequence its client received, 0 for none
 	received: number, -- The mask of the 16 sequences before that one, bit 0 the one just before
+	target: Key?, -- The viewer it spectates, whose blocks it gets copies of in place of its own; nil for none
 }
 
--- What the relay keeps for one viewer: the slots it holds anything for, each field a buffer by slot, and the blocks
--- its acknowledgment can still name with the pending entries each carried
+-- What a watched target's withheld block keeps for each slot, by slot in buffers
+type Withheld = {
+	flags: buffer, -- u8
+	lives: buffer, -- u8: the generation its withheld stretch belongs to
+	lookSent: buffer, -- u16: the look version the watchers were last given
+	heldSent: buffer,
+	lookFrom: buffer, -- u16: the copy the pending look first rode beside since it last changed
+	heldFrom: buffer,
+	aim: buffer, -- f32: the tier ticks it is owed at the target's aim rate
+}
+
+-- What the relay keeps for one viewer: the slots it holds anything for, each field a buffer by slot, the blocks
+-- its acknowledgment can still name with the pending entries each carried, and the moderators watching it
 type View = {
 	key: Key,
 	sequence: number, -- The message sequence its next block takes
 	newest: number, -- The sequence of the last block it was sent, 0 before the first
+	heard: number, -- The sequence of the newest block its client was sent, its own or a copy, 0 before the first
+	watching: Key?, -- The target it last watched, nil while its own view runs
+	turn: number, -- The last run it was handed in with no target, so its own view ran
 	own: number?, -- Its own character's slot when it last ran
 	tracked: { number },
 	places: buffer, -- u16: each tracked slot's place in tracked, 0 for none
@@ -154,14 +186,25 @@ type View = {
 	ringSequences: buffer, -- u32: each remembered block's sequence plus 1, 0 for none
 	ringStarts: buffer, -- f64: where its entries start in the log
 	ringCounts: buffer, -- u16: how many it carried
+	ringOwed: buffer, -- u32: the mask of its recipients still to acknowledge it
 	log: buffer, -- u16 a pending entry
 	logHead: number, -- The entries ever logged
+	watchers: { [number]: Key }, -- The moderators watching it, by their bit
+	watcherViews: { [number]: View },
+	bits: { [Key]: number },
+	watcherRuns: buffer, -- u32: the last run each bit's watcher was handed in watching it
+	watcherCount: number,
+	withheld: Withheld?, -- Its withheld block's state, made the first time it is watched
 }
 
 -- What start hands in, each refusing until then
 local Started: boolean = false
 
-local Send: (key: Key, data: buffer) -> () = function (_: Key, _: buffer)
+local Send: (keys: { Key }, data: buffer) -> () = function (_: { Key }, _: buffer)
+	error(UNSTARTED)
+end
+
+local SendWithheld: (keys: { Key }, data: buffer) -> () = function (_: { Key }, _: buffer)
 	error(UNSTARTED)
 end
 
@@ -259,6 +302,24 @@ local SoftRoom: number = 0
 -- would remove both, a Volt task if G3 shows the cost
 local Outgoing: { [number]: buffer } = {}
 
+-- Who the open block goes to: the viewer whose turn it is, then each moderator watching it, with their views and
+-- the mask of their bits, and the moderators alone, whom its withheld block goes to
+local Recipients: { Key } = {}
+local RecipientViews: { View } = {}
+local RecipientCount: number = 0
+local RecipientMask: number = 0
+local Watchers: { Key } = {}
+local Copied: boolean = false -- Whether its turn has opened a block yet this run
+
+-- The withheld block being filled for the viewer whose turn it is, which takes nothing of its budget
+local WithheldOut: Block.Block = Block.new()
+local WithheldOpen: boolean = false
+local WithheldFilled: number = 0
+local WithheldRecords: { number } = {}
+local WithheldLooks: { number } = {}
+
+local Watched: { View } = {} -- Every view with a watcher
+
 -- The viewer's turn's lists, kept across turns
 local Hides: { number } = {}
 local Reveals: { number } = {}
@@ -287,21 +348,29 @@ end
 
 --[[
     Starts the relay with the game's tables and what it sends through: send
-    fires one block to a viewer, traffic is Volt's count of the bytes sent
-    to it over the last second, and isHidden is anti-ESP's answer for a
-    pair. It runs once
+    fires one block to a viewer and the moderators watching it, and
+    sendWithheld one withheld block to those moderators, each in one
+    fireList over the relay's own list, valid during the call; traffic is
+    Volt's count of the bytes sent to a viewer over the last second, and
+    isHidden is anti-ESP's answer for a pair. It runs once
 --]]
 
 function Relay.start(
 	settings: Settings,
-	send: (key: Key, data: buffer) -> (),
+	send: (keys: { Key }, data: buffer) -> (),
+	sendWithheld: (keys: { Key }, data: buffer) -> (),
 	traffic: (key: Key) -> number,
 	isHidden: (viewer: Viewer, slot: number) -> boolean
 )
 	if Started then
 		error("Relay.start runs once, and it has already run", 2)
-	elseif type(send) ~= "function" or type(traffic) ~= "function" or type(isHidden) ~= "function" then
-		error("Relay.start takes send, traffic and isHidden as functions", 2)
+	elseif
+		type(send) ~= "function"
+		or type(sendWithheld) ~= "function"
+		or type(traffic) ~= "function"
+		or type(isHidden) ~= "function"
+	then
+		error("Relay.start takes send, sendWithheld, traffic and isHidden as functions", 2)
 	end
 
 	local shared: Shared = settings.shared
@@ -309,6 +378,7 @@ function Relay.start(
 
 	Started = true
 	Send = send
+	SendWithheld = sendWithheld
 	Traffic = traffic
 	IsHidden = isHidden
 	Layout = settings.layout
@@ -367,21 +437,29 @@ end
 --[[
     Encodes a slot's record once for every viewer: its place, its facing
     and its state word from the state, and its pitch and head offset from
-    the command it last stepped, which the step has already held to the cone
+    the command it last stepped, which the step has already held to the cone.
+    A rider's place is in its platform's space while platforms holds where
+    that platform stands this tick, and in world coordinates otherwise
 --]]
 
-local function encode(slot: number, state: State, command: Command?, generation: number)
+local function encode(slot: number, state: State, command: Command?, generation: number, platforms: Platforms?)
 	local record: Record.Record = Scratch
 	record.slot = slot
 	record.generation = generation
 	record.position = state.position
+	record.platform = 0
 	record.yaw = state.facing
 	record.word = StateWord.pack(state)
 	record.lean = state.lean
 
-	-- Whiteoak TODO: a rider's record carries its platform's id and its place in the platform's space once Platforms
-	-- gives each platform's path at a tick; until then every record is in world coordinates
-	record.platform = 0
+	local platform: number = state.platform
+	if platforms and platform ~= 0 then
+		local at: vector? = platforms[platform]
+		if at then
+			record.platform = platform
+			record.position = state.position - at
+		end
+	end
 
 	if command then
 		record.pitch = command.pitch
@@ -577,20 +655,25 @@ local function lookAgain(view: View, slot: number, flags: number): number
 	return flags
 end
 
--- Each part of a slot's look pending again, its latest, when it changed since the viewer was last given it
-local function restyle(view: View, slot: number, flags: number): number
-	local look: number = buffer.readu16(LookVersions, slot * 2)
-	if look ~= buffer.readu16(view.lookSent, slot * 2) then
-		buffer.writeu16(view.lookSent, slot * 2, look)
-
-		if dressed(slot) then
-			flags = bit32.bor(bit32.band(flags, bit32.bnot(LOOK_CARRIED)), LOOK)
-		end
+-- Whether a part's version moved on since it was last given out, marking the latest given
+local function moved(sent: buffer, versions: buffer, slot: number): boolean
+	local version: number = buffer.readu16(versions, slot * 2)
+	if version == buffer.readu16(sent, slot * 2) then
+		return false
 	end
 
-	local held: number = buffer.readu16(HeldVersions, slot * 2)
-	if held ~= buffer.readu16(view.heldSent, slot * 2) then
-		buffer.writeu16(view.heldSent, slot * 2, held)
+	buffer.writeu16(sent, slot * 2, version)
+
+	return true
+end
+
+-- Each part of a slot's look pending again, its latest, when it changed since the viewer was last given it
+local function restyle(view: View, slot: number, flags: number): number
+	if moved(view.lookSent, LookVersions, slot) and dressed(slot) then
+		flags = bit32.bor(bit32.band(flags, bit32.bnot(LOOK_CARRIED)), LOOK)
+	end
+
+	if moved(view.heldSent, HeldVersions, slot) then
 		flags = bit32.bor(bit32.band(flags, bit32.bnot(HELD_CARRIED)), HELD)
 	end
 
@@ -714,6 +797,11 @@ local function untrack(view: View, slot: number)
 
 	buffer.writeu16(view.places, slot * 2, 0)
 	buffer.writeu16(view.flags, slot * 2, 0)
+
+	local withheld: Withheld? = view.withheld
+	if withheld then
+		buffer.writeu8(withheld.flags, slot, 0)
+	end
 end
 
 --[[
@@ -723,6 +811,32 @@ end
 --]]
 
 local function clear(view: View, slot: number, part: number, sequence: number)
+	if part == WITHHELD_LOOK_PART or part == WITHHELD_HELD_PART then
+		local withheld: Withheld? = view.withheld
+		if not withheld then
+			return
+		end
+
+		local mark: number = buffer.readu8(withheld.flags, slot)
+		if part == WITHHELD_LOOK_PART then
+			if
+				bit32.btest(mark, WITHHELD_LOOK_CARRIED)
+				and Sequence.difference(sequence, buffer.readu16(withheld.lookFrom, slot * 2)) >= 0
+			then
+				mark = bit32.band(mark, bit32.bnot(WITHHELD_LOOK + WITHHELD_LOOK_CARRIED))
+			end
+		elseif
+			bit32.btest(mark, WITHHELD_HELD_CARRIED)
+			and Sequence.difference(sequence, buffer.readu16(withheld.heldFrom, slot * 2)) >= 0
+		then
+			mark = bit32.band(mark, bit32.bnot(WITHHELD_HELD + WITHHELD_HELD_CARRIED))
+		end
+
+		buffer.writeu8(withheld.flags, slot, mark)
+
+		return
+	end
+
 	local flags: number = buffer.readu16(view.flags, slot * 2)
 
 	if part == VISIBILITY then
@@ -747,13 +861,9 @@ local function clear(view: View, slot: number, part: number, sequence: number)
 	buffer.writeu16(view.flags, slot * 2, flags)
 end
 
--- Clears what one block carried, once, when the block is still remembered and its entries still logged
-local function receipt(view: View, sequence: number)
-	local ring: number = sequence % RING
-	if buffer.readu32(view.ringSequences, ring * 4) ~= sequence + 1 then
-		return
-	end
-
+-- Clears what one remembered block carried, once every recipient it went to has acknowledged it
+local function discharge(view: View, ring: number)
+	local sequence: number = buffer.readu32(view.ringSequences, ring * 4) - 1
 	buffer.writeu32(view.ringSequences, ring * 4, 0)
 
 	-- Entries the log has since written over ride on until a later block's acknowledgment clears them
@@ -768,26 +878,56 @@ local function receipt(view: View, sequence: number)
 	end
 end
 
--- Takes in a viewer's acknowledgment: its newest sequence, 0 for none, and the mask of the 16 before it
-local function acknowledge(view: View, newest: number, mask: number)
+-- One recipient's acknowledgment of a block, its bit in the block's mask, which counts once and only for a block
+-- that went to it
+local function receipt(view: View, sequence: number, bit: number)
+	local ring: number = sequence % RING
+	if buffer.readu32(view.ringSequences, ring * 4) ~= sequence + 1 then
+		return
+	end
+
+	local owed: number = buffer.readu32(view.ringOwed, ring * 4)
+	if not bit32.btest(owed, bit) then
+		return
+	end
+
+	owed = bit32.band(owed, bit32.bnot(bit))
+	buffer.writeu32(view.ringOwed, ring * 4, owed)
+
+	if owed == 0 then
+		discharge(view, ring)
+	end
+end
+
+-- Takes in one recipient's acknowledgment: its newest sequence, 0 for none, and the mask of the 16 before it
+local function acknowledge(view: View, newest: number, mask: number, bit: number)
 	if newest ~= 0 then
-		receipt(view, newest)
+		receipt(view, newest, bit)
 	end
 
 	for back: number = 1, MASK_BITS do
 		if bit32.btest(mask, 2 ^ (back - 1)) then
-			receipt(view, (newest - back) % WRAP)
+			receipt(view, (newest - back) % WRAP, bit)
 		end
 	end
 end
 
--- Opens a viewer's next block of the tick, with the ring entry its acknowledgment will name
+-- Numbers a view's next block past latest, the newest block a watcher's client was sent elsewhere, so an
+-- acknowledgment its client still makes of those can never name one of the view's own
+local function renumber(view: View, latest: number)
+	if latest ~= 0 and Sequence.difference(view.sequence, latest) <= 0 then
+		view.sequence = latest % SEQUENCES + Constants.FIRST_SEQUENCE
+	end
+end
+
+-- Opens a viewer's next block of the tick, with the ring entry its recipients' acknowledgments will name
 local function open(view: View)
 	local sequence: number = view.sequence
 	local ring: number = sequence % RING
 
 	view.sequence = sequence % SEQUENCES + Constants.FIRST_SEQUENCE
 	view.newest = sequence
+	Copied = true
 
 	Out.sequence = sequence
 	Out.tick = TickWire
@@ -802,6 +942,7 @@ local function open(view: View)
 	buffer.writeu32(view.ringSequences, ring * 4, sequence + 1)
 	buffer.writef64(view.ringStarts, ring * 8, view.logHead)
 	buffer.writeu16(view.ringCounts, ring * 2, 0)
+	buffer.writeu32(view.ringOwed, ring * 4, RecipientMask)
 
 	Open = true
 	Filled = HEADER_BYTES
@@ -821,8 +962,8 @@ local function exact(length: number): buffer
 	return made
 end
 
--- Writes the open block into the buffer of its exact length and sends it
-local function flush(view: View)
+-- Writes the open block into the buffer of its exact length and sends it to its viewer and every watcher at once
+local function flush()
 	if not Open then
 		return
 	end
@@ -834,7 +975,11 @@ local function flush(view: View)
 		error("A relay block wrote other than the bytes the relay counted for it")
 	end
 
-	Send(view.key, data)
+	Send(Recipients, data)
+
+	for index: number = 1, RecipientCount do
+		RecipientViews[index].heard = Out.sequence
+	end
 end
 
 --[[
@@ -856,7 +1001,7 @@ local function fits(view: View, bytes: number, count: number, room: number): boo
 	end
 
 	if fresh then
-		flush(view)
+		flush()
 		open(view)
 	end
 
@@ -866,14 +1011,20 @@ local function fits(view: View, bytes: number, count: number, room: number): boo
 	return true
 end
 
--- Logs a pending entry the open block carries, marking where it first rode since it last changed
+--[[
+    Logs a pending entry under the view's newest block, which carries it or
+    goes beside the withheld block that does, marking where it first rode
+    since it last changed
+--]]
+
 local function carry(view: View, slot: number, part: number, flags: number, carried: number, from: buffer): number
+	local sequence: number = view.newest
 	if not bit32.btest(flags, carried) then
-		buffer.writeu16(from, slot * 2, Out.sequence)
+		buffer.writeu16(from, slot * 2, sequence)
 		flags = bit32.bor(flags, carried)
 	end
 
-	local ring: number = (Out.sequence % RING) * 2
+	local ring: number = (sequence % RING) * 2
 	buffer.writeu16(view.log, (view.logHead % LOG) * 2, slot * ENTRY_PARTS + part)
 	buffer.writeu16(view.ringCounts, ring, buffer.readu16(view.ringCounts, ring) + 1)
 	view.logHead += 1
@@ -881,24 +1032,29 @@ local function carry(view: View, slot: number, part: number, flags: number, carr
 	return flags
 end
 
--- The bytes a look entry takes with the parts pending
-local function lookBytes(slot: number, flags: number): number
+-- The bytes a look entry takes with the parts named present
+local function entryBytes(slot: number, look: boolean, held: boolean): number
 	local bytes: number = LOOK_ENTRY_BYTES
 
-	if bit32.btest(flags, LOOK) then
+	if look then
 		bytes += PREFIX_BYTES + buffer.readu8(LookLengths, slot)
 	end
 
-	if bit32.btest(flags, HELD) then
+	if held then
 		bytes += PREFIX_BYTES + buffer.readu8(HeldLengths, slot)
 	end
 
 	return bytes
 end
 
--- The open block's look entry at count, its table made the first time a block holds that many, as are the others
-local function lookEntry(count: number): Block.Look
-	local kept: Block.Look? = Out.looks[count]
+-- The bytes a look entry takes with the parts pending
+local function lookBytes(slot: number, flags: number): number
+	return entryBytes(slot, bit32.btest(flags, LOOK), bit32.btest(flags, HELD))
+end
+
+-- A block's look entry at count, its table made the first time the block holds that many, as are the others
+local function lookEntry(block: Block.Block, count: number): Block.Look
+	local kept: Block.Look? = block.looks[count]
 	if kept then
 		return kept
 	end
@@ -915,7 +1071,7 @@ local function lookEntry(count: number): Block.Look
 		heldAt = 0,
 		heldLength = 0,
 	}
-	Out.looks[count] = made
+	block.looks[count] = made
 
 	return made
 end
@@ -944,28 +1100,35 @@ local function revealEntry(count: number): Block.Reveal
 	return made
 end
 
+-- Puts a slot's look entry with the parts named into a block, which has room for it
+local function fillLook(block: Block.Block, slot: number, look: boolean, held: boolean)
+	local count: number = block.lookCount + 1
+	local entry: Block.Look = lookEntry(block, count)
+
+	entry.slot = slot
+	entry.generation = buffer.readu8(Generations, slot)
+	entry.look = look
+	entry.lookData = Looks
+	entry.lookAt = slot * MAX_LOOK
+	entry.lookLength = buffer.readu8(LookLengths, slot)
+	entry.held = held
+	entry.heldData = Helds
+	entry.heldAt = slot * MAX_HELD
+	entry.heldLength = buffer.readu8(HeldLengths, slot)
+	block.lookCount = count
+end
+
 -- Puts a look entry with the parts pending into the open block, which has room for it
 local function writeLook(view: View, slot: number, flags: number): number
-	local count: number = Out.lookCount + 1
-	local look: Block.Look = lookEntry(count)
+	local look: boolean = bit32.btest(flags, LOOK)
+	local held: boolean = bit32.btest(flags, HELD)
+	fillLook(Out, slot, look, held)
 
-	look.slot = slot
-	look.generation = buffer.readu8(Generations, slot)
-	look.look = bit32.btest(flags, LOOK)
-	look.lookData = Looks
-	look.lookAt = slot * MAX_LOOK
-	look.lookLength = buffer.readu8(LookLengths, slot)
-	look.held = bit32.btest(flags, HELD)
-	look.heldData = Helds
-	look.heldAt = slot * MAX_HELD
-	look.heldLength = buffer.readu8(HeldLengths, slot)
-	Out.lookCount = count
-
-	if look.look then
+	if look then
 		flags = carry(view, slot, LOOK_PART, flags, LOOK_CARRIED, view.lookFrom)
 	end
 
-	if look.held then
+	if held then
 		flags = carry(view, slot, HELD_PART, flags, HELD_CARRIED, view.heldFrom)
 	end
 
@@ -1066,8 +1229,8 @@ local function ahead(a: number, b: number): boolean
 	return buffer.readf64(Priorities, a * 8) > buffer.readf64(Priorities, b * 8)
 end
 
--- Takes the stale entries past count off the end of a list a turn refilled, so it sorts as exactly that long
-local function trim(list: { number }, count: number)
+-- Takes the stale entries past count off the end of a list a turn refilled, so it is exactly that long
+local function trim<T>(list: { T }, count: number)
 	local index: number = count + 1
 	while list[index] ~= nil do
 		list[index] = nil
@@ -1262,14 +1425,166 @@ local function schedule(view: View, slot: number, flags: number, offset: vector,
 	return QUEUED
 end
 
+-- Sends the open withheld block to the watchers alone
+local function sendWithheld()
+	if not WithheldOpen then
+		return
+	end
+
+	WithheldOpen = false
+
+	local data: buffer = exact(WithheldFilled)
+	if Block.write(WithheldOut, data) ~= WithheldFilled then
+		error("A withheld block wrote other than the bytes the relay counted for it")
+	end
+
+	SendWithheld(Watchers, data)
+end
+
+-- Makes room for an entry of bytes in a withheld block section holding count, in a fresh block once it would pass
+-- 896 B or its count
+local function keep(bytes: number, count: number, sequence: number)
+	if not WithheldOpen or WithheldFilled + bytes > BLOCK_BYTES or count >= SECTION_LIMIT then
+		sendWithheld()
+
+		WithheldOut.sequence = sequence
+		WithheldOut.tick = TickWire
+		WithheldOut.lookCount = 0
+		WithheldOut.recordCount = 0
+		WithheldOut.recordData = Records
+		WithheldOpen = true
+		WithheldFilled = HEADER_BYTES
+	end
+
+	WithheldFilled += bytes
+end
+
 --[[
-    One viewer's turn: its acknowledgment, its own character, every body
-    against it, then its blocks: pending hides, reveals and looks, the
-    footsteps it can hear, the records it is owed inside the hard budget,
-    and the rest inside the soft budget
+    The watched target's withheld block: each culled player it is not sent,
+    never an NPC or an Invisible or Parked one, nor a teammate, since
+    anti-ESP never hides one. Each goes at the target's aim rate for its
+    tier every tier tick, changed or not, with its look while pending,
+    outside the target's budget and to the watchers alone. It carries the
+    sequence of the run's last copy, so a look entry clears once the
+    acknowledgments of that copy cover it
 --]]
 
--- What the relay keeps for a viewer, made on its first turn and kept until it is removed
+local function withhold(view: View, states: { [number]: State })
+	local withheld: Withheld? = view.withheld
+	if not withheld then
+		return
+	end
+
+	local records: number, looks: number = 0, 0
+
+	for _, slot: number in view.tracked do
+		local flags: number = buffer.readu16(view.flags, slot * 2)
+		local state: State? = states[slot]
+		local mark: number = buffer.readu8(withheld.flags, slot)
+
+		if
+			not state
+			or not bit32.btest(flags, CULLED)
+			or bit32.btest(flags, SENT)
+			or buffer.readu8(Kinds, slot) ~= PLAYER
+			or state.moveMode == "Parked"
+		then
+			if mark ~= 0 then
+				buffer.writeu8(withheld.flags, slot, 0)
+			end
+
+			continue
+		end
+
+		local generation: number = buffer.readu8(Generations, slot)
+		local aim: number
+
+		if not bit32.btest(mark, WITHHELD) or buffer.readu8(withheld.lives, slot) ~= generation then
+			-- It joins the withheld set, so its record goes now, with both parts of its look
+			mark = WITHHELD + WITHHELD_HELD
+			if dressed(slot) then
+				mark += WITHHELD_LOOK
+			end
+
+			buffer.writeu8(withheld.lives, slot, generation)
+			buffer.writeu16(withheld.lookSent, slot * 2, buffer.readu16(LookVersions, slot * 2))
+			buffer.writeu16(withheld.heldSent, slot * 2, buffer.readu16(HeldVersions, slot * 2))
+			aim = 1
+		else
+			if moved(withheld.lookSent, LookVersions, slot) and dressed(slot) then
+				mark = bit32.bor(bit32.band(mark, bit32.bnot(WITHHELD_LOOK_CARRIED)), WITHHELD_LOOK)
+			end
+
+			if moved(withheld.heldSent, HeldVersions, slot) then
+				mark = bit32.bor(bit32.band(mark, bit32.bnot(WITHHELD_HELD_CARRIED)), WITHHELD_HELD)
+			end
+
+			local rate: number = bit32.btest(flags, NEAR) and NearAim or FarAim
+			aim = buffer.readf32(withheld.aim, slot * 4) + math.min(rate / RelayRate, 1)
+		end
+
+		if aim >= 1 then
+			aim -= 1
+			records += 1
+			WithheldRecords[records] = slot
+		end
+
+		buffer.writef32(withheld.aim, slot * 4, aim)
+		buffer.writeu8(withheld.flags, slot, mark)
+
+		if bit32.btest(mark, WITHHELD_LOOK + WITHHELD_HELD) then
+			looks += 1
+			WithheldLooks[looks] = slot
+		end
+	end
+
+	if records + looks == 0 then
+		return
+	end
+
+	-- A look entry rides beside a copy, whose acknowledgment clears it, so a run that has sent the target nothing
+	-- sends it an empty block, inside its hard room
+	if looks > 0 and not Copied and fits(view, 0, 0, HardRoom) then
+		flush()
+	end
+
+	local logged: boolean = Copied
+	local sequence: number = view.newest
+
+	for index: number = 1, looks do
+		local slot: number = WithheldLooks[index]
+		local mark: number = buffer.readu8(withheld.flags, slot)
+		local look: boolean = bit32.btest(mark, WITHHELD_LOOK)
+		local held: boolean = bit32.btest(mark, WITHHELD_HELD)
+
+		keep(entryBytes(slot, look, held), WithheldOut.lookCount, sequence)
+		fillLook(WithheldOut, slot, look, held)
+
+		if logged then
+			if look then
+				mark = carry(view, slot, WITHHELD_LOOK_PART, mark, WITHHELD_LOOK_CARRIED, withheld.lookFrom)
+			end
+
+			if held then
+				mark = carry(view, slot, WITHHELD_HELD_PART, mark, WITHHELD_HELD_CARRIED, withheld.heldFrom)
+			end
+
+			buffer.writeu8(withheld.flags, slot, mark)
+		end
+	end
+
+	for index: number = 1, records do
+		keep(RECORD_BYTES, 0, sequence)
+
+		local count: number = WithheldOut.recordCount + 1
+		WithheldOut.records[count] = WithheldRecords[index] * RECORD_BYTES
+		WithheldOut.recordCount = count
+	end
+
+	sendWithheld()
+end
+
+-- What the relay keeps for a viewer, made on its first run and kept until it is removed
 local function viewOf(key: Key): View
 	local kept: View? = Views[key]
 	if kept then
@@ -1280,6 +1595,9 @@ local function viewOf(key: Key): View
 		key = key,
 		sequence = Constants.FIRST_SEQUENCE,
 		newest = 0,
+		heard = 0,
+		watching = nil :: Key?,
+		turn = 0,
 		own = nil :: number?,
 		tracked = {} :: { number },
 		places = buffer.create(SLOTS * 2),
@@ -1299,19 +1617,205 @@ local function viewOf(key: Key): View
 		ringSequences = buffer.create(RING * 4),
 		ringStarts = buffer.create(RING * 8),
 		ringCounts = buffer.create(RING * 2),
+		ringOwed = buffer.create(RING * 4),
 		log = buffer.create(LOG * 2),
 		logHead = 0,
+		watchers = {} :: { [number]: Key },
+		watcherViews = {} :: { [number]: View },
+		bits = {} :: { [Key]: number },
+		watcherRuns = buffer.create((MAX_WATCHERS + 1) * 4),
+		watcherCount = 0,
+		withheld = nil :: Withheld?,
 	}
 	Views[key] = made
 
 	return made
 end
 
+local function newWithheld(): Withheld
+	return {
+		flags = buffer.create(SLOTS),
+		lives = buffer.create(SLOTS),
+		lookSent = buffer.create(SLOTS * 2),
+		heldSent = buffer.create(SLOTS * 2),
+		lookFrom = buffer.create(SLOTS * 2),
+		heldFrom = buffer.create(SLOTS * 2),
+		aim = buffer.create(SLOTS * 4),
+	}
+end
+
+-- The view of a target that runs a turn of its own this run, which a watcher's copies come from, or nil
+local function targetOf(target: Key): View?
+	local view: View? = Views[target]
+	if view and view.turn == Run then
+		return view
+	end
+
+	return nil
+end
+
+--[[
+    Gives a target's new watcher the target's lowest free bit, or nil past
+    MAX_WATCHERS, and sends every withheld character's look again for it
+--]]
+
+local function enlist(targetView: View, key: Key, view: View): number?
+	for bit: number = 1, MAX_WATCHERS do
+		if targetView.watchers[bit] == nil then
+			targetView.watchers[bit] = key
+			targetView.watcherViews[bit] = view
+			targetView.bits[key] = bit
+			targetView.watcherCount += 1
+
+			if targetView.watcherCount == 1 then
+				table.insert(Watched, targetView)
+			end
+
+			local withheld: Withheld? = targetView.withheld
+			if withheld then
+				buffer.fill(withheld.flags, 0, 0)
+			else
+				targetView.withheld = newWithheld()
+			end
+
+			return bit
+		end
+	end
+
+	return nil
+end
+
+--[[
+    Takes a watcher no longer handed in watching its target off the
+    target's blocks: each it was still to acknowledge is owed only by the
+    rest, and one that none owes any more clears what it carried
+--]]
+
+local function unwatch(view: View, bit: number)
+	local key: Key = view.watchers[bit]
+	view.watchers[bit] = nil
+	view.watcherViews[bit] = nil
+	view.bits[key] = nil
+	view.watcherCount -= 1
+
+	local mask: number = 2 ^ bit
+	for ring: number = 0, RING - 1 do
+		local owed: number = buffer.readu32(view.ringOwed, ring * 4)
+		if bit32.btest(owed, mask) then
+			owed = bit32.band(owed, bit32.bnot(mask))
+			buffer.writeu32(view.ringOwed, ring * 4, owed)
+
+			if owed == 0 then
+				discharge(view, ring)
+			end
+		end
+	end
+end
+
+-- Unwatches every watcher of a watched view not handed in watching it this run, and a view left with none leaves
+local function sweep(index: number)
+	local view: View = Watched[index]
+
+	for bit: number = 1, MAX_WATCHERS do
+		if view.watchers[bit] ~= nil and buffer.readu32(view.watcherRuns, bit * 4) ~= Run then
+			unwatch(view, bit)
+		end
+	end
+
+	if view.watcherCount == 0 then
+		Watched[index] = Watched[#Watched]
+		Watched[#Watched] = nil
+	end
+end
+
+--[[
+    A watcher's run: it is one of its target's recipients, the target's
+    blocks numbered past what its client was sent elsewhere when it starts
+    watching, and its acknowledgment counts for the target's blocks it was
+    sent. False when the target already has all the watchers it takes
+--]]
+
+local function watch(viewer: Viewer, target: Key): boolean
+	local targetView: View? = targetOf(target)
+	if not targetView then
+		return true
+	end
+
+	local key: Key = viewer.key
+	local view: View = viewOf(key)
+	local held: number? = targetView.bits[key]
+	local bit: number
+
+	if held then
+		bit = held
+	else
+		local given: number? = enlist(targetView, key, view)
+		if given == nil then
+			return false
+		end
+
+		bit = given
+	end
+
+	if view.watching ~= target then
+		renumber(targetView, view.heard)
+		view.watching = target
+	end
+
+	buffer.writeu32(targetView.watcherRuns, bit * 4, Run)
+	acknowledge(targetView, viewer.acknowledged, viewer.received, 2 ^ bit)
+
+	return true
+end
+
+-- The open block's recipients on a viewer's turn: the viewer, then each of its watchers by bit
+local function address(view: View)
+	Recipients[1] = view.key
+	RecipientViews[1] = view
+	RecipientCount = 1
+	RecipientMask = SELF
+
+	local watchers: number = 0
+	if view.watcherCount > 0 then
+		for bit: number = 1, MAX_WATCHERS do
+			local watcher: Key? = view.watchers[bit]
+			if watcher ~= nil then
+				RecipientCount += 1
+				Recipients[RecipientCount] = watcher
+				RecipientViews[RecipientCount] = view.watcherViews[bit]
+				RecipientMask += 2 ^ bit
+				watchers += 1
+				Watchers[watchers] = watcher
+			end
+		end
+	end
+
+	trim(Recipients, RecipientCount)
+	trim(RecipientViews, RecipientCount)
+	trim(Watchers, watchers)
+end
+
+--[[
+    One viewer's turn: its acknowledgment, its own character, every body
+    against it, then its blocks, each copied to its watchers: pending hides,
+    reveals and looks, the footsteps it can hear, the records it is owed
+    inside the hard budget and the rest inside the soft budget, and last
+    the withheld block, to its watchers alone
+--]]
+
 local function turn(viewer: Viewer, states: { [number]: State })
 	local key: Key = viewer.key
 	local view: View = viewOf(key)
 
-	acknowledge(view, viewer.acknowledged, viewer.received)
+	-- Back from a spectate, its client may acknowledge the target's blocks a while yet, so its own go on past them
+	if view.watching ~= nil then
+		renumber(view, view.heard)
+		view.watching = nil
+	end
+
+	acknowledge(view, viewer.acknowledged, viewer.received, SELF)
+	address(view)
+	Copied = false
 
 	local own: number? = viewer.slot
 	if own ~= nil and not Slots.valid(own) then
@@ -1411,17 +1915,30 @@ local function turn(viewer: Viewer, states: { [number]: State })
 
 	placeRecords(view, Floors, floors, HardRoom)
 	placeRecords(view, Fills, fills, SoftRoom)
-	flush(view)
+	flush()
+
+	if view.watcherCount > 0 then
+		withhold(view, states)
+	end
 end
 
 --[[
-    One relay tick: encodes each live body's record and footsteps once,
-    then gives each viewer its blocks. states holds the server's live
+    One relay tick: encodes each live body's record and footsteps once, a
+    rider's in its platform's space where platforms holds that platform's
+    place at the tick, then gives each viewer with no target its blocks,
+    copied to the viewers watching it. states holds the server's live
     bodies by slot, and commands the command each last stepped, whose pitch
-    and head offset its record carries
+    and head offset its record carries. A target handed more watchers than
+    it takes errors, naming it, once every viewer has had its turn
 --]]
 
-function Relay.run(tick: number, viewers: { Viewer }, states: { [number]: State }, commands: { [number]: Command })
+function Relay.run(
+	tick: number,
+	viewers: { Viewer },
+	states: { [number]: State },
+	commands: { [number]: Command },
+	platforms: Platforms?
+)
 	if not Started then
 		error("Relay.run ran before Relay.start", 2)
 	end
@@ -1442,7 +1959,7 @@ function Relay.run(tick: number, viewers: { Viewer }, states: { [number]: State 
 		buffer.writeu8(Generations, slot, generation)
 		buffer.writeu8(Kinds, slot, kind)
 
-		encode(slot, state, commands[slot], generation)
+		encode(slot, state, commands[slot], generation, platforms)
 		hold(slot, state.held)
 
 		if kind == PLAYER or kind == NPC then
@@ -1450,8 +1967,48 @@ function Relay.run(tick: number, viewers: { Viewer }, states: { [number]: State 
 		end
 	end
 
+	-- Every viewer's view, and which of them run their own this run
 	for _, viewer: Viewer in viewers do
-		turn(viewer, states)
+		local view: View = viewOf(viewer.key)
+		if viewer.target == nil then
+			view.turn = Run
+		end
+	end
+
+	-- Each watcher its target already counts is seen again, so only those that left stop being required
+	for _, viewer: Viewer in viewers do
+		local target: Key? = viewer.target
+		if target ~= nil then
+			local targetView: View? = targetOf(target)
+			if targetView then
+				local bit: number? = targetView.bits[viewer.key]
+				if bit ~= nil then
+					buffer.writeu32(targetView.watcherRuns, bit * 4, Run)
+				end
+			end
+		end
+	end
+
+	for index: number = #Watched, 1, -1 do
+		sweep(index)
+	end
+
+	local overfull: Key? = nil
+	for _, viewer: Viewer in viewers do
+		local target: Key? = viewer.target
+		if target ~= nil and not watch(viewer, target) and overfull == nil then
+			overfull = target
+		end
+	end
+
+	for _, viewer: Viewer in viewers do
+		if viewer.target == nil then
+			turn(viewer, states)
+		end
+	end
+
+	if overfull ~= nil then
+		error(`{overfull.Name} has more than the {MAX_WATCHERS} watchers one target takes`, 2)
 	end
 end
 
@@ -1522,9 +2079,11 @@ function Relay.shotNear(key: Key, slot: number)
 	end
 end
 
--- Whether a viewer's stretch of a slot belongs to the slot's current life and the viewer is sent it
+-- Whether a viewer's stretch of a slot belongs to the slot's current life and the viewer is sent it, which a
+-- viewer watching a target, its own view set aside, never is
 local function sentTo(view: View, slot: number, generation: number): boolean
-	return bit32.btest(buffer.readu16(view.flags, slot * 2), SENT)
+	return view.watching == nil
+		and bit32.btest(buffer.readu16(view.flags, slot * 2), SENT)
 		and buffer.readu8(view.generations, slot) == generation
 end
 
@@ -1541,6 +2100,30 @@ function Relay.reveal(slot: number)
 	for _, view: View in Views do
 		if sentTo(view, slot, generation) then
 			buffer.writeu16(view.flags, slot * 2, revealAgain(view, slot, buffer.readu16(view.flags, slot * 2)))
+		end
+	end
+end
+
+--[[
+    Makes every character a viewer is currently sent a pending reveal again,
+    with its look and held item in the same block, and its own character's
+    look entry too, as a spectate's start and switch need of the target's
+    view and its end of the moderator's own
+--]]
+
+function Relay.revealAll(key: Key)
+	local view: View? = Views[key]
+	if not view then
+		return
+	end
+
+	for _, slot: number in view.tracked do
+		local flags: number = buffer.readu16(view.flags, slot * 2)
+
+		if bit32.btest(flags, SENT) then
+			buffer.writeu16(view.flags, slot * 2, revealAgain(view, slot, flags))
+		elseif bit32.btest(flags, OWN) then
+			buffer.writeu16(view.flags, slot * 2, lookAgain(view, slot, flags))
 		end
 	end
 end

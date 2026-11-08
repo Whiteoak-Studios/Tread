@@ -15,6 +15,7 @@ local SEQUENCE: string = "src/Codec/Sequence.luau"
 local STATE: string = "src/Step/State.luau"
 local STEP: string = "src/Step/init.luau"
 local WORLD: string = "src/Step/World.luau"
+local PLATFORMS: string = "src/Step/Platforms.luau"
 local MATH: string = "src/Step/Math.luau"
 local CONSTANTS: string = "src/Constants.luau"
 local SCENE: string = "tests/Fixtures/Step/Scene.luau"
@@ -47,6 +48,7 @@ export type Options = {
 	snap: number?, -- smoothing.snap, its 2 unless given
 	ticks: { [string]: number }?, -- Ticks to set over its own
 	tolerances: { [string]: number }?,
+	platforms: { { [string]: any } }?, -- Platforms registered alike on the client's world and the twin's
 }
 
 local Harness = {}
@@ -146,7 +148,16 @@ function Harness.new(options: Options?): { [string]: any }
 	local world: any = World.new(Scene.settings, SIMULATION_RATE, collision, nil, clientRules, false)
 	local twinWorld: any = World.new(Scene.settings, SIMULATION_RATE, collision, nil, serverRules, true)
 	rig.world = world
+	rig.twinWorld = twinWorld
 	rig.delta = world.delta
+
+	local Platforms: any = Environment.load(PLATFORMS)
+	rig.Platforms = Platforms
+
+	for _, platform: { [string]: any } in given.platforms or {} do
+		Platforms.add(world, platform)
+		Platforms.add(twinWorld, platform)
+	end
 
 	local ticks: any = shared.ticks
 	for key: string, value: number in given.ticks or {} do

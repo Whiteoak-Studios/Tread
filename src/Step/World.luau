@@ -31,7 +31,7 @@ local World = {}
 
 --[[
     A world for one realm's bodies, its time step from the shared table's
-    simulation rate, with no ladders and no live bodies yet
+    simulation rate, with no ladders, platforms or live bodies yet
 
     @ rate | rates.simulation, ticks a second
 --]]
@@ -61,6 +61,8 @@ function World.new(
 		leanShift = Engine.toVector(settings.leanShift),
 		ladders = {},
 		bodies = {},
+		platforms = {},
+		clock = 0,
 	}
 end
 

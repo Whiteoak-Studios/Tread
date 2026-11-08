@@ -15,6 +15,8 @@ local VELOCITY_LIMIT: number = Constants.VELOCITY_LIMIT
 local SLOTS: number = Constants.SLOTS
 local TIMER_LIMIT: number = Constants.TIMER_LIMIT -- The most ticks a mantle takes, which its u8 progress counts to
 local STRAIGHT_DOWN: number = 90 -- Degrees below level a look points straight down at
+local PLAYER_RAYS: number = Constants.PLAYER_RAYS -- The rays anti-ESP's player pair test has
+local LYING_RAYS: number = Constants.LYING_RAYS -- A sleeper's or body's
 
 local SHARED_PATH: string = "shared" -- How a refusal names each table's keys
 local SERVER_PATH: string = "server"
@@ -47,8 +49,11 @@ local EXPECTED: { [string]: string } = {
 	speed = `a speed above 0 that rounds to OwnerState's precision below {VELOCITY_LIMIT} studs/s, which its i16 holds`,
 	height = `a height above 0 that rounds to OwnerState's precision at most {EYE_LIMIT} studs, which its u8 holds`,
 	drop = `a number of degrees above 0 and below {STRAIGHT_DOWN}`,
+	playerRays = `a whole number from 1 to {PLAYER_RAYS}, the rays a player pair's test has`,
+	lyingRays = `a whole number from 1 to {LYING_RAYS}, the rays a sleeper's or body's test has`,
 	["function"] = "a function",
 	vector = "a Vector3",
+	color = "a Color3",
 	string = "a string",
 	list = "a table",
 	instance = "an Instance",
@@ -163,7 +168,7 @@ local SERVER: Specs = {
 	budget = { soft = "positive", hard = "positive" },
 
 	antiEsp = {
-		rays = "count",
+		rays = "playerRays",
 		lookAheadMin = "nonNegative",
 		lookAheadMax = "nonNegative",
 		slice = "positive",
@@ -171,6 +176,7 @@ local SERVER: Specs = {
 		visibleRate = "positive",
 		hold = "nonNegative",
 		failOpen = "positive",
+		include = { [ANY] = "instance" },
 	},
 
 	footsteps = {
@@ -178,7 +184,14 @@ local SERVER: Specs = {
 		stride = { walk = "positive", sprint = "positive" },
 	},
 
-	sleepers = { radius = "positive", rays = "count", retest = "nonNegative", rate = "positive", hold = "nonNegative" },
+	sleepers = {
+		radius = "positive",
+		rays = "lyingRays",
+		retest = "nonNegative",
+		rate = "positive",
+		hold = "nonNegative",
+	},
+
 	npcs = { near = "nonNegative", farRate = "positive", range = "positive" },
 	history = { seconds = "positive" },
 
@@ -240,6 +253,10 @@ local CLIENT: Specs = {
 		pushSpeed = "nonNegative",
 		pushUpBias = "number",
 		jointLimits = { [ANY] = { tilt = "nonNegative", twistLower = "number", twistUpper = "number" } },
+	},
+
+	spectate = {
+		outline = { fill = "color", fillTransparency = "ratio", outline = "color", outlineTransparency = "ratio" },
 	},
 
 	smoothing = { decay = "positive", snap = "nonNegative" },
@@ -375,6 +392,7 @@ export type ServerSettings = {
 		visibleRate: number,
 		hold: number, -- Seconds
 		failOpen: number,
+		include: { Instance }, -- What its rays may hit, CanCollide on or off: the occluder folder, and Terrain
 	},
 
 	footsteps: {
@@ -429,6 +447,11 @@ export type ClientSettings = {
 		pushSpeed: number,
 		pushUpBias: number,
 		jointLimits: { [string]: JointLimit }, -- By logical joint
+	},
+
+	-- The outline a spectating moderator sees every other player with through walls, transparencies from 0 to 1
+	spectate: {
+		outline: { fill: Color3, fillTransparency: number, outline: Color3, outlineTransparency: number },
 	},
 
 	smoothing: { decay: number, snap: number },
@@ -503,6 +526,8 @@ local function accepts(kind: string, value: any): boolean
 		return type(value) == "function"
 	elseif kind == "vector" then
 		return typeof(value) == "Vector3"
+	elseif kind == "color" then
+		return typeof(value) == "Color3"
 	elseif kind == "string" then
 		return type(value) == "string"
 	elseif kind == "list" then
@@ -543,6 +568,10 @@ local function accepts(kind: string, value: any): boolean
 		return value > 0 and Math.quantizeEye(value) <= EYE_LIMIT
 	elseif kind == "drop" then
 		return value > 0 and value < STRAIGHT_DOWN
+	elseif kind == "playerRays" then
+		return value >= 1 and value <= PLAYER_RAYS and value % 1 == 0
+	elseif kind == "lyingRays" then
+		return value >= 1 and value <= LYING_RAYS and value % 1 == 0
 	end
 
 	return false

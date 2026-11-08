@@ -11,9 +11,10 @@ local Game = require("../Codec/Game")
 local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
 local WIRE: number = 2 ^ 16 -- The values a block's u16 sequence and tick hold
 
--- Frontier Zero's interpolation block and rates, from game-integration
+-- Frontier Zero's interpolation block, rates and gravity, from game-integration
 local SETTINGS: { [string]: number } = { delay = 0.15, delayMax = 0.25, scaleMin = 0.95, scaleMax = 1.05 }
 local RATES: { [string]: number } = { simulation = 20, relay = 20 }
+local GRAVITY: number = 68.1 -- Studs/s², the shared table's step.gravity
 
 export type Viewer = { [string]: any }
 
@@ -62,6 +63,7 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 		StateWord = StateWord,
 		settings = SETTINGS,
 		rates = RATES,
+		gravity = GRAVITY,
 		limits = Game.limits,
 		reveals = {},
 		hides = {},
@@ -71,7 +73,7 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 		sequence = 0,
 	}
 
-	Interpolate.start(SETTINGS, RATES, Game.limits, layout)
+	Interpolate.start(SETTINGS, RATES, Game.limits, layout, GRAVITY)
 
 	Interpolate.onReveal(function (slot: number, kind: string, player: any, outfit: any, held: any)
 		table.insert(
@@ -104,23 +106,16 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 	end
 
 	--[[
-	    Sends one relay block. Its tick is required and its sequence counts
-	    up from 1 unless given. Reveals and hides are { slot, generation,
-	    kind }; looks are { slot, generation, outfit?, held?, empty? }, empty
-	    a held part of length 0; records are Record fields by name, every
-	    one but slot, generation and position optional; footsteps are Block's
+	    One block's bytes, exactly as long as Volt hands them over. Its tick
+	    is required. Reveals and hides are { slot, generation, kind }; looks
+	    are { slot, generation, outfit?, held?, empty? }, empty a held part
+	    of length 0; records are Record fields by name, every one but slot,
+	    generation and position optional; footsteps are Block's
 	--]]
 
-	function viewer.send(spec: { [string]: any })
+	local function encode(spec: { [string]: any }, sequence: number): buffer
 		local block: any = Block.new()
-		local sequence: number? = spec.sequence
-
-		if sequence == nil then
-			viewer.sequence += 1
-			sequence = viewer.sequence
-		end
-
-		block.sequence = (sequence :: number) % WIRE
+		block.sequence = sequence % WIRE
 		block.tick = spec.tick % WIRE
 
 		local reveals: { any } = spec.reveals or {}
@@ -192,7 +187,24 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 		local exact: buffer = buffer.create(bytes)
 		buffer.copy(exact, 0, data, 0, bytes)
 
-		Interpolate.receive(exact)
+		return exact
+	end
+
+	-- Sends one relay block as encode lays it out, its sequence counting up from 1 unless given
+	function viewer.send(spec: { [string]: any })
+		local sequence: number? = spec.sequence
+
+		if sequence == nil then
+			viewer.sequence += 1
+			sequence = viewer.sequence
+		end
+
+		Interpolate.receive(encode(spec, sequence :: number))
+	end
+
+	-- Sends one withheld block as encode lays it out, carrying the last relay block's sequence unless given
+	function viewer.withhold(spec: { [string]: any })
+		Interpolate.withheld(encode(spec, spec.sequence or viewer.sequence))
 	end
 
 	-- A slot's drawn state at the render time, in a fresh state, with whether it has one and its pitch

@@ -1,25 +1,30 @@
 --[[
     The dev game's server: starts Tread's server as a consuming game does,
-    builds each joining player's character on the plaza once its spawn has
-    streamed in, counts their corrections, respawns it and ends it on leave
+    with the test elevator and its call button, and builds, respawns and
+    ends each joining player's character, counting their corrections
 --]]
 
 --!strict
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+local Workspace = game:GetService("Workspace")
 local Packages = ReplicatedStorage.Packages
 
 local Promise: any = require(Packages.Promise)
 local Tread = require(Packages.Tread)
 
+local Network = require(ReplicatedStorage.Shared.Network.Server)
+
 local Corrections = require(ServerScriptService.Server.Corrections)
+local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
 local Forward = require(ServerScriptService.Server.Forward)
 local Shared = require(ReplicatedStorage.Shared.Dev.Config)
 local Spawns = require(ServerScriptService.Server.Spawns)
 
 local SETTINGS = require(ServerScriptService.Server.Config.Tread)
 local STREAM_TIMEOUT: number = require(ServerScriptService.Server.Config.Spawns).streamTimeout
+local PRESS_RATE: { perSecond: number, burst: number } = require(ServerScriptService.Server.Config.Press).rate
 
 -- A joined player's spawn while it streams in, and then their character
 type Life = {
@@ -30,6 +35,8 @@ type Life = {
 local Running: Tread.Server? = nil -- Tread's server, from the start
 local Settings: Tread.ServerSettings? = nil
 local Lives: { [Player]: Life } = {} -- Each joined player's, cleared when they leave
+local LastCall: number? = nil -- os.clock() at the elevator's last call from its button, nil before any
+local Sight: RaycastParams = RaycastParams.new() -- What a press's ray meets in the world, the casts' parts at start
 
 local Game = {}
 
@@ -109,12 +116,51 @@ local function leave(player: Player)
 	end
 end
 
+-- Whether a world part the dev game's casts include meets a press's ray before its end
+local function blocked(origin: Vector3, direction: Vector3): boolean
+	return Workspace:Raycast(origin, direction, Sight) ~= nil
+end
+
+--[[
+    A press of the elevator's call button, which calls it from the next
+    tick. Nothing is sent back for a press it refuses: one from a sender
+    with no live character here, a bot among them, or one Elevator.accepts
+    refuses on a ray along the character's cleared eye and look in the
+    server's own state
+--]]
+
+local function press(player: Player | Tread.Bot, id: number)
+	local server: Tread.Server? = Running
+	local character: Tread.Character? = Game.characterOf(player :: Player) -- A bot holds none
+	if not server or not character then
+		return
+	end
+
+	-- A character that died, slept or was destroyed by other code refuses the read
+	local read: boolean, state: Tread.State? = pcall(character.getState, character)
+	if not read or not state then
+		return
+	end
+
+	-- Whiteoak TODO: a ride timed on os.clock() ends early by any ticks the server drops under load, so a press then
+	-- starts the deck again a few ticks above its rest; timing it from the call's tick closes that once the server
+	-- handle gives a game its tick
+	local now: number = os.clock()
+	if not Elevator.accepts(id, state.eye, state.look, blocked, now, LastCall) then
+		return
+	end
+
+	LastCall = now
+	server:callPlatform(id)
+end
+
 --[[
     Starts the dev game once a server: lays the plaza's spawn points, which
     fails at once in a place without them, starts Tread's server with the
-    dev shared table and the dev game's server settings, binds the
-    correction telemetry, forwards each player's reports to them, and
-    builds a character for each player who joins
+    dev shared table and the dev game's server settings, registers the test
+    elevator and binds its call button, binds the correction telemetry,
+    forwards each player's reports to them, and builds a character for
+    each player who joins
 --]]
 
 function Game.start()
@@ -123,6 +169,15 @@ function Game.start()
 	end
 
 	Spawns.start()
+
+	-- A press's ray meets the same parts the dev game's own casts do
+	local include: { Instance }? = Shared.collision.include
+	if not include then
+		error("The dev game's collision names no parts for a press's ray to meet", 2)
+	end
+
+	Sight.FilterType = Enum.RaycastFilterType.Include
+	Sight.FilterDescendantsInstances = include
 
 	local settings: Tread.ServerSettings = {
 		rates = SETTINGS.rates,
@@ -147,6 +202,12 @@ function Game.start()
 	local server: Tread.Server = Tread.startServer(Shared, settings)
 	Running = server
 	Settings = settings
+
+	-- The elevator and its button's listener each live as long as the server
+	server:addPlatform(Elevator.platform)
+	Network.rate("press", PRESS_RATE.perSecond, PRESS_RATE.burst)
+	Network.press.on(press)
+
 	Corrections.start()
 	Forward.start(server)
 
@@ -174,6 +235,20 @@ function Game.get(): (Tread.Server, Tread.Shared, Tread.ServerSettings)
 	end
 
 	return server, Shared, settings
+end
+
+--[[
+    The character the dev game holds for a player, nil while they have
+    none, as while their spawn streams in or after their build failed
+--]]
+
+function Game.characterOf(player: Player): Tread.Character?
+	local life: Life? = Lives[player]
+	if not life then
+		return nil
+	end
+
+	return life.character
 end
 
 --[[

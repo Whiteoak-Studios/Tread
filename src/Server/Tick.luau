@@ -23,8 +23,9 @@ export type Run = (tick: number) -> ()
 export type Stage = {
 	name: string,
 	run: Run,
+	between: boolean, -- Whether it also runs on each Heartbeat with no tick due
 	label: string, -- Its profiler label
-	times: { number }, -- A ring of seconds, a tick's time each, made at its full size
+	times: { number }, -- A ring of seconds, a run's time each, made at its full size
 	held: number, -- The times the ring holds, up to its size, the first that many of times
 	head: number, -- The ring index the next time goes at
 	last: number, -- The newest time, 0 before the first tick
@@ -34,6 +35,7 @@ export type Stage = {
 export type Entry = {
 	name: string,
 	run: Run,
+	between: boolean?, -- Also run on each Heartbeat with no tick due, handed the newest tick run
 }
 
 -- The stages in the order each tick runs them, replaced whole when one is added so a tick running keeps its list
@@ -65,10 +67,11 @@ local function checkStage(name: string, run: Run, member: string)
 	end
 end
 
-local function newStage(name: string, run: Run): Stage
+local function newStage(name: string, run: Run, between: boolean): Stage
 	return {
 		name = name,
 		run = run,
+		between = between,
 		label = `{LABEL_PREFIX} {name}`,
 		times = table.create(Capacity, 0),
 		held = 0,
@@ -83,45 +86,52 @@ local function warnFailure(message: any)
 end
 
 --[[
-    One tick: every stage in order, each timed and under its own xpcall, so
-    one that throws loses the rest of its own work for the tick, is
-    reported as stage with its name, and stops no later stage
+    One stage's run, timed into its ring and under its own xpcall, so one
+    that throws loses the rest of its own work, is reported as stage with
+    its name, and stops nothing after it
 --]]
 
+local function runStage(stage: Stage, tick: number)
+	Current = stage.name
+
+	if LABELED then
+		debug.profilebegin(stage.label)
+	end
+
+	local began: number = os.clock()
+	local ran: boolean = xpcall(stage.run, warnFailure, tick)
+	local took: number = os.clock() - began
+
+	if LABELED then
+		debug.profileend()
+	end
+
+	-- Whiteoak TODO: a between stage's ring holds its last Capacity runs, a few seconds of Heartbeats rather than
+	-- WINDOW_SECONDS; a ring sized by time would hold the whole window, once stats needs it for such a stage
+	stage.times[stage.head + 1] = took
+	stage.head = (stage.head + 1) % Capacity
+	stage.held = math.min(stage.held + 1, Capacity)
+	stage.last = took
+
+	if not ran then
+		Reports.fire(nil, "stage", stage.name)
+	end
+end
+
+-- One tick: every stage in order
 local function run(tick: number)
 	local stages: { Stage } = Stages
 
 	for index: number = 1, #stages do
-		local stage: Stage = stages[index]
-		Current = stage.name
-
-		if LABELED then
-			debug.profilebegin(stage.label)
-		end
-
-		local began: number = os.clock()
-		local ran: boolean = xpcall(stage.run, warnFailure, tick)
-		local took: number = os.clock() - began
-
-		if LABELED then
-			debug.profileend()
-		end
-
-		stage.times[stage.head + 1] = took
-		stage.head = (stage.head + 1) % Capacity
-		stage.held = math.min(stage.held + 1, Capacity)
-		stage.last = took
-
-		if not ran then
-			Reports.fire(nil, "stage", stage.name)
-		end
+		runStage(stages[index], tick)
 	end
 end
 
 --[[
     Each Heartbeat: the ticks its time owes at the rate, at most the
     catch-up, with any further whole ticks dropped and counted and the
-    fraction of a tick left over kept for the next frame
+    fraction of a tick left over kept for the next frame. A Heartbeat that
+    owes no tick runs only the between stages, handed the newest tick run
 --]]
 
 local function frame(delta: number)
@@ -129,6 +139,15 @@ local function frame(delta: number)
 
 	local due: number = math.floor(Pending)
 	if due <= 0 then
+		local stages: { Stage } = Stages
+
+		for index: number = 1, #stages do
+			local stage: Stage = stages[index]
+			if stage.between then
+				runStage(stage, Ran)
+			end
+		end
+
 		return
 	end
 
@@ -145,8 +164,10 @@ end
 
 --[[
     Starts the loop at rate ticks a second on Heartbeat with the stages in
-    the order given, running at most catchUp ticks a frame. The Heartbeat
-    connection lives as long as the server, which never stops its tick
+    the order given, running at most catchUp ticks a frame, and each stage
+    marked between on every Heartbeat with no tick due as well. The
+    Heartbeat connection lives as long as the server, which never stops its
+    tick
 --]]
 
 function Tick.start(rate: number, catchUp: number, stages: { Entry })
@@ -166,7 +187,13 @@ function Tick.start(rate: number, catchUp: number, stages: { Entry })
 
 	for _, entry: Entry in stages do
 		checkStage(entry.name, entry.run, "Tick.start")
-		table.insert(Stages, newStage(entry.name, entry.run))
+
+		local between: boolean? = entry.between
+		if between ~= nil and type(between) ~= "boolean" then
+			error(`Tick.start takes the stage {entry.name}'s between as true, false or nil, not {between}`, 2)
+		end
+
+		table.insert(Stages, newStage(entry.name, entry.run, between == true))
 	end
 
 	Started = true
@@ -206,7 +233,7 @@ function Tick.addStage(name: string, after: string, stageRun: Run)
 
 	-- A copy, so a tick running now finishes on the list it started with
 	local stages: { Stage } = table.clone(Stages)
-	table.insert(stages, at + 1, newStage(name, stageRun))
+	table.insert(stages, at + 1, newStage(name, stageRun, false))
 	Stages = stages
 end
 

@@ -12,6 +12,8 @@ local Constants = require(script.Parent.Parent.Constants)
 local State = require(script.Parent.State)
 
 local SKINS: number = 2 * Constants.SKIN -- How far under a box's bottom rest looks, past a resting body's skin
+local COLLISION_INCLUDE: string = "collision.include" -- How a refusal names each include list's key
+local OCCLUSION_INCLUDE: string = "antiEsp.include"
 
 type Box = State.Box
 type Collision = State.Collision
@@ -72,15 +74,21 @@ local function newHit(): Hit
 	}
 end
 
--- Errors naming the first entry of an include list that is no Instance
-local function checkInclude(include: { Instance })
+--[[
+    Errors naming the first entry of an include list that is no Instance,
+    under the key the game gave it as
+
+    @ key | the list's path in the game's tables, such as collision.include
+--]]
+
+local function checkInclude(include: { Instance }, key: string)
 	if type(include) ~= "table" then
-		error(`collision.include must be a list of Instances, and got a {typeof(include)}`)
+		error(`{key} must be a list of Instances, and got a {typeof(include)}`)
 	end
 
 	for index: number, instance: Instance in include do
 		if typeof(instance) ~= "Instance" then
-			error(`collision.include[{index}] must be an Instance, and got a {typeof(instance)}`)
+			error(`{key}[{index}] must be an Instance, and got a {typeof(instance)}`)
 		end
 	end
 end
@@ -158,7 +166,7 @@ end
 --]]
 
 function Engine.collision(include: { Instance }): Collision
-	checkInclude(include)
+	checkInclude(include, COLLISION_INCLUDE)
 
 	local params: RaycastParams = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Include
@@ -247,7 +255,7 @@ function Engine.wrap(functions: GameCollision): Collision
 
 	local include: { Instance }? = functions.include
 	if include then
-		checkInclude(include)
+		checkInclude(include, COLLISION_INCLUDE)
 	end
 
 	local overlap: (center: vector, size: vector) -> boolean, release: () -> () = overlapper(include)
@@ -311,6 +319,27 @@ function Engine.casts(collision: GameCollision): Collision
 	end
 
 	return Engine.collision(include)
+end
+
+--[[
+    Anti-ESP's line-of-sight test on the engine: true when a ray meets any
+    part of the include list, CanCollide off or on, or solid terrain in it,
+    never terrain water, so occluder-only parts the step's casts pass
+    through still block it
+--]]
+
+function Engine.occlusion(include: { Instance }): (origin: vector, direction: vector) -> boolean
+	checkInclude(include, OCCLUSION_INCLUDE)
+
+	local params: RaycastParams = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = include
+	params.RespectCanCollide = false
+	params.IgnoreWater = true
+
+	return function (origin: vector, direction: vector): boolean
+		return Workspace:Raycast(Engine.toVector3(origin), Engine.toVector3(direction), params) ~= nil
+	end
 end
 
 return Engine

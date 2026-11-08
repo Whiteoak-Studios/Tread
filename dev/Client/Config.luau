@@ -1,7 +1,7 @@
 --[[
     The dev game's client values: Frontier Zero's remote smoothing, ragdoll,
     correction, draw distance and detail numbers, stand-ins where it sets
-    none, and the dev place's own view, mantle prompt and exploit kit
+    none, and the dev place's own view, prompt, elevator key and exploit kit
 --]]
 
 --!strict
@@ -54,6 +54,17 @@ return {
 		jointLimits = JOINT_LIMITS,
 	},
 
+	-- What a spectating moderator outlines every other player with through walls, standing in where Frontier Zero's
+	-- Moderation sets none
+	spectate = {
+		outline = {
+			fill = Color3.fromRGB(255, 60, 60),
+			fillTransparency = 0.75, -- Mostly see-through, so the body still reads under it
+			outline = Color3.fromRGB(255, 255, 255),
+			outlineTransparency = 0,
+		},
+	},
+
 	smoothing = {
 		decay = 15, -- How fast the visual error offset shrinks, per second
 		snap = 2, -- Studs: a correction larger than this snaps
@@ -85,6 +96,11 @@ return {
 	prompt = {
 		text = "Jump to mantle",
 		wait = 10, -- Seconds it waits at boot for the player's PlayerGui
+	},
+
+	-- The test elevator's call button, pressed by a ray from the eye along the look on this key
+	elevator = {
+		key = Enum.KeyCode.E, -- Bound to nothing else in the dev place
 	},
 
 	-- The dev place's exploit kit: what its panel counts, what each tool does, and how the ESP draws

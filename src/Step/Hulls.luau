@@ -47,7 +47,7 @@ end
     the move runs beside the slab and every share when it runs inside it
 --]]
 
-local function slab(gap: number, extent: number, move: number): (number, number)
+function Hulls.slab(gap: number, extent: number, move: number): (number, number)
 	if move == 0 then
 		if math.abs(gap) < extent then
 			return -math.huge, math.huge
@@ -101,9 +101,10 @@ function Hulls.sweep(
 			local otherHalf: number = Hulls.height(other, settings) / 2
 			local at: vector = other.position
 
-			local enterX: number, exitX: number = slab(at.x - center.x, halfX, direction.x)
-			local enterY: number, exitY: number = slab(at.y + otherHalf - center.y, size.y / 2 + otherHalf, direction.y)
-			local enterZ: number, exitZ: number = slab(at.z - center.z, halfZ, direction.z)
+			local enterX: number, exitX: number = Hulls.slab(at.x - center.x, halfX, direction.x)
+			local enterY: number, exitY: number =
+				Hulls.slab(at.y + otherHalf - center.y, size.y / 2 + otherHalf, direction.y)
+			local enterZ: number, exitZ: number = Hulls.slab(at.z - center.z, halfZ, direction.z)
 			local enter: number = math.max(enterX, enterY, enterZ)
 			local exit: number = math.min(exitX, exitY, exitZ)
 

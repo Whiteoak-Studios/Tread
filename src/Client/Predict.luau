@@ -917,6 +917,24 @@ function Predict.state(): State?
 end
 
 --[[
+    The tick the body is drawn at this frame, a u16 with its fraction:
+    between its last two predicted ticks by the clock's fraction, as the
+    body is, so a platform placed at it stands where the drawn body stands
+    on it. Nil before the first OwnerState starts a body
+--]]
+
+function Predict.drawn(): number?
+	started()
+	if not Body then
+		return nil
+	end
+
+	local from: number = Previous.tick
+
+	return Math.lerp(from, from + Sequence.difference(Current.tick, from), Clock) % WRAP
+end
+
+--[[
     Where the feet would end if jump were pressed at the newest predicted
     tick: the search a press runs, from that tick's state in prediction's
     own world, at most once a predicted tick. Nil before the first

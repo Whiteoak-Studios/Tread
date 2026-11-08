@@ -1,7 +1,7 @@
 --[[
     The client's rig pool: rigs cloned from the game's template, dressed for
-    a slot and given back, posed from a step state at the detail their
-    distance earns, ragdolled when they die, and the owner's first-person copy
+    a slot and given back, posed at the detail their distance earns, laid down
+    or ragdolled as bodies, outlined for spectate, and the owner's own view
 --]]
 
 --!strict
@@ -24,6 +24,8 @@ local WORLD_RIG: boolean = false -- The dress hook's copy flag for a world rig, 
 local FIRST_PERSON: boolean = true -- Its flag for the owner's copy, which leaves off what the copy never shows
 local NEAR: number = 0 -- Studs from the eye the copy is posed at, since the eye is inside it, so at full detail
 local LEVEL: number = 0 -- The copy's aim pitch, radians: the torso turns with the camera for other viewers only
+local OUTLINED: string = "TreadOutlined" -- The model the outlined rigs are drawn in, under the one Highlight
+local THROUGH_WALLS: Enum.HighlightDepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- The outline shows through walls
 
 -- The 15 R15 joints mode A's adapter maps, each a logical name the game's joints map names an instance for
 local JOINTS: { string } = {
@@ -49,6 +51,7 @@ type ClientSettings = Config.ClientSettings
 type Collision = State.Collision
 type Place = Animate.Place
 type State = State.State
+type World = State.World
 
 -- The client settings' keys the pool reads, each typed where the client settings declare it
 export type Joints = index<ClientSettings, "joints">
@@ -56,6 +59,7 @@ export type Animations = index<ClientSettings, "animations">
 export type Lod = index<ClientSettings, "lod">
 export type Bodies = index<ClientSettings, "bodies">
 export type Limit = index<index<Bodies, "jointLimits">, string>
+export type Spectate = index<ClientSettings, "spectate">
 
 -- A slot's look and its held item, the game's declared fields by name
 export type Outfit = State.Values
@@ -71,6 +75,7 @@ export type Settings = {
 	hold: index<ClientSettings, "hold">,
 	lod: Lod,
 	bodies: Bodies,
+	read spectate: Spectate?, -- Read the first time a rig is outlined, which errors without it
 }
 
 export type Marker = (slot: number, marker: string, value: string) -> ()
@@ -82,6 +87,7 @@ type Entry = {
 	slot: number?, -- The slot it is checked out for, nil while pooled
 	holding: boolean, -- Whether hold has put an item on it
 	drawn: boolean, -- Whether it is in Workspace, inside the draw distance
+	outlined: boolean, -- Whether it is drawn under the spectate outline
 	placed: vector?, -- Where its last pose put its feet, nil before the first
 	facing: number,
 	animated: Animated?, -- Its tracks, from its first draw until it ragdolls
@@ -92,6 +98,7 @@ type Fields = {
 	_settings: Settings,
 	_drawDistance: number,
 	_collision: Collision,
+	_world: World?, -- The world whose casts each plant reads as they stand then, nil to plant through _collision
 	_rootHeight: number, -- The template's root above its lowest point, so a rig's feet stand on a state's position
 	_places: { Place },
 	_folder: Folder,
@@ -106,7 +113,9 @@ type Fields = {
 	_targets: { CFrame },
 	_own: number?, -- The slot checked out as the local player's own, nil while none is
 	_copy: Entry?, -- Its first-person copy, held apart from every slot, nil while it has none
+	_watched: number?, -- The spectated target's slot, whose world rig takes the local player's rig setting
 	_firstPerson: FirstPerson.FirstPerson, -- What the local player sees of their own rigs
+	_container: Model?, -- What the outlined rigs are drawn in, made the first time one is
 	_destroyed: boolean,
 }
 
@@ -213,9 +222,11 @@ end
 
     @ drawDistance | this device class's character draw distance
     @ collision | the step's own casts, which feet are planted with
+    @ world | the world whose casts feet are planted with in place of
+    collision, read at each plant, since a platform wraps them later
 --]]
 
-function Rigs.new(settings: Settings, drawDistance: number, collision: Collision): Self
+function Rigs.new(settings: Settings, drawDistance: number, collision: Collision, world: World?): Self
 	local template: Model = settings.rig
 	if typeof(template) ~= "Instance" or not template:IsA("Model") then
 		error(`Rigs.new takes a Model as the rig template, not a {typeof(template)}`, 2)
@@ -245,6 +256,8 @@ function Rigs.new(settings: Settings, drawDistance: number, collision: Collision
 		error(`Rigs.new takes a draw distance above 0, not {drawDistance}`, 2)
 	elseif type(collision) ~= "table" or type(collision.ray) ~= "function" then
 		error("Rigs.new takes the step's Collision, whose ray plants the feet", 2)
+	elseif world ~= nil and (type(world) ~= "table" or type(world.collision) ~= "table") then
+		error(`Rigs.new takes the step's World, whose casts plant the feet, or none, not a {typeof(world)}`, 2)
 	end
 
 	-- How each leg bends and where its foot sits on the template, which every rig shares
@@ -259,6 +272,7 @@ function Rigs.new(settings: Settings, drawDistance: number, collision: Collision
 		_settings = settings,
 		_drawDistance = drawDistance,
 		_collision = collision,
+		_world = world,
 		_rootHeight = rootHeight,
 		_places = places,
 		_folder = folder,
@@ -273,7 +287,9 @@ function Rigs.new(settings: Settings, drawDistance: number, collision: Collision
 		_targets = {} :: { CFrame },
 		_own = nil :: number?,
 		_copy = nil :: Entry?,
+		_watched = nil :: number?,
 		_firstPerson = FirstPerson.new(),
+		_container = nil :: Model?,
 		_destroyed = false,
 	}, Rigs)
 end
@@ -375,6 +391,7 @@ function Rigs._build(self: Self): Entry
 		slot = nil,
 		holding = false,
 		drawn = false,
+		outlined = false,
 		placed = nil,
 		facing = 0,
 		animated = nil,
@@ -397,7 +414,7 @@ end
 --[[
     Puts a new look on a slot's rig, the old one taken off first, and on
     the local player's own first-person copy too, each of their parts then
-    hidden on this screen as before
+    hidden on this screen as before, as are the spectated target's
 --]]
 
 function Rigs.dress(self: Self, slot: number, outfit: Outfit)
@@ -416,13 +433,16 @@ function Rigs.dress(self: Self, slot: number, outfit: Outfit)
 		end
 
 		self._firstPerson:refresh()
+	elseif slot == self._watched then
+		self._firstPerson:refresh()
 	end
 end
 
 --[[
     Puts the held item a slot's held-item fields name on its rig, or clears
     the hands with nil, and on the local player's own first-person copy
-    too, each of their parts then hidden on this screen as before
+    too, each of their parts then hidden on this screen as before, as are
+    the spectated target's
 --]]
 
 function Rigs.hold(self: Self, slot: number, held: Held?)
@@ -441,6 +461,8 @@ function Rigs.hold(self: Self, slot: number, held: Held?)
 		end
 
 		self._firstPerson:refresh()
+	elseif slot == self._watched then
+		self._firstPerson:refresh()
 	end
 end
 
@@ -455,6 +477,8 @@ function Rigs.release(self: Self, slot: number)
 	local entry: Entry = self:_entry(slot, "release")
 	if slot == self._own then
 		self:_disown()
+	elseif slot == self._watched then
+		self:watch(nil)
 	end
 
 	self._slots[slot] = nil
@@ -504,6 +528,7 @@ function Rigs._put(self: Self, entry: Entry)
 
 	entry.rig.Parent = nil
 	entry.drawn = false
+	entry.outlined = false
 	table.insert(self._pool, entry)
 end
 
@@ -553,7 +578,7 @@ function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pi
 
 	if not entry.drawn then
 		entry.drawn = true
-		entry.rig.Parent = self._folder
+		entry.rig.Parent = self:_holder(entry)
 	end
 
 	local animated: Animated = entry.animated or self:_animate(entry)
@@ -585,10 +610,20 @@ function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pi
 		and velocity.x == 0
 		and velocity.z == 0
 
+	-- The world's casts as they stand at this plant, since the first platform registered wraps them after the start
+	-- Whiteoak TODO: a plant meets a moving platform's boxes on the world's tick, the owner's newest predicted one,
+	-- up to a tick of the platform's move from the copy drawn; cast against the boxes at the copy's drawn place once
+	-- a playtest shows feet off a moving lift
+	local collision: Collision = self._collision
+	local world: World? = self._world
+	if world then
+		collision = world.collision
+	end
+
 	Animate.detail(animated, full)
 	Animate.pose(animated, state, full)
 	Animate.aim(animated, distance <= lod.aim and pitch or 0, state.lean)
-	Animate.plant(animated, entry.root, position.y, self._rootHeight, self._collision, planting, moved)
+	Animate.plant(animated, entry.root, position.y, self._rootHeight, collision, planting, moved)
 end
 
 --[[
@@ -722,13 +757,7 @@ function Rigs.ragdoll(self: Self, slot: number, body: number, push: vector?)
 		error(`Slot {body} already has a rig, so slot {slot}'s body can't take its rig`, 2)
 	end
 
-	if slot == self._own then
-		self:_disown()
-	end
-
-	self._slots[slot] = nil
-	self._slots[body] = entry
-	entry.slot = body
+	self:_rekey(entry, slot, body)
 
 	if not entry.drawn then
 		entry.drawn = true
@@ -745,6 +774,135 @@ function Rigs.ragdoll(self: Self, slot: number, body: number, push: vector?)
 	local bodies: Bodies = self._settings.bodies
 	local torso: BasePart = partOf(entry.joints.Waist)
 	entry.body = Ragdoll.start(entry.rig, entry.joints, torso, bodies, Ragdoll.push(push, bodies))
+end
+
+--[[
+    Lays a dying slot's rig down as its body, re-keyed to the body's slot
+    with no ragdoll, for a client too far from the death or reached too
+    late: its tracks stop at once, so its next pose plays the lying clip
+    from the start, and it stays a drawn rig posed like any other. The
+    local player's own rig shows on this screen again as a body, and its
+    first-person copy goes back to the pool
+
+    @ body | the body's slot, which the rig is drawn for from now on
+--]]
+
+function Rigs.lie(self: Self, slot: number, body: number)
+	local entry: Entry = self:_entry(slot, "lie")
+	if entry.body then
+		error(`Slot {slot}'s rig is already a ragdoll`, 2)
+	end
+
+	checkSlot(body, "lie")
+	if body ~= slot and self._slots[body] then
+		error(`Slot {body} already has a rig, so slot {slot}'s body can't take its rig`, 2)
+	end
+
+	self:_rekey(entry, slot, body)
+
+	local animated: Animated? = entry.animated
+	if animated then
+		Animate.stop(animated)
+	end
+end
+
+--[[
+    Keys a dying slot's rig to its body's slot, a body no longer the local
+    player's own, the spectated target or outlined
+--]]
+
+function Rigs._rekey(self: Self, entry: Entry, slot: number, body: number)
+	if slot == self._own then
+		self:_disown()
+	elseif slot == self._watched then
+		self:watch(nil)
+	end
+
+	if entry.outlined then
+		entry.outlined = false
+
+		if entry.drawn then
+			entry.rig.Parent = self._folder
+		end
+	end
+
+	self._slots[slot] = nil
+	self._slots[body] = entry
+	entry.slot = body
+end
+
+--[[
+    Names the spectated target's slot, whose world rig takes the local
+    player's own "rig" setting on this screen as their own does, its look
+    and held item included; nil for none. Its rig must be checked out, and
+    the slot is let go of when the rig is released or becomes a body
+--]]
+
+function Rigs.watch(self: Self, slot: number?)
+	if slot == nil then
+		self._watched = nil
+		self._firstPerson:watch(nil)
+
+		return
+	end
+
+	local entry: Entry = self:_entry(slot, "watch")
+	self._watched = slot
+	self._firstPerson:watch(entry.rig)
+end
+
+--[[
+    Draws a slot's rig under the spectate outline, one Highlight over the
+    model every outlined rig is drawn in, seen through walls in the client
+    settings' spectate.outline, or back out of it. A body is never outlined
+--]]
+
+function Rigs.outline(self: Self, slot: number, outlined: boolean)
+	local entry: Entry = self:_entry(slot, "outline")
+	if type(outlined) ~= "boolean" then
+		error(`Rigs.outline takes outlined as a boolean, not a {typeof(outlined)}`, 2)
+	elseif outlined and self._settings.spectate == nil then
+		error("Rigs.outline needs the client settings' spectate.outline, and the pool was given none", 2)
+	elseif entry.outlined == outlined or entry.body then
+		return
+	end
+
+	entry.outlined = outlined
+	if entry.drawn then
+		entry.rig.Parent = self:_holder(entry)
+	end
+end
+
+-- What a drawn rig is parented to: the outlined model while it is outlined, the pool's folder otherwise
+function Rigs._holder(self: Self, entry: Entry): Instance
+	if not entry.outlined then
+		return self._folder
+	end
+
+	local container: Model? = self._container
+	if container then
+		return container
+	end
+
+	-- One Highlight over a model, since Roblox is reported to draw only so many at once. Outline has checked
+	-- the pool was given its settings
+	local outline: index<Spectate, "outline"> = (self._settings.spectate :: Spectate).outline
+	local made: Model = Instance.new("Model")
+	made.Name = OUTLINED
+
+	local highlight: Highlight = Instance.new("Highlight")
+	highlight.Adornee = made
+	highlight.DepthMode = THROUGH_WALLS
+	highlight.FillColor = outline.fill
+	highlight.FillTransparency = outline.fillTransparency
+	highlight.OutlineColor = outline.outline
+	highlight.OutlineTransparency = outline.outlineTransparency
+	highlight.Parent = made
+
+	made.Parent = self._folder
+	self._container = made
+
+	return made
 end
 
 --[[

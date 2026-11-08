@@ -82,6 +82,11 @@ local MAX_RELAY_RECORDS: number = (MAX_RELAY_BYTES - RELAY_HEADER_BYTES) // RECO
 local LOOK_ENTRY_BYTES: number = 3 -- A look entry's slot and generation and flags, before each present part
 local MAX_LOOK_ENTRY: number = LOOK_ENTRY_BYTES + PREFIX_BYTES + MAX_LOOK + PREFIX_BYTES + MAX_HELD
 local FOOTSTEP_BYTES: number = 10 -- X and Z u24, Y u16, then the ground material u16
+local MAX_WATCHERS: number = 31 -- Moderators one target's blocks are copied to: a u32 mask's bits past bit 0, its own
+
+-- Anti-ESP's tests, whose ray tables are sized to the most rays each kind of pair casts
+local PLAYER_RAYS: number = 5 -- A player pair's: head, center, either side, and both ends moved
+local LYING_RAYS: number = 3 -- A sleeper's or body's: its head, chest and feet
 
 -- Reliable traffic: the slot table and the death message
 local MAX_SLOT_ENTRIES: number = 255 -- The slot-table entries one Slots message carries
@@ -162,6 +167,9 @@ return {
 	LOOK_ENTRY_BYTES = LOOK_ENTRY_BYTES,
 	MAX_LOOK_ENTRY = MAX_LOOK_ENTRY,
 	FOOTSTEP_BYTES = FOOTSTEP_BYTES,
+	MAX_WATCHERS = MAX_WATCHERS,
+	PLAYER_RAYS = PLAYER_RAYS,
+	LYING_RAYS = LYING_RAYS,
 	MAX_SLOT_ENTRIES = MAX_SLOT_ENTRIES,
 	PUSH_STEPS = PUSH_STEPS,
 	FEED_LOOK_BYTES = FEED_LOOK_BYTES,

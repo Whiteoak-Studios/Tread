@@ -206,10 +206,14 @@ end
 
 --[[
     Frontier Zero's server settings, with its two hooks as functions that do
-    nothing, and a stand-in NPC range until its NPCs set one
+    nothing, a stand-in NPC range until its NPCs set one, and an empty
+    folder standing in for its occluders until its anti-ESP prefabs fill one
 --]]
 
 function Example.server(): ServerSettings
+	local occluders = Instance.new("Folder")
+	occluders.Name = "Occluders"
+
 	return {
 		rates = {
 			move = { perSecond = 35, burst = 60 },
@@ -232,6 +236,7 @@ function Example.server(): ServerSettings
 			visibleRate = 2,
 			hold = 1,
 			failOpen = 0.15,
+			include = { occluders },
 		},
 
 		footsteps = {
@@ -314,6 +319,16 @@ function Example.client(): ClientSettings
 				Waist = { tilt = 20, twistLower = -30, twistUpper = 30 },
 				LeftShoulder = { tilt = 90, twistLower = -60, twistUpper = 60 },
 				RightShoulder = { tilt = 90, twistLower = -60, twistUpper = 60 },
+			},
+		},
+
+		-- Frontier Zero sets its outline with its Moderation, so these stand in until it does
+		spectate = {
+			outline = {
+				fill = Color3.fromRGB(255, 60, 60),
+				fillTransparency = 0.75,
+				outline = Color3.fromRGB(255, 255, 255),
+				outlineTransparency = 0,
 			},
 		},
 

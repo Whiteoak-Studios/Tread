@@ -8,6 +8,7 @@
 local Server = {}
 Server.__index = Server
 
+local AntiEsp = require(script.AntiEsp)
 local Characters = require(script.Characters)
 local Commands = require(script.Commands)
 local Config = require(script.Parent.Config)
@@ -15,10 +16,15 @@ local Connections = require(script.Connections)
 local Constants = require(script.Parent.Constants)
 local Fields = require(script.Parent.Codec.Fields)
 local History = require(script.History)
+local Keyframe = require(script.Parent.Codec.Keyframe)
 local Relay = require(script.Relay)
 local Reliable = require(script.Parent.Codec.Reliable)
 local Reports = require(script.Reports)
+local Sleepers = require(script.Sleepers)
 local Slots = require(script.Slots)
+local Spectate = require(script.Spectate)
+local State = require(script.Parent.Step.State)
+local Teleport = require(script.Teleport)
 local Tick = require(script.Tick)
 local Types = require(script.Parent.Types)
 
@@ -48,10 +54,15 @@ type Landed = Characters.Landed
 type Layout = Fields.Layout
 type Network = typeof(require(script.Parent.Network.Server))
 type Npc = Characters.Npc
+type Outfit = State.Values
+type Platform = State.Platform
+type PlatformEntry = State.PlatformEntry
 type Sample = Characters.Sample
 type ServerSettings = Config.ServerSettings
 type Shared = Config.Shared
+type Sleeper = Characters.Sleeper
 type Target = Characters.Target
+type Teleported = Teleport.Teleported
 type Run = Tick.Run
 
 -- What a report callback a game connects is handed
@@ -92,6 +103,9 @@ local ReadLate: number = 0
 local ReadSent: number = 0
 local ReadCut: number = 0
 local ReadBytes: number = 0
+local ReadTests: number = 0
+local ReadHidden: number = 0
+local ReadFailOpens: number = 0
 local ReadReports: { [string]: number } = {}
 
 local RelayFailure: string = "" -- What the relay's own work last threw, raised again once the flush has gone
@@ -167,6 +181,21 @@ local function sendSlotTable(network: Network, key: Key)
 	end
 end
 
+-- Sends a player or bot who just joined the two calls each platform keeps, the one before first, then the latest
+local function sendCalls(network: Network, key: Key)
+	for id: number, entry: PlatformEntry in Characters.platforms() do
+		local before: number? = entry.calledBefore
+		if before ~= nil then
+			network.Platform.fire(key, id, before % TICK_WRAP)
+		end
+
+		local latest: number? = entry.calledAt
+		if latest ~= nil then
+			network.Platform.fire(key, id, latest % TICK_WRAP)
+		end
+	end
+end
+
 -- Counts every report Tread raises by kind, and the stand-ins and late commands among them, for stats
 local function count(_: Key?, kind: Reports.Kind, _: number | string)
 	if kind == "standIn" then
@@ -221,6 +250,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 	Connections.start(server.rewind.rttSmoothing, server.bots)
 	Commands.start(shared, layout)
 	History.start(shared, server)
+	Sleepers.start(shared)
 
 	Characters.start({
 		shared = shared,
@@ -231,19 +261,38 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 			network.Owner.fire(key, data)
 			BytesOut += buffer.len(data)
 		end,
+
+		sendDeath = function (keys: { Key }, character: number, body: number, x: number, y: number, z: number)
+			network.Death.fireList(keys, character, body, x, y, z)
+		end,
 	})
 
-	Relay.start({ shared = shared, server = server, layout = layout }, function (key: Key, data: buffer)
-		network.Relay.fire(key, data)
-		BytesOut += buffer.len(data)
+	Spectate.start({
+		limits = { lean = shared.step.lean, headCone = shared.step.headCone },
+
+		-- One feed to every moderator watching a target, its bytes counted once a recipient
+		sendFeed = function (keys: { Key }, data: buffer)
+			network.Feed.fireList(keys, data)
+			BytesOut += buffer.len(data) * #keys
+		end,
+
+		sendSpectate = function (key: Key, target: number?, tick: number)
+			network.Spectate.fire(key, target, tick)
+		end,
+	})
+
+	-- Each block goes to a viewer and its spectating moderators in one fireList, its bytes counted once a recipient
+	Relay.start({ shared = shared, server = server, layout = layout }, function (keys: { Key }, data: buffer)
+		network.Relay.fireList(keys, data)
+		BytesOut += buffer.len(data) * #keys
+	end, function (keys: { Key }, data: buffer)
+		network.Withheld.fireList(keys, data)
+		BytesOut += buffer.len(data) * #keys
 	end, function (key: Key): number
 		local sent: number, pending: number = network.traffic(key)
 
 		return sent + pending
-	end, function (_: Relay.Viewer, _: number): boolean
-		-- Hides nothing until anti-ESP joins the tick
-		return false
-	end)
+	end, AntiEsp.isHidden)
 
 	local hash: number = Config.hash(shared)
 
@@ -265,6 +314,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 
 		network.Shared.fire(key, hash, ran % TICK_WRAP)
 		sendSlotTable(network, key)
+		sendCalls(network, key)
 	end)
 
 	network.onLeave(function (key: Key)
@@ -288,13 +338,10 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 
 	Reports.connect(count)
 
+	local slice: number = server.antiEsp.slice
+
 	Tick.start(shared.rates.simulation, server.catchUp, {
-		{
-			name = "decode",
-			run = function (_: number)
-				Characters.decode()
-			end,
-		},
+		{ name = "decode", run = Characters.decode },
 		{ name = "simulate", run = Characters.simulate },
 		{ name = "npcs", run = Characters.npcs },
 		{
@@ -302,8 +349,15 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 			run = function (tick: number)
 				local relayTick: number? = relayTickOf(tick)
 				if relayTick then
-					Characters.history(relayTick)
+					Characters.history(tick, relayTick)
 				end
+			end,
+		},
+		{
+			name = "antiEsp",
+			between = true,
+			run = function (_: number)
+				AntiEsp.run(slice, os.clock())
 			end,
 		},
 		{
@@ -316,7 +370,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 
 				-- Whiteoak TODO: one flush sends every player's batch on the relay tick; staggering even slots and
 				-- odd ones across two Heartbeats needs a flush per player from Volt, a Volt task if G3 shows the need
-				local ran: boolean = xpcall(Characters.relay, keepFailure, relayTick)
+				local ran: boolean = xpcall(Characters.relay, keepFailure, relayTick, tick)
 				network.flush()
 
 				if not ran then
@@ -354,7 +408,20 @@ function Server.createNpc(self: Self, at: CFrame): Npc
 	return Characters.createNpc(at)
 end
 
---- Every live character and NPC, in a list of its own
+--- Builds a sleeper lying at the CFrame's position along its look,
+--- wearing the look given, for the game's rebuild of its sleepers at boot.
+--- Past the sleepers' share it builds none, gives nil and reports sleep
+--- @method createSleeper
+--- @within Server
+--- @param at CFrame
+--- @param outfit Outfit
+--- @return Sleeper?
+
+function Server.createSleeper(self: Self, at: CFrame, outfit: Outfit): Sleeper?
+	return Characters.createSleeper(at, outfit)
+end
+
+--- Every live character, NPC and sleeper, in a list of its own
 --- @method getAll
 --- @within Server
 --- @return { Target }
@@ -400,9 +467,11 @@ end
 
 --- The history read for a hit test: the target at a render time in relay
 --- ticks, its hit shapes placed, or nil for a time the history no longer
---- holds, one spent in Noclip or Parked, or a target destroyed. The command
---- time places a platform rider, and no body rides one yet. The sample is
---- the target's own table, which its next read rewrites
+--- holds, one spent in Noclip or Parked, or a target ended. A sleeper
+--- answers with its lying shapes, along its fall after a move. The command
+--- time, the shot's simulation tick with its fraction, places a platform
+--- rider where the platform stood then, and with none the render time
+--- does. The sample is the target's own table, which its next read rewrites
 --- @method sampleAt
 --- @within Server
 --- @param target Target
@@ -413,12 +482,12 @@ end
 function Server.sampleAt(self: Self, target: Target, renderTime: number, commandTime: number?): Sample?
 	if commandTime ~= nil and type(commandTime) ~= "number" then
 		error(
-			`server:sampleAt takes the command time as a number of relay ticks or nil, not a {typeof(commandTime)}`,
+			`server:sampleAt takes the command time as a number of simulation ticks or nil, not a {typeof(commandTime)}`,
 			2
 		)
 	end
 
-	return Characters.sampleAt(target, renderTime)
+	return Characters.sampleAt(target, renderTime, commandTime)
 end
 
 --- The render time a shot rewinds to and whether its claimed time was
@@ -449,8 +518,58 @@ function Server.addLadder(self: Self, cframe: CFrame, size: Vector3): () -> ()
 	return Characters.addLadder(cframe, size)
 end
 
---- The players currently sent a target, so a cue attached to it reaches
---- only the screens that show it
+--- Registers a moving platform, whose boxes every body's step meets where
+--- its path puts it on the tick, and gives back the closure that removes
+--- it. The client registers the same platform with its model
+--- @method addPlatform
+--- @within Server
+--- @param platform Platform
+--- @return () -> ()
+
+function Server.addPlatform(self: Self, platform: Platform): () -> ()
+	return Characters.addPlatform(platform)
+end
+
+--- Calls a registered platform, so its path runs from the next tick, and
+--- tells every joined player, whose prediction and drawing time the path
+--- from the same tick
+--- @method callPlatform
+--- @within Server
+--- @param id number
+
+function Server.callPlatform(self: Self, id: number)
+	local ran: number = Tick.counts()
+	local tick: number = ran + 1
+
+	Characters.callPlatform(id, tick)
+	self._network.Platform.fireList(Joined, id, tick % TICK_WRAP)
+end
+
+--- Starts a moderator spectating a target's character, switches it to a
+--- new one, or with nil ends it, after the game's own moderator check. The
+--- moderator must have a character, which the game parks, and a target
+--- takes at most 31 watchers
+--- @method spectate
+--- @within Server
+--- @param moderator Player
+--- @param target Character?
+
+function Server.spectate(self: Self, moderator: Key, target: Character?)
+	Characters.spectate(moderator, target)
+end
+
+--- The moderators spectating a player, in a list of their own
+--- @method spectatorsOf
+--- @within Server
+--- @param player Player
+--- @return { Player }
+
+function Server.spectatorsOf(self: Self, player: Key): { Player }
+	return Spectate.spectatorsOf(player)
+end
+
+--- The players currently sent a target, with the moderators spectating
+--- each of them, so a cue attached to it reaches every screen that shows it
 --- @method viewersOf
 --- @within Server
 --- @param target Target
@@ -484,14 +603,23 @@ function Server.addStage(self: Self, name: string, after: string, run: Run)
 	Tick.addStage(name, after, run)
 end
 
---- Everything a viewer is sent now, as one buffer a clip ring starts from
+--- Everything a viewer is sent now, as one buffer a clip ring starts from,
+--- with the latest call of every platform called
 --- @method keyframe
 --- @within Server
 --- @param viewer Player | Bot
 --- @return buffer
 
 function Server.keyframe(self: Self, viewer: Key): buffer
-	return Relay.keyframe(viewer)
+	local called: { Keyframe.Platform } = {}
+	for id: number, entry: PlatformEntry in Characters.platforms() do
+		local latest: number? = entry.calledAt
+		if latest ~= nil then
+			table.insert(called, { id = id, tick = latest % TICK_WRAP })
+		end
+	end
+
+	return Relay.keyframe(viewer, called)
 end
 
 --- Calls back on every report Tread raises, with the player or bot it is
@@ -519,13 +647,27 @@ function Server.onLanded(self: Self, callback: Landed): () -> ()
 	return Characters.onLanded(callback)
 end
 
+--- Calls back once a teleport has set a character down, with the
+--- character, each callback under its own xpcall. Returns the closure that
+--- disconnects the callback
+--- @method onTeleported
+--- @within Server
+--- @param callback (character: Character) -> ()
+--- @return () -> ()
+
+function Server.onTeleported(self: Self, callback: Teleported): () -> ()
+	return Teleport.onTeleported(callback)
+end
+
 --- Tread's aggregate numbers, with no endpoint and no signal, for the game
 --- to read once a second: each stage's last time and p95 over 10 s, the
---- live characters, awake NPCs and bodies, the history's bytes, the largest
---- and p95 traffic to a player over the last second, and, as the change
---- since the last read, the ticks run and dropped, stand-ins, late commands,
---- records sent and cut, Tread's bytes out and the reports by kind. It
---- holds no position and no name
+--- anti-ESP stage's slices between ticks among them, the live characters,
+--- awake NPCs and bodies, the history's bytes, the largest and p95 traffic
+--- to a player over the last second, and, as the change since the last
+--- read, the ticks run and dropped, stand-ins, late commands, records sent
+--- and cut, Tread's bytes out, anti-ESP's pair tests, the tests that left a
+--- pair hidden and its fail-opens, and the reports by kind. It holds no
+--- position and no name
 --- @method stats
 --- @within Server
 --- @return { [string]: any }
@@ -535,6 +677,7 @@ function Server.stats(self: Self): { [string]: any }
 	local ran: number, dropped: number = Tick.counts()
 	local sent: number, cut: number = Relay.counts()
 	local players: number, awake: number = Characters.counts()
+	local tests: number, hidden: number, failOpens: number = AntiEsp.counts()
 
 	local stages: { [string]: Times } = {}
 	for _, stage: Tick.Stage in Tick.stages() do
@@ -571,6 +714,9 @@ function Server.stats(self: Self): { [string]: any }
 		recordsSent = sent - ReadSent,
 		recordsCut = cut - ReadCut,
 		bytesOut = BytesOut - ReadBytes,
+		antiEspTests = tests - ReadTests,
+		antiEspHidden = hidden - ReadHidden,
+		antiEspFailOpens = failOpens - ReadFailOpens,
 		trafficLargest = largest,
 		trafficP95 = trafficP95,
 		historyBytes = History.bytes(),
@@ -585,6 +731,9 @@ function Server.stats(self: Self): { [string]: any }
 	ReadSent = sent
 	ReadCut = cut
 	ReadBytes = BytesOut
+	ReadTests = tests
+	ReadHidden = hidden
+	ReadFailOpens = failOpens
 
 	return read
 end

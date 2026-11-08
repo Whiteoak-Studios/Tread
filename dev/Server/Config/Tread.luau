@@ -5,8 +5,22 @@
 --]]
 
 --!strict
+local Workspace = game:GetService("Workspace")
+
+-- The city block's occluder-only parts, set inside its walls, which the server has from the place's load
+local TestContent: Instance? = Workspace:FindFirstChild("TestContent")
+local CityBlock: Instance? = TestContent and TestContent:FindFirstChild("CityBlock")
+local Occluders: Instance? = CityBlock and CityBlock:FindFirstChild("Occluders")
+
+if not Occluders then
+	error("Workspace.TestContent.CityBlock.Occluders is missing, so anti-ESP has no occluders in the dev place")
+end
+
 -- A map, since a table that names its keys in another module fits no map type a setting takes
 local FOOTSTEP_RANGE: { [string]: number } = { walk = 40, sprint = 60, jump = 60, land = 60 } -- Studs; crouched is silent
+
+-- What anti-ESP's rays may hit, the occluders and solid terrain, typed as the list the setting takes
+local OCCLUSION: { Instance } = { Occluders, Workspace.Terrain }
 
 return {
 	rates = {
@@ -39,6 +53,7 @@ return {
 		visibleRate = 2,
 		hold = 1,
 		failOpen = 0.15,
+		include = OCCLUSION,
 	},
 
 	footsteps = {

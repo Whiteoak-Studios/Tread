@@ -12,6 +12,7 @@ local Hulls = require(script.Hulls)
 local Ladder = require(script.Ladder)
 local Mantle = require(script.Mantle)
 local Math = require(script.Math)
+local Platforms = require(script.Platforms)
 local State = require(script.State)
 local Swim = require(script.Swim)
 
@@ -467,17 +468,19 @@ local function count(state: State, wasGrounded: boolean, wasMode: Mode)
 end
 
 --[[
-    A walking body's tick: depenetration, exact at every tenth command,
-    the water where it starts, the rules' cap and permits, posture and a
-    mantle or a ladder to enter, then its mode's move at that mode's
-    stance, the water where the move ends, and the timers. A mantle runs
-    its path with no posture or entry. Gives back how far it sank when no
-    spot was clear
+    A walking body's tick: a rider's carry with its platform, depenetration,
+    exact at every tenth command and while a platform's box presses into
+    the body, the water where it starts, the rules' cap and permits, posture
+    and a mantle or a ladder to enter, then its mode's move at that mode's
+    stance, the water where the move ends, the timers, and the platform it
+    then stands on. A mantle runs its path with no posture or entry. Gives
+    back how far it sank when no spot was clear
 --]]
 
 local function walk(state: State, command: Command, world: World): number?
 	local settings: Settings = world.settings
-	local stuck: number? = Collide.depenetrate(state, world, command.number % EXACT_EVERY == 0)
+	local pressing: boolean = Platforms.carry(state, world)
+	local stuck: number? = Collide.depenetrate(state, world, pressing or command.number % EXACT_EVERY == 0)
 
 	surface = Swim.surface(state, world)
 	local top: number? = surface
@@ -526,6 +529,7 @@ local function walk(state: State, command: Command, world: World): number?
 	surface = Swim.surface(state, world)
 	wade(state, world)
 	count(state, wasGrounded, mode)
+	Platforms.board(state, world)
 
 	return stuck
 end
@@ -649,7 +653,8 @@ end
     same on every realm, allocating nothing: its look, then its move mode's
     move, the eye eased, the water level, and the whole state rounded to
     OwnerState's precisions. The command's head offset is clamped to the
-    game's cone in place, and a move mode other than walking ends a mantle.
+    game's cone in place, and a move mode other than walking ends a mantle
+    and a ride.
     Gives back the speed the body landed at, 0 for no landing that counted,
     and how far it sank when depenetration found no clear spot, nil when it
     is clear
@@ -676,12 +681,14 @@ function Step.advance(state: State, command: Command, world: World): (number, nu
 			Mantle.cancel(state)
 		end
 
+		state.platform = 0
 		face(state, command, settings, world.delta)
 		noclip(state, command, world)
 		surface = Swim.surface(state, world)
 		ease(state, world)
 		state.waterLevel = Swim.level(state, surface)
 	elseif moveMode == "Parked" then
+		state.platform = 0
 		park(state)
 	else
 		error(`The step has no move mode {moveMode}`)

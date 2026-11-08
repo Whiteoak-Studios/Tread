@@ -58,6 +58,7 @@ return function (): (boolean, string | nil)
 		smoothing = Config.smoothing,
 		drawDistance = Config.drawDistance,
 		lod = Config.lod,
+		spectate = Config.spectate,
 	}
 
 	local checked: boolean, failure: any = pcall(loaded.Config.client, loaded.shared, settings)

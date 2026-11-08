@@ -1,14 +1,14 @@
 --[[
-    The tick runs decode, simulate, npcs, history and relay in that order, a
-    game's stage added after simulate runs straight after it, one naming no
-    stage is refused, and a game stage that throws is reported as stage
-    with its name while the tick and every later stage go on
+    The tick runs decode, simulate, npcs, history, antiEsp and relay in that
+    order, a game's stage added after simulate runs straight after it, one
+    naming no stage is refused, and a game stage that throws is reported as
+    stage with its name while the tick and every later stage go on
 --]]
 
 --!strict
 local Rig = require("../../Fixtures/Server/Rig")
 
-local ORDER: { string } = { "decode", "simulate", "zones", "npcs", "history", "relay" }
+local ORDER: { string } = { "decode", "simulate", "zones", "npcs", "history", "antiEsp", "relay" }
 local TICKS: number = 3
 
 return function (): (boolean, string | nil)
@@ -23,8 +23,8 @@ return function (): (boolean, string | nil)
 		error("This game stage throws on purpose, to show the tick goes on")
 	end)
 
-	if pcall(server.addStage, server, "late", "antiEsp", function (_: number) end) then
-		return false, "addStage took a stage after antiEsp, which the tick does not run yet"
+	if pcall(server.addStage, server, "late", "ballistics", function (_: number) end) then
+		return false, "addStage took a stage after ballistics, which the tick does not run"
 	elseif pcall(server.addStage, server, "zones", "relay", function (_: number) end) then
 		return false, "addStage took a second stage named zones"
 	end

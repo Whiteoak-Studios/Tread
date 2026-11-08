@@ -76,13 +76,13 @@ end
 
 --[[
     The ledge a jump press would mantle onto from where the body is, found
-    as a press finds it and changing nothing: a walking body on the ground,
-    in the air or swimming and not downed, facing a face too steep to walk
-    within its hull's radius ahead with no body nearer, a walkable top past
-    it higher than a step and no higher than the game's reach above the
-    ground it last stood on, or above its feet for a swimmer, and room for
-    the path. Gives back the posture it would end in, nil for no mantle,
-    then the feet's x and z at the face, where the path starts, and its rise
+    as a press finds it and changing nothing: a walking body, not downed,
+    on the ground, in the air or swimming, facing a face too steep to walk
+    within its hull's radius ahead with no body nearer, whose own top rises
+    past a step, a walkable top past it over a step and within the game's
+    reach of the ground last stood on, or of a swimmer's feet, and room for
+    the path. Gives back the posture it would end in, nil for none, then the
+    feet's x and z at the face, where the path starts, and its rise
 --]]
 
 function Mantle.find(state: State, world: World): (Posture?, number, number, number)
@@ -125,7 +125,7 @@ function Mantle.find(state: State, world: World): (Posture?, number, number, num
 		return nil, 0, 0, 0
 	end
 
-	-- 2) The top, swept down from above the reach just past the face, to a step's height over the feet
+	-- 2) The face's own top, swept down from above the reach a skin into the face, to a step's height over the feet
 	local base: number = state.groundHeight
 	if mode == "Swim" then
 		base = feet.y
@@ -137,21 +137,37 @@ function Mantle.find(state: State, world: World): (Posture?, number, number, num
 		return nil, 0, 0, 0
 	end
 
-	-- On the position quanta, so every tick of the path from here lands on them too
+	-- A plate the hull's footprint and a skin thick, swept down from over the reach to a step over the feet
+	local probeSize: vector = vector.create(width, SKIN, width)
+	local probeBottom: number = reach + SKIN
+	local down: vector = vector.create(0, lowest - probeBottom, 0)
+
+	-- Where the hull met the face, sunk a skin into it along its normal at any angle of approach, so it finds that
+	-- face's top and never the next one's. A face no higher than a step there is a riser or a curb the walk climbs,
+	-- however high stairs rise past it, and the sweep skips one past the reach there, which starts the plate inside it
+	local sunk: vector = vector.create(
+		feet.x + aheadX * distance - normal.x * SKIN,
+		probeBottom + SKIN / 2,
+		feet.z + aheadZ * distance - normal.z * SKIN
+	)
+	local own: Hit? = collision.sweep(sunk, probeSize, down)
+	if not own or Math.quantize(probeBottom - own.distance) <= lowest then
+		return nil, 0, 0, 0
+	end
+
+	-- 3) The top past the face, where the path ends, on the position quanta so every tick from here lands on them
 	local x: number = Math.quantize(feet.x + aheadX * travel)
 	local z: number = Math.quantize(feet.z + aheadZ * travel)
 	local over: number = overOf(settings)
 	local ahead: vector = vector.create(aheadX * over, 0, aheadZ * over)
 
-	-- A plate the hull's footprint and a skin thick, which finds the ledge rising past the reach as no clear spot
-	local probeSize: vector = vector.create(width, SKIN, width)
-	local probeBottom: number = reach + SKIN
+	-- The same plate, which finds the ledge rising past the reach as no clear spot
 	local probe: vector = vector.create(x + ahead.x, probeBottom + SKIN / 2, z + ahead.z)
 	if not Collide.clear(probe, probeSize, world) then
 		return nil, 0, 0, 0
 	end
 
-	local found: Hit? = collision.sweep(probe, probeSize, vector.create(0, lowest - probeBottom, 0))
+	local found: Hit? = collision.sweep(probe, probeSize, down)
 	if not found or found.normal.y < settings.walkable then
 		return nil, 0, 0, 0
 	end
@@ -162,13 +178,13 @@ function Mantle.find(state: State, world: World): (Posture?, number, number, num
 		return nil, 0, 0, 0
 	end
 
-	-- 3) The rise to a skin over the top, rounded up to the step the state carries it in
+	-- 4) The rise to a skin over the top, rounded up to the step the state carries it in
 	local rise: number = math.ceil((top + SKIN - feet.y) / RISE_QUANTUM) * RISE_QUANTUM
 	if rise > RISE_LIMIT then
 		return nil, 0, 0, 0
 	end
 
-	-- 4) The posture it ends in
+	-- 5) The posture it ends in
 	local arc: number = settings.mantleArc
 	local standing: vector = vector.create(width, settings.standing, width)
 	local crouched: vector = vector.create(width, settings.crouched, width)

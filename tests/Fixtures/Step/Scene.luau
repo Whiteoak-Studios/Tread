@@ -90,6 +90,8 @@ function Scene.world(collision: Collision, bodies: { State }?): World
 		leanShift = Engine.toVector(SETTINGS.leanShift),
 		ladders = {},
 		bodies = bodies or {},
+		platforms = {},
+		clock = 0,
 	}
 end
 

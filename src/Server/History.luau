@@ -345,6 +345,21 @@ function History.write(slot: number, tick: number, state: State, pitch: number, 
 	advance(tick)
 end
 
+-- The state word a lying sample holds: Downed in Ground with nothing else set, beside the epoch's parity
+local function lyingWord(epoch: number): number
+	Scratch.mode = "Ground"
+	Scratch.posture = "Downed"
+	Scratch.sprint = false
+	Scratch.aim = false
+	Scratch.waterLevel = "Dry"
+	Scratch.jumps = 0
+	Scratch.lands = 0
+	Scratch.heavy = false
+	Scratch.epoch = epoch
+
+	return StateWord.pack(Scratch)
+end
+
 --[[
     Writes a woken sleeper's lying sample, flagged lying, so it answers
     with the Downed shapes for every time the history holds up to the
@@ -365,19 +380,9 @@ function History.seed(slot: number, tick: number, lying: Lying)
 
 	checkWidths(lying.platform, lying.epoch)
 
-	Scratch.mode = "Ground"
-	Scratch.posture = "Downed"
-	Scratch.sprint = false
-	Scratch.aim = false
-	Scratch.waterLevel = "Dry"
-	Scratch.jumps = 0
-	Scratch.lands = 0
-	Scratch.heavy = false
-	Scratch.epoch = lying.epoch
-
 	local data: buffer = bufferFor(slot)
 	local first: number = tick - Capacity + 1
-	encode(data, first, lying.position, lying.platform, lying.yaw, 0, StateWord.pack(Scratch), 0, lying.epoch, LYING)
+	encode(data, first, lying.position, lying.platform, lying.yaw, 0, lyingWord(lying.epoch), 0, lying.epoch, LYING)
 
 	for held: number = first + 1, tick do
 		hold(data, first, held)
@@ -661,6 +666,34 @@ function History.sampleAt(slot: number, renderTime: number): Sample?
 	end
 
 	return between(slot, data, tick, fraction)
+end
+
+--[[
+    A slot's Sample lying at a place, its Downed shapes placed there along
+    the yaw as a lying sample's are, which is how a sleeper is hit. It
+    reads and writes no history, and the Sample is the slot's own table,
+    which the next read for it rewrites
+
+    @ position | the feet, in world coordinates
+    @ yaw | radians
+--]]
+
+function History.lying(slot: number, position: vector, yaw: number, epoch: number): Sample
+	if not Started then
+		error("History.lying ran before History.start", 2)
+	elseif not Slots.valid(slot) then
+		error(`History.lying takes a slot from 0 to {SLOTS - 1}, not {slot}`, 2)
+	elseif not (isFinite(position.x) and isFinite(position.y) and isFinite(position.z)) then
+		error(`History.lying takes a finite position, not {position}`, 2)
+	elseif not isFinite(yaw) then
+		error(`History.lying takes a finite yaw in radians, not {yaw}`, 2)
+	end
+
+	local world: number = 0 -- The platform id of world coordinates, which a lying body is placed in
+	local level: number = 0 -- The lean, which a lying body never has
+	checkWidths(world, epoch)
+
+	return fill(slot, position, world, yaw * YAW_SCALE, lyingWord(epoch), level, epoch, true)
 end
 
 --[[
