@@ -1,7 +1,7 @@
 --[[
-    The bot harness's numbers: scenarios S0 to S7 with their areas and
-    groups, the seeded runs' timings, how a bot roams, what each cheat does
-    to what it sends, and where its floors and spawns go
+    The bot harness's numbers: scenarios S0 to S7 and G8's load with their
+    areas and groups, the seeded runs' timings, how a bot roams, what each
+    cheat does to what it sends, and where its floors and spawns go
 --]]
 
 --!strict
@@ -119,6 +119,17 @@ local SCENARIOS: { [string]: Scenario } = {
 		follow = true,
 		storm = false,
 		stall = 0.5,
+	},
+
+	-- G8's load: S3's layout with the city group sprinting, so its bots cross the block's occluders quickly
+	G8 = {
+		groups = {
+			{ name = "city", count = IN_CITY, spawn = PLAZA, roam = CITY, sprint = true },
+			{ name = "map", count = BOTS - IN_CITY, spawn = MAP, roam = MAP },
+		},
+		viewer = PLAZA.center,
+		follow = false,
+		storm = false,
 	},
 }
 

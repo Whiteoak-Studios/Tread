@@ -1,7 +1,7 @@
 --[[
     Volt's server and client modules for Tread.volt start over the mock and
-    expose the ten endpoints the design names and no other, each with the
-    calls its side makes
+    expose the eleven endpoints the design names and no other, each with
+    the calls its side makes
 --]]
 
 --!strict
@@ -9,7 +9,9 @@ local Environment = require("../../Environment")
 
 local SERVER: string = "src/Network/Server.luau"
 local CLIENT: string = "src/Network/Client.luau"
-local MOVE: string = "Move" -- The one endpoint a client sends
+
+-- The endpoints a client sends, in the design's order
+local HEARD: { string } = { "Move", "View" }
 
 -- The endpoints the server sends, in the design's order
 local SENT: { string } = { "Relay", "Withheld", "Owner", "Feed", "Slots", "Death", "Platform", "Spectate", "Shared" }
@@ -39,15 +41,15 @@ local function unlisted(network: any, side: string): string?
 	local count: number = 0
 
 	for name: string in network.events do
-		if name ~= MOVE and table.find(SENT, name) == nil then
+		if table.find(HEARD, name) == nil and table.find(SENT, name) == nil then
 			return `The {side} module lists {name}, an endpoint the design does not name`
 		end
 
 		count += 1
 	end
 
-	if count ~= #SENT + 1 then
-		return `The {side} module lists {count} endpoints, where the design names {#SENT + 1}`
+	if count ~= #SENT + #HEARD then
+		return `The {side} module lists {count} endpoints, where the design names {#SENT + #HEARD}`
 	end
 
 	return nil
@@ -56,10 +58,13 @@ end
 return function (): (boolean, string | nil)
 	local server: any = Environment.load(SERVER)
 	local client: any = Environment.load(CLIENT)
+	local problem: string?
 
-	local problem: string? = lacking(server, MOVE, LISTENS) or lacking(client, MOVE, CLIENT_FIRES)
-	if problem then
-		return false, problem
+	for _, name: string in HEARD do
+		problem = lacking(server, name, LISTENS) or lacking(client, name, CLIENT_FIRES)
+		if problem then
+			return false, problem
+		end
 	end
 
 	for _, name: string in SENT do

@@ -64,7 +64,7 @@ return function (): (boolean, string | nil)
 		},
 
 		{
-			relation = "the state word's fields and its three flags fill its u16, the mode's bits with two values spare",
+			relation = "the state word's fields and its three flags fill its u16, the mode's bits with one value spare",
 			holds = constants.MODE_BITS
 						+ constants.POSTURE_BITS
 						+ constants.WATER_BITS
@@ -72,14 +72,14 @@ return function (): (boolean, string | nil)
 						+ constants.EPOCH_BITS
 						+ 3
 					== 16
-				and 2 ^ constants.MODE_BITS - 6 == 2,
+				and 2 ^ constants.MODE_BITS - 7 == 1,
 		},
 
 		{
-			relation = "OwnerState's own fields fill 41 B, and with both game blocks at their bounds 91 B",
-			holds = 2 + 2 + 1 + 3 * 3 + 3 * 2 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 3 + 3 + 1 + 1 + 1 + 1 + 2
+			relation = "OwnerState's own fields fill 42 B, and with both game blocks at their bounds 92 B",
+			holds = 2 + 2 + 1 + 3 * 3 + 3 * 2 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 3 + 3 + 1 + 1 + 1 + 1 + 1 + 2
 					== constants.OWNER_STATE_BYTES
-				and constants.MAX_OWNER_STATE == 91,
+				and constants.MAX_OWNER_STATE == 92,
 		},
 
 		{
@@ -106,8 +106,8 @@ return function (): (boolean, string | nil)
 		},
 
 		{
-			relation = "the moderator's feed is at most 141 B",
-			holds = constants.MAX_FEED == 141,
+			relation = "the moderator's feed is at most 142 B",
+			holds = constants.MAX_FEED == 142,
 		},
 
 		{

@@ -1,7 +1,7 @@
 --[[
-    One of scenarios S0 to S7 on the dev game's server, seed by seed: its
-    floors and bots laid out, a warm-up, a window of Tread's stats read once
-    a second and printed, and everything it made removed after
+    One of the bot harness's scenarios on the dev game's server, seed by
+    seed: its floors and bots laid out, a warm-up, a window of Tread's stats
+    read once a second and printed, and everything it made removed after
 --]]
 
 --!strict
@@ -50,12 +50,22 @@ type Group = Config.Group
 type Scenario = Config.Scenario
 type Timing = Config.Timing
 
+-- Each figure the window read, a sample a read, by its name
+type Samples = { [string]: { number } }
+
+-- What watches a run's window beside the stats, started after the warm-up's read and stopped after the window
+export type Probe = {
+	start: (entries: { any }) -> (), -- With the fleet's entries
+	stop: (samples: Samples) -> string, -- Gives its line, from every figure the window read
+}
+
 -- What one seeded run made, all of which it removes whatever happened
 type Made = {
 	floors: Folder?,
 	groups: { [Volt.Bot]: string }, -- Each of its bots' group
 	reports: { [string]: { [string]: number } }, -- Its bots' reports by group and kind
 	stopReports: (() -> ())?,
+	probing: Probe?, -- The probe while it is started and not yet stopped
 }
 
 local Run = {}
@@ -330,14 +340,14 @@ end
 --[[
     The window: Tread's stats read once each interval with the real player
     count and each real player's bytes over the last second beside it, each
-    read printed as it comes, and the percentiles of every figure after.
-    It ends on its own deadline
+    read printed as it comes, and the percentiles of every figure after,
+    with every figure's samples. It ends on its own deadline
 --]]
 
-local function window(label: string, scenario: Scenario, timing: Timing): string
+local function window(label: string, scenario: Scenario, timing: Timing): (string, Samples)
 	local server: Tread.Server = Game.get()
 	local Network = require(Packages.Tread.Network.Server) -- Tread's own scope, which each viewer's bytes are counted on
-	local samples: { [string]: { number } } = {}
+	local samples: Samples = {}
 	local started: number = os.clock()
 	local deadline: number = started + timing.window
 	local stalled: boolean = false
@@ -365,6 +375,7 @@ local function window(label: string, scenario: Scenario, timing: Timing): string
 
 		for name: string, times: any in stats.stages do
 			push(samples, `{name}Ms`, times.last * MILLISECONDS)
+			push(samples, `{name}P95Ms`, times.p95 * MILLISECONDS)
 		end
 
 		local counts: string = `real players {#real}, viewers {HttpService:JSONEncode(viewers)}`
@@ -378,7 +389,7 @@ local function window(label: string, scenario: Scenario, timing: Timing): string
 		end
 	end
 
-	return `{label} summary over {second} reads, p50/p95/p99: {summary(samples)}`
+	return `{label} summary over {second} reads, p50/p95/p99: {summary(samples)}`, samples
 end
 
 --[[
@@ -443,11 +454,12 @@ local function drove(label: string, scenario: Scenario, made: Made, problems: { 
 end
 
 --[[
-    One seeded run: the layout, the warm-up, the window, and then the
-    removal of everything it made, checked against what the handle lists
+    One seeded run: the layout, the warm-up, the window with any probe
+    beside it, and then the removal of everything it made, checked against
+    what the handle lists. A probe that started is stopped whatever happened
 --]]
 
-local function runSeed(name: string, scenario: Scenario, seed: number, timing: Timing): (boolean, string)
+local function runSeed(name: string, scenario: Scenario, seed: number, timing: Timing, probe: Probe?): (boolean, string)
 	local label: string = `Bots {name} seed {seed}`
 	local server: Tread.Server = Game.get()
 	local testContent: Instance? = Workspace:FindFirstChild("TestContent")
@@ -464,7 +476,7 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 		offset = viewerOffset(server, scenario.viewer)
 	end
 
-	local made: Made = { floors = nil, groups = {}, reports = {}, stopReports = nil }
+	local made: Made = { floors = nil, groups = {}, reports = {}, stopReports = nil, probing = nil }
 	local problems: { string } = {}
 
 	made.stopReports = server:onReport(function (player: (Player | Tread.Bot)?, kind: string, _: number | string)
@@ -494,12 +506,22 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 		-- The read the window's first change counts from
 		server:stats()
 
+		if probe then
+			probe.start(Fleet.entries())
+			made.probing = probe
+		end
+
 		if scenario.storm then
 			spawnAll(scenario, seeded, offset, made, params)
 		end
 
-		local line: string = window(label, scenario, timing)
+		local line: string, samples: Samples = window(label, scenario, timing)
 		drove(label, scenario, made, problems)
+
+		if probe then
+			made.probing = nil
+			print(`{label} probe: {probe.stop(samples)}`)
+		end
 
 		return line
 	end)
@@ -511,6 +533,14 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 	end
 
 	-- Everything it made goes, whatever the run did
+	local probing: Probe? = made.probing
+	if probing then
+		local stopped: boolean, stopFailure: any = pcall(probing.stop, {})
+		if not stopped then
+			table.insert(problems, `its probe did not stop: {stopFailure}`)
+		end
+	end
+
 	local stopReports: (() -> ())? = made.stopReports
 	if stopReports then
 		stopReports()
@@ -540,12 +570,13 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 end
 
 --[[
-    Runs a scenario for each of the timing's seeds in turn and gives
-    whether every run drove and cleaned up, with a line for each. Every
-    read and summary prints as it comes, for a run longer than one call
+    Runs a scenario for each of the timing's seeds in turn, a probe beside
+    each window when one is given, and gives whether every run drove and
+    cleaned up, with a line for each. Every read, summary and probe's line
+    prints as it comes, for a run longer than one call
 --]]
 
-function Run.run(name: string, timing: Timing): (boolean, string)
+function Run.run(name: string, timing: Timing, probe: Probe?): (boolean, string)
 	local scenario: Scenario? = SCENARIOS[name]
 	if not scenario then
 		return false, `Bots {name}: no scenario has that name`
@@ -555,7 +586,7 @@ function Run.run(name: string, timing: Timing): (boolean, string)
 	local lines: { string } = {}
 
 	for _, seed: number in timing.seeds do
-		local ok: boolean, line: string = runSeed(name, scenario, seed, timing)
+		local ok: boolean, line: string = runSeed(name, scenario, seed, timing, probe)
 		passed = passed and ok
 		table.insert(lines, line)
 	end

@@ -270,19 +270,7 @@ function Spectate.stepped(target: Key, command: StepCommand)
 		error(`Spectate.stepped takes the stepped command as a table, not a {typeof(command)}`, 2)
 	end
 
-	-- The oldest look past the cap, or the first spare, moves to the front and takes the newest
-	local looks: { StepCommand } = watched.looks
-	local last: number = math.min(watched.count + 1, MAX_COMMANDS)
-	local newest: StepCommand = looks[last]
-
-	table.move(looks, 1, last - 1, 2)
-	looks[1] = newest
-
-	newest.yaw = command.yaw
-	newest.pitch = command.pitch
-	newest.headYaw = command.headYaw
-	newest.headPitch = command.headPitch
-	watched.count = last
+	watched.count = Feed.push(watched.looks, watched.count, command)
 end
 
 --[[

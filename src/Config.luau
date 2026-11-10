@@ -13,7 +13,7 @@ local Math = require(script.Parent.Step.Math)
 local EYE_LIMIT: number = (2 ^ Constants.EYE_BITS - 1) * Constants.EYE_QUANTUM
 local VELOCITY_LIMIT: number = Constants.VELOCITY_LIMIT
 local SLOTS: number = Constants.SLOTS
-local TIMER_LIMIT: number = Constants.TIMER_LIMIT -- The most ticks a mantle takes, which its u8 progress counts to
+local TIMER_LIMIT: number = Constants.TIMER_LIMIT -- The most ticks a mantle or a slide's cooldown takes, each a u8
 local STRAIGHT_DOWN: number = 90 -- Degrees below level a look points straight down at
 local PLAYER_RAYS: number = Constants.PLAYER_RAYS -- The rays anti-ESP's player pair test has
 local LYING_RAYS: number = Constants.LYING_RAYS -- A sleeper's or body's
@@ -117,11 +117,23 @@ local SHARED: Specs = {
 		floatDepth = "nonNegative",
 		crouchDepth = "positive",
 		mantleHeight = "height",
+		mantleReach = "positive",
 		mantleTime = "positive",
 		mantleArc = "nonNegative",
 		ladderJump = "speed",
 		headSlide = "positive",
 		lyingBox = { length = "positive", width = "positive", height = "positive", lift = "nonNegative" },
+
+		["slide?"] = {
+			start = "speed",
+			boost = "nonNegative",
+			friction = "nonNegative",
+			slope = "ratio",
+			max = "speed",
+			stop = "speed",
+			steer = "nonNegative",
+			cooldown = "nonNegative",
+		},
 	},
 
 	tolerances = {
@@ -149,7 +161,7 @@ local SHARED: Specs = {
 }
 
 local SERVER: Specs = {
-	rates = { move = RATE }, -- One per inbound endpoint Schemas/Tread.volt declares, keyed by its name
+	rates = { move = RATE, view = RATE }, -- One per inbound endpoint Schemas/Tread.volt declares, keyed by its name
 	catchUp = "count",
 	slots = { reserve = "reserve" },
 	relevancy = { enter = "positive", leave = "positive" },
@@ -173,6 +185,8 @@ local SERVER: Specs = {
 		lookAheadMax = "nonNegative",
 		slice = "positive",
 		hiddenRate = "positive",
+		nearRadius = "positive",
+		nearRate = "positive",
 		visibleRate = "positive",
 		hold = "nonNegative",
 		failOpen = "positive",
@@ -262,6 +276,7 @@ local CLIENT: Specs = {
 	smoothing = { decay = "positive", snap = "nonNegative" },
 	drawDistance = { desktop = "positive", console = "positive", phone = "positive", tablet = "positive" },
 	lod = { full = "nonNegative", footIk = "nonNegative", aim = "nonNegative" },
+	firstPerson = { back = "nonNegative" },
 }
 
 local SHARED_PAIRS: { Pair } = {
@@ -365,7 +380,7 @@ export type Shared = {
 
 -- The server entry point's own settings
 export type ServerSettings = {
-	rates: { move: Rate }, -- One per inbound endpoint Tread's schema declares, keyed by its name
+	rates: { move: Rate, view: Rate }, -- One per inbound endpoint Tread's schema declares, keyed by its name
 	catchUp: number, -- The most ticks one Heartbeat may run
 	slots: { reserve: number }, -- The slots sleepers may never take
 	relevancy: { enter: number, leave: number }, -- Studs
@@ -389,6 +404,8 @@ export type ServerSettings = {
 		lookAheadMax: number,
 		slice: number, -- Seconds it may take a Heartbeat
 		hiddenRate: number, -- Hz
+		nearRadius: number, -- Studs from the viewer's eye inside which a hidden pair is rechecked at nearRate instead
+		nearRate: number, -- Hz
 		visibleRate: number,
 		hold: number, -- Seconds
 		failOpen: number,
@@ -457,6 +474,7 @@ export type ClientSettings = {
 	smoothing: { decay: number, snap: number },
 	drawDistance: { desktop: number, console: number, phone: number, tablet: number }, -- Studs
 	lod: { full: number, footIk: number, aim: number },
+	firstPerson: { back: number }, -- Studs the first-person copy is drawn behind the world rig, along its facing
 }
 
 local Config = {}
@@ -705,7 +723,8 @@ end
 --[[
     Refuses a mantle time that rounds to no tick at the simulation rate, or
     to more than the mantle's u8 progress counts, rounded as the mantle
-    rounds it from the time a tick covers
+    rounds it from the time a tick covers, and a mantle reach whose move to
+    the face in one tick would be a speed OwnerState can't hold
 --]]
 
 local function checkMantle(shared: any)
@@ -718,6 +737,40 @@ local function checkMantle(shared: any)
 			`a time that rounds to 1 to {TIMER_LIMIT} ticks at {SHARED_PATH}.rates.simulation's {rate}`
 		refuse(`{SHARED_PATH}.step.mantleTime`, expected, mantleTime)
 	end
+
+	local reach: number = shared.step.mantleReach
+	if Math.quantizeVelocity(reach * rate) >= VELOCITY_LIMIT then
+		local expected: string =
+			`a reach a tick covers below {VELOCITY_LIMIT} studs/s at {SHARED_PATH}.rates.simulation's {rate}`
+		refuse(`{SHARED_PATH}.step.mantleReach`, expected, reach)
+	end
+end
+
+--[[
+    Refuses a crouch slide whose stop speed isn't below its start, whose top
+    speed is below its start, or whose cooldown rounds to more ticks than
+    its u8 counts, rounded as the step rounds it from the time a tick covers
+--]]
+
+local function checkSlide(shared: any)
+	local slide: any = shared.step.slide
+	if slide == nil then
+		return
+	end
+
+	local path: string = `{SHARED_PATH}.step.slide`
+	if slide.stop >= slide.start then
+		refuse(`{path}.stop`, `a number below {path}.start's {slide.start}`, slide.stop)
+	elseif slide.max < slide.start then
+		refuse(`{path}.max`, `a number at least {path}.start's {slide.start}`, slide.max)
+	end
+
+	local rate: number = shared.rates.simulation
+	if math.round(slide.cooldown / (1 / rate)) > TIMER_LIMIT then
+		local expected: string =
+			`a time that rounds to at most {TIMER_LIMIT} ticks at {SHARED_PATH}.rates.simulation's {rate}`
+		refuse(`{path}.cooldown`, expected, slide.cooldown)
+	end
 end
 
 local function checkShared(shared: any)
@@ -725,6 +778,7 @@ local function checkShared(shared: any)
 	checkCollision(shared.collision)
 	checkPairs(SHARED_PAIRS, shared, SHARED_PATH)
 	checkMantle(shared)
+	checkSlide(shared)
 end
 
 --[[
@@ -741,7 +795,8 @@ end
 
 --[[
     Checks the shared table and the client settings before the client does
-    anything else, erroring as the server's check does
+    anything else, erroring as the server's check does. The crouch slide's
+    animation is required only where the shared table gives the slide
 --]]
 
 function Config.client(shared: Shared, client: ClientSettings)
@@ -749,6 +804,10 @@ function Config.client(shared: Shared, client: ClientSettings)
 	walk(CLIENT, client, CLIENT_PATH)
 	checkPairs(CLIENT_PAIRS, client, CLIENT_PATH)
 	checkJoints(client)
+
+	if shared.step.slide ~= nil and client.animations.slide == nil then
+		refuse(`{CLIENT_PATH}.animations.slide`, `{EXPECTED.animation}, since {SHARED_PATH}.step.slide is given`, nil)
+	end
 end
 
 --[[

@@ -1,6 +1,6 @@
 --[[
     OwnerState, server to owner once a relay tick: the complete step state
-    after the last command the server ran, Tread's own 41 B, then the game's
+    after the last command the server ran, Tread's own 42 B, then the game's
     server-set and rule-state blocks, each behind its u8 length
 --]]
 
@@ -61,7 +61,7 @@ end
 
 --[[
     Writes a state into data from offset and gives the bytes it filled, at
-    most 91. Each of Tread's fields is rounded to its precision, which the
+    most 92. Each of Tread's fields is rounded to its precision, which the
     step already holds it to, and it errors on one its width doesn't hold,
     or on a game field its declaration doesn't
 --]]
@@ -106,8 +106,9 @@ function OwnerState.write(state: State, data: buffer, offset: number, layout: La
 	buffer.writeu8(data, offset + 35, unsigned(state.groundTicks, U8, "ground ticks"))
 	buffer.writeu8(data, offset + 36, unsigned(state.airTicks, U8, "air ticks"))
 	buffer.writeu8(data, offset + 37, unsigned(state.mantleTicks, U8, "mantle ticks"))
-	buffer.writeu8(data, offset + 38, unsigned(math.round(state.mantleRise * EYE_SCALE), U8, "mantle rise"))
-	buffer.writeu16(data, offset + 39, unsigned(state.ladder, U16, "ladder"))
+	buffer.writeu8(data, offset + 38, unsigned(state.slideCooldown, U8, "slide cooldown"))
+	buffer.writeu8(data, offset + 39, unsigned(math.round(state.mantleRise * EYE_SCALE), U8, "mantle rise"))
+	buffer.writeu16(data, offset + 40, unsigned(state.ladder, U16, "ladder"))
 
 	-- The game's two blocks, each behind its length
 	local at: number = offset + Constants.OWNER_STATE_BYTES
@@ -182,8 +183,9 @@ function OwnerState.read(data: buffer, offset: number, length: number, into: Sta
 	into.groundTicks = buffer.readu8(data, offset + 35)
 	into.airTicks = buffer.readu8(data, offset + 36)
 	into.mantleTicks = buffer.readu8(data, offset + 37)
-	into.mantleRise = buffer.readu8(data, offset + 38) / EYE_SCALE
-	into.ladder = buffer.readu16(data, offset + 39)
+	into.slideCooldown = buffer.readu8(data, offset + 38)
+	into.mantleRise = buffer.readu8(data, offset + 39) / EYE_SCALE
+	into.ladder = buffer.readu16(data, offset + 40)
 
 	if not layout then
 		return

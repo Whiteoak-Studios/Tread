@@ -110,4 +110,34 @@ export type Footstep = {
 	material: Enum.Material,
 }
 
+-- What a relay tap hands each sink once a relay tick: the relay tick, unwrapped, and that tick's frame in a new
+-- buffer the sink may keep and never writes, in the layout Tread.decode reads as a tap
+export type Sink = (tick: number, records: buffer) -> ()
+
+-- A taken slot as onReliable reports it: the life it belongs to, its kind and rig mode, and its look and held item
+-- as their packed bytes, each empty while none is set, with no player named
+export type SlotEntry = {
+	generation: number,
+	kind: Kind,
+	rig: "A" | "B",
+	look: buffer,
+	held: buffer,
+}
+
+-- A death as onReliable reports it: the dying character and its body, each the u16 slot and generation every layout
+-- names a character by, and the attack's direction, zero for none
+export type Death = {
+	character: number,
+	body: number,
+	push: Vector3,
+}
+
+-- One change to the state a snapshot holds, by slot, with its value before and after: a slot taken, changed or
+-- freed, nil while free; a look or a held item within one life; or a death, which has nothing before it
+export type Change =
+	{ slot: number, kind: "slot", previous: SlotEntry?, current: SlotEntry? }
+	| { slot: number, kind: "look", previous: buffer, current: buffer }
+	| { slot: number, kind: "held", previous: buffer, current: buffer }
+	| { slot: number, kind: "death", previous: nil, current: Death }
+
 return {}

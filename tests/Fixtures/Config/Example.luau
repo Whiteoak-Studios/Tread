@@ -217,6 +217,7 @@ function Example.server(): ServerSettings
 	return {
 		rates = {
 			move = { perSecond = 35, burst = 60 },
+			view = { perSecond = 2, burst = 5 },
 		},
 
 		catchUp = 2,
@@ -233,6 +234,8 @@ function Example.server(): ServerSettings
 			lookAheadMax = 0.45,
 			slice = 0.002,
 			hiddenRate = 10,
+			nearRadius = 250,
+			nearRate = 30,
 			visibleRate = 2,
 			hold = 1,
 			failOpen = 0.15,
@@ -335,6 +338,9 @@ function Example.client(): ClientSettings
 		smoothing = { decay = 15, snap = 2 },
 		drawDistance = { desktop = 1000, console = 1000, phone = HANDHELD_DISTANCE, tablet = HANDHELD_DISTANCE },
 		lod = { full = 128, footIk = 128, aim = 600 },
+
+		-- Frontier Zero tunes the copy's distance live with its rig and field of view, so the dev place's stands in
+		firstPerson = { back = 1 },
 	}
 end
 

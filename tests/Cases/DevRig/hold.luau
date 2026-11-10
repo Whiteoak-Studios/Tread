@@ -6,6 +6,7 @@
 
 --!strict
 local Harness = require("../../Fixtures/DevClient/Harness")
+local Template = require("../../Fixtures/DevRig/Template")
 
 local RIG: string = "dev/Client/Rig.luau"
 local HELD: string = "Held"
@@ -30,7 +31,7 @@ return function (): (boolean, string | nil)
 	local place: Harness.Game = Harness.new()
 	local Rig: any = place.load(RIG)
 
-	local rig: any = Rig.template()
+	local rig: any = Template(place.game):Clone() -- Tread hands the hook its own clone of the template
 	Rig.hold(rig, { item = ITEM })
 
 	local held: { any } = blocks(rig)

@@ -1,7 +1,7 @@
 --[[
-    The relay cases' harness: the relay started on the example game's tables,
-    bodies in the slot table, and viewers whose clients read every block and
-    withheld block they are sent, the first over Volt.mock and Tread's modules
+    The relay cases' harness: the relay and its taps started on the example's
+    tables, bodies in the slot table, and viewers whose clients read every
+    block and withheld block they are sent, the first over Volt.mock
 --]]
 
 --!strict
@@ -22,6 +22,7 @@ local Relay = require(Tread.Server.Relay)
 local Sequence = require(Tread.Codec.Sequence)
 local Slots = require(Tread.Server.Slots)
 local State = require(Tread.Step.State)
+local Taps = require(Tread.Server.Taps)
 
 local MASK_BITS: number = 16 -- The sequences before the newest a client's acknowledgment covers
 local WRAP: number = 2 ^ 16
@@ -91,6 +92,7 @@ type Fields = {
 	viewers: { Viewer },
 	clients: { [any]: Client },
 	hidden: { [any]: { [number]: boolean } },
+	reasons: { [any]: { [number]: string } }, -- The send reason anti-ESP gives for a pair, Clear where none is set
 	traffic: number,
 	tick: number,
 	sends: { { any } }, -- The keys each block went to this run, one list a send
@@ -114,11 +116,11 @@ local function seen(): Seen
 end
 
 --[[
-    A harness with the relay started on the example's shared and server
-    tables, which tweak may change first, every viewer's traffic at the
-    harness's own count and anti-ESP hiding whatever hide asks. With
-    network, the first viewer is the mock's player and its blocks cross
-    Volt.mock
+    A harness with the relay and its taps started on the example's shared
+    and server tables, which tweak may change first, every viewer's traffic
+    at the harness's own count and anti-ESP hiding whatever hide asks and
+    giving whatever reason sets. With network, the first viewer is the
+    mock's player and its blocks cross Volt.mock
 --]]
 
 function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ())?): Self
@@ -141,6 +143,7 @@ function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ()
 		viewers = {} :: { Viewer },
 		clients = {} :: { [any]: Client },
 		hidden = {} :: { [any]: { [number]: boolean } },
+		reasons = {} :: { [any]: { [number]: string } },
 		traffic = 0,
 		tick = 0,
 		sends = {} :: { { any } },
@@ -159,6 +162,21 @@ function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ()
 
 		return hidden ~= nil and hidden[slot] == true
 	end)
+
+	Taps.start({
+		layout = layout,
+		wearing = Relay.wearing,
+
+		reason = function (key: any, slot: number): any
+			local reasons: { [number]: string }? = self.reasons[key]
+			local reason: string? = reasons and reasons[slot]
+			if reason == nil then
+				return "Clear"
+			end
+
+			return reason
+		end,
+	})
 
 	if network then
 		-- The server first, so the player the client joins as is one it hears join
@@ -214,6 +232,7 @@ function Harness.viewer(self: Self, name: string): Client
 	table.insert(self.viewers, viewer)
 	self.clients[key] = client
 	self.hidden[key] = {}
+	self.reasons[key] = {}
 
 	return client
 end
@@ -262,9 +281,15 @@ function Harness.hide(self: Self, client: Client, slot: number, hidden: boolean)
 	self.hidden[client.viewer.key][slot] = hidden
 end
 
+-- Sets the send reason anti-ESP gives the taps for a slot a viewer is sent or has withheld
+function Harness.reason(self: Self, client: Client, slot: number, reason: string)
+	self.reasons[client.viewer.key][slot] = reason
+end
+
 --[[
     One relay tick: every client's view of the run starts empty, the relay
-    runs, a network harness flushes and steps the mock, and each viewer's
+    runs, a network harness flushes and steps the mock, the taps hand their
+    frames to their sinks as the relay stage does, and each viewer's
     acknowledgment is what its client had read lag runs before
 --]]
 
@@ -286,6 +311,10 @@ function Harness.run(self: Self)
 		for _ = 1, STEPS do
 			network.mock:step()
 		end
+	end
+
+	if Taps.observing then
+		Taps.finish(self.tick)
 	end
 
 	for _, client: Client in self.clients do
@@ -506,6 +535,7 @@ end
 
 Harness.Relay = Relay
 Harness.Slots = Slots
+Harness.Taps = Taps
 
 export type Harness = Self
 type Self = typeof(setmetatable({} :: Fields, Harness))

@@ -24,6 +24,7 @@ local ROWS: { Row } = {
 	{ key = "groundTicks", value = 256, text = "ground ticks holds" },
 	{ key = "airTicks", value = 1.5, text = "air ticks holds" },
 	{ key = "mantleTicks", value = 256, text = "mantle ticks holds" },
+	{ key = "slideCooldown", value = 256, text = "slide cooldown holds" },
 	{ key = "ladder", value = 65536, text = "ladder holds" },
 	{ key = "eyeHeight", value = 8, text = "eye height holds" }, -- 256 steps of 1/32, past the u8
 	{ key = "mantleRise", value = -1 / 32, text = "mantle rise holds" },
@@ -71,14 +72,14 @@ return function (): (boolean, string | nil)
 
 	type Read = { name: string, length: number, patch: ((data: buffer) -> ())?, text: string }
 	local reads: { Read } = {
-		{ name = "42 B", length = 42, text = "too short" },
+		{ name = "43 B", length = 43, text = "too short" },
 		{ name = "a byte longer", length = bytes + 1, text = "doesn't end" },
 		{ name = "a byte shorter", length = bytes - 1, text = "doesn't end" },
 		{
 			name = "a server-set block past the end",
 			length = bytes,
 			patch = function (copy: buffer)
-				buffer.writeu8(copy, 41, 200)
+				buffer.writeu8(copy, 42, 200)
 			end,
 			text = "server-set block of 200 B passes",
 		},
@@ -111,7 +112,7 @@ return function (): (boolean, string | nil)
 			name = "a rule state past its declaration",
 			length = bytes,
 			patch = function (copy: buffer)
-				local at: number = 41 + 1 + 2 + 1 + 1
+				local at: number = 42 + 1 + 2 + 1 + 1
 				buffer.writeu8(copy, at, bit32.replace(buffer.readu8(copy, at), 63, 0, 6))
 			end,
 			text = "rule-state block fails at its field 2",

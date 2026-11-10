@@ -37,6 +37,7 @@ local SET: { [string]: any } = {
 	groundTicks = 9,
 	airTicks = 4,
 	mantleTicks = 6,
+	slideCooldown = 33,
 	mantleRise = 3.5,
 	ladder = 12,
 	groundNormal = vector.create(0, 1, 0),

@@ -40,6 +40,7 @@ return function (): (boolean, string | nil)
 		groundTicks = 0,
 		airTicks = 0,
 		mantleTicks = 0,
+		slideCooldown = 0,
 		mantleRise = 0,
 		ladder = 0,
 		groundNormal = vector.zero,

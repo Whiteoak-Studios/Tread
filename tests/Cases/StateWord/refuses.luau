@@ -46,8 +46,9 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- Mode codes 5 to 7 have no mode, the first of them kept for a mounted one, and posture code 3 has none
-	for _, packed: number in { 5, 6, 7, 3 * 8 } do
+	-- Mode codes 5 and 7 have no mode, the first kept for a mounted one and 6 the crouch slide's, and posture code
+	-- 3 has none
+	for _, packed: number in { 5, 7, 3 * 8 } do
 		local refused: boolean, why: string = Refuses("is no state word", StateWord.unpack, packed, word("mode", "Air"))
 		if not refused then
 			return false, `The word {packed} was unpacked: {why}`

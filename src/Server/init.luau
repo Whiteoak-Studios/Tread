@@ -24,6 +24,7 @@ local Sleepers = require(script.Sleepers)
 local Slots = require(script.Slots)
 local Spectate = require(script.Spectate)
 local State = require(script.Parent.Step.State)
+local Taps = require(script.Taps)
 local Teleport = require(script.Teleport)
 local Tick = require(script.Tick)
 local Types = require(script.Parent.Types)
@@ -60,7 +61,10 @@ type PlatformEntry = State.PlatformEntry
 type Sample = Characters.Sample
 type ServerSettings = Config.ServerSettings
 type Shared = Config.Shared
+type Sink = Types.Sink
 type Sleeper = Characters.Sleeper
+type Stepped = Taps.Stepped
+type Changed = Taps.Changed
 type Target = Characters.Target
 type Teleported = Teleport.Teleported
 type Run = Tick.Run
@@ -294,6 +298,8 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 		return sent + pending
 	end, AntiEsp.isHidden)
 
+	Taps.start({ layout = layout, reason = AntiEsp.reason, wearing = Relay.wearing })
+
 	local hash: number = Config.hash(shared)
 
 	-- Each lives as long as the server
@@ -307,6 +313,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 	end)
 
 	network.Move.on(Characters.file)
+	network.View.on(Relay.setDistance)
 
 	network.onJoin(function (key: Key)
 		local ran: number = Tick.counts()
@@ -326,7 +333,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 		Characters.leave(key)
 	end)
 
-	Slots.onChange(function (slot: number, generation: number, _: Slots.Entry?, current: Slots.Entry?)
+	Slots.onChange(function (slot: number, generation: number, previous: Slots.Entry?, current: Slots.Entry?)
 		if current then
 			Reliable.write(ChangeEntry, slot, generation, current.rig, current.player)
 		else
@@ -334,6 +341,10 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 		end
 
 		network.Slots.fireList(Joined, Change)
+
+		if Taps.reliable then
+			Taps.slot(slot, generation, previous, current)
+		end
 	end)
 
 	Reports.connect(count)
@@ -372,6 +383,11 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 				-- odd ones across two Heartbeats needs a flush per player from Volt, a Volt task if G3 shows the need
 				local ran: boolean = xpcall(Characters.relay, keepFailure, relayTick, tick)
 				network.flush()
+
+				-- After the flush, so a sink's work never holds back what the relay sent
+				if Taps.observing then
+					Taps.finish(relayTick)
+				end
 
 				if not ran then
 					error(RelayFailure, 0)
@@ -603,8 +619,46 @@ function Server.addStage(self: Self, name: string, after: string, run: Run)
 	Tick.addStage(name, after, run)
 end
 
---- Everything a viewer is sent now, as one buffer a clip ring starts from,
---- with the latest call of every platform called
+--- Tap 1: calls the sink once every relay tick, after relevancy, the tiers,
+--- the allocator and anti-ESP, with the relay tick and a frame of every
+--- block the relay sent the viewer that tick, a spectating moderator's
+--- copies of its target's included, each record's 3-bit send reason, and
+--- the viewer's OwnerState while it owns a character, with its view lag
+--- and the looks it stepped since the last frame. Each sink runs under its
+--- own xpcall and must not yield, and one whose viewer leaves is called no
+--- more. Returns the closure that disconnects the sink
+--- @method observe
+--- @within Server
+--- @param viewer Player | Bot
+--- @param sink (tick: number, records: buffer) -> ()
+--- @return () -> ()
+
+function Server.observe(self: Self, viewer: Key, sink: Sink): () -> ()
+	return Taps.observe(viewer, sink)
+end
+
+--- Tap 5: calls the sink once every relay tick with a frame of the
+--- withheld blocks the relay sent the moderators spectating the viewer:
+--- the culled players anti-ESP held back from it, never an Invisible or
+--- Parked one, with the look entries those blocks carry and each record's
+--- reason. While no one spectates the viewer each frame holds no block.
+--- Returns the closure that disconnects the sink
+--- @method observeWithheld
+--- @within Server
+--- @param viewer Player | Bot
+--- @param sink (tick: number, records: buffer) -> ()
+--- @return () -> ()
+
+function Server.observeWithheld(self: Self, viewer: Key, sink: Sink): () -> ()
+	return Taps.observeWithheld(viewer, sink)
+end
+
+--- Tap 6: everything a viewer is sent now, as one buffer a clip ring
+--- starts from, with the latest call of every platform called, ending
+--- with the view's own character with its look and held item. A
+--- spectating moderator is sent its target's view, so its keyframe holds
+--- the target's characters, the target's own character and, marked
+--- withheld, the looks of those withheld from the target
 --- @method keyframe
 --- @within Server
 --- @param viewer Player | Bot
@@ -620,6 +674,44 @@ function Server.keyframe(self: Self, viewer: Key): buffer
 	end
 
 	return Relay.keyframe(viewer, called)
+end
+
+--- Tap 4's snapshot: every taken slot with its generation, kind, rig
+--- mode, look and held item, the whole state onReliable reports changes
+--- to, in a new buffer
+--- @method snapshot
+--- @within Server
+--- @return buffer
+
+function Server.snapshot(self: Self): buffer
+	return Taps.snapshot()
+end
+
+--- Taps 2 and 3: calls back with every command a character steps, a
+--- stand-in included, with the simulation tick it ran on, the base look at
+--- full precision, and the state the step produced, its cleared eye, root,
+--- velocity and epoch among it. The command and the state are valid during
+--- the call. Returns the closure that disconnects the callback
+--- @method onCommand
+--- @within Server
+--- @param callback (character: Character, tick: number, command: Command, isStandIn: boolean, state: State) -> ()
+--- @return () -> ()
+
+function Server.onCommand(self: Self, callback: Stepped): () -> ()
+	return Taps.onCommand(callback)
+end
+
+--- Tap 4: calls back with every change to the state a snapshot holds: a
+--- slot taken, changed or freed, a look or a held item within a life, and
+--- a death, each with its value before it. Returns the closure that
+--- disconnects the callback
+--- @method onReliable
+--- @within Server
+--- @param callback (change: Change) -> ()
+--- @return () -> ()
+
+function Server.onReliable(self: Self, callback: Changed): () -> ()
+	return Taps.onReliable(callback)
 end
 
 --- Calls back on every report Tread raises, with the player or bot it is

@@ -1,7 +1,7 @@
 --[[
     The dev game's server: starts Tread's server as a consuming game does,
-    with the test elevator and its call button, and builds, respawns and
-    ends each joining player's character, counting their corrections
+    with the test elevator, its call button and the fixture handlers, and
+    builds, respawns and ends each player's character, counting corrections
 --]]
 
 --!strict
@@ -19,7 +19,9 @@ local Network = require(ReplicatedStorage.Shared.Network.Server)
 local Corrections = require(ServerScriptService.Server.Corrections)
 local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
 local Forward = require(ServerScriptService.Server.Forward)
+local Requests = require(ServerScriptService.Server.Fixtures.Requests)
 local Shared = require(ReplicatedStorage.Shared.Dev.Config)
+local Shots = require(ServerScriptService.Server.Fixtures.Shots)
 local Spawns = require(ServerScriptService.Server.Spawns)
 
 local SETTINGS = require(ServerScriptService.Server.Config.Tread)
@@ -39,13 +41,6 @@ local LastCall: number? = nil -- os.clock() at the elevator's last call from its
 local Sight: RaycastParams = RaycastParams.new() -- What a press's ray meets in the world, the casts' parts at start
 
 local Game = {}
-
---[[
-    The dev game's pre-command hook. It has no items to equip and no shots
-    to queue, so nothing runs before a command
---]]
-
-local function beforeCommand(_: Tread.Character, _: Tread.Command) end
 
 -- Builds a player's character at a spawn into their life record, counting their corrections from their first one
 local function build(server: Tread.Server, player: Player, at: CFrame, life: Life): Tread.Character
@@ -157,10 +152,11 @@ end
 --[[
     Starts the dev game once a server: lays the plaza's spawn points, which
     fails at once in a place without them, starts Tread's server with the
-    dev shared table and the dev game's server settings, registers the test
-    elevator and binds its call button, binds the correction telemetry,
-    forwards each player's reports to them, and builds a character for
-    each player who joins
+    dev shared table and the dev game's server settings, whose pre-command
+    hook hands each command's shots to the fixture hit test, starts the
+    fixture handlers, registers the test elevator and binds its call
+    button, binds the correction telemetry, forwards each player's reports
+    to them, and builds a character for each player who joins
 --]]
 
 function Game.start()
@@ -196,12 +192,15 @@ function Game.start()
 		rewind = SETTINGS.rewind,
 		teleport = SETTINGS.teleport,
 		bots = SETTINGS.bots,
-		beforeCommand = beforeCommand,
+		beforeCommand = Shots.queue,
 	}
 
 	local server: Tread.Server = Tread.startServer(Shared, settings)
 	Running = server
 	Settings = settings
+
+	Shots.start(server, Shared, settings)
+	Requests.start(server)
 
 	-- The elevator and its button's listener each live as long as the server
 	server:addPlatform(Elevator.platform)

@@ -1,6 +1,6 @@
 --[[
     The moderator's feed carries the target's OwnerState byte for byte and
-    the look of up to 8 stepped commands at Move's precision, at most 141 B,
+    the look of up to 8 stepped commands at Move's precision, at most 142 B,
     and refuses more looks, a longer OwnerState and bytes that aren't a feed
 --]]
 
@@ -60,8 +60,8 @@ return function (): (boolean, string | nil)
 
 	local data: buffer = buffer.create(160)
 	local bytes: number = Feed.write(data, owner, 2, ownerLength, commands, 8, Game.limits)
-	if ownerLength ~= 91 or bytes ~= 141 then
-		return false, `The largest feed filled {bytes} B around {ownerLength} B of OwnerState, not 141 around 91`
+	if ownerLength ~= 92 or bytes ~= 142 then
+		return false, `The largest feed filled {bytes} B around {ownerLength} B of OwnerState, not 142 around 92`
 	end
 
 	local exact: buffer = buffer.create(bytes)
@@ -69,11 +69,11 @@ return function (): (boolean, string | nil)
 
 	local feed: any = Feed.new()
 	Feed.read(exact, feed, Game.limits)
-	if feed.count ~= 8 or feed.ownerLength ~= 91 then
+	if feed.count ~= 8 or feed.ownerLength ~= 92 then
 		return false, `The feed read back {feed.count} looks and {feed.ownerLength} B of OwnerState`
 	end
 
-	for index: number = 0, 90 do
+	for index: number = 0, 91 do
 		if buffer.readu8(exact, feed.ownerAt + index) ~= buffer.readu8(owner, 2 + index) then
 			return false, `The feed's OwnerState differs from the target's at byte {index}`
 		end
@@ -98,9 +98,9 @@ return function (): (boolean, string | nil)
 	end
 
 	local refused: boolean, why: string =
-		Refuses("at most 91 B", Feed.write, data, owner, 0, 92, commands, 0, Game.limits)
+		Refuses("at most 92 B", Feed.write, data, owner, 0, 93, commands, 0, Game.limits)
 	if not refused then
-		return false, `A feed around 92 B of OwnerState was written: {why}`
+		return false, `A feed around 93 B of OwnerState was written: {why}`
 	end
 
 	table.insert(commands, Command.new())

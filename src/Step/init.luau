@@ -13,6 +13,7 @@ local Ladder = require(script.Ladder)
 local Mantle = require(script.Mantle)
 local Math = require(script.Math)
 local Platforms = require(script.Platforms)
+local Slide = require(script.Slide)
 local State = require(script.State)
 local Swim = require(script.Swim)
 
@@ -51,10 +52,13 @@ local jumping: boolean = false -- Whether the press and the rules make this tick
 local landed: number = 0 -- The speed this tick landed at, 0 for no landing that counted
 local surface: number? = nil -- The water's surface over the body, where its tick starts and then where its move ends
 local deep: boolean = false -- Whether the tick starts with the feet deeper in water than a crouch is allowed
+local slidable: boolean = false -- Whether Tread's own physics lets a crouch slide start this tick, before the rules
+local began: boolean = false -- Whether a crouch slide started this tick
+local airborne: boolean = false -- Whether a slide ended this tick by leaving the ground with no jump
 
 -- What the rules function reads and what it permits, filled each tick so a step makes no table
 local RuleInput: RuleStep = {} :: RuleStep
-local RuleAllow: Allow = { jump = false, sprint = false, crouch = false, stand = false }
+local RuleAllow: Allow = { jump = false, sprint = false, crouch = false, stand = false, slide = false }
 
 -- A value less itself is 0 only when the value is finite
 local function finite(value: number): boolean
@@ -129,9 +133,9 @@ end
 --[[
     Runs the game's rules function on what Tread's own physics permits: a
     jump only on the ground or a ladder, sprint only standing, a crouch for
-    any posture but downed with the feet no deeper than a crouch allows,
-    and a stand for any posture but downed. Gives back the speed cap it
-    returns
+    any posture but downed with the feet no deeper than a crouch allows, a
+    stand for any posture but downed, and a crouch slide's start where the
+    slide's own rules let one. Gives back the speed cap it returns
 --]]
 
 local function rule(state: State, command: Command, world: World): number
@@ -151,6 +155,8 @@ local function rule(state: State, command: Command, world: World): number
 	RuleAllow.sprint = state.posture == "Stand"
 	RuleAllow.crouch = state.posture ~= "Downed" and not deep
 	RuleAllow.stand = state.posture ~= "Downed"
+	slidable = Slide.allows(state, world)
+	RuleAllow.slide = slidable
 
 	local cap: number = world.rules(RuleInput, RuleAllow)
 	if type(cap) ~= "number" or not (cap >= 0) then
@@ -352,24 +358,79 @@ local function ladder(state: State, command: Command, world: World)
 	end
 end
 
+--[[
+    Slide: a jump press the mantle search before the move found no ledge
+    for leaves with the slide's own speed held to its top, and crouch let
+    go, sprint pressed or a posture no longer crouched hands the tick to the
+    walk. Otherwise the slide's own tick runs, steered by the move input
+--]]
+
+local function slide(state: State, command: Command, world: World)
+	if jumping then
+		targetX, targetZ = Slide.held(state, world.settings)
+		ground(state, command, world)
+
+		return
+	elseif not command.crouch or command.pressed.sprint or state.posture ~= "Crouch" then
+		state.mode = "Ground"
+		ground(state, command, world)
+
+		return
+	end
+
+	local steerX: number = moveRight * cosine - moveForward * sine
+	local steerZ: number = -(moveRight * sine + moveForward * cosine)
+	local below: State? = Slide.run(state, world, steerX, steerZ)
+
+	slideOff(state, world, below)
+	airborne = not state.grounded
+end
+
+--[[
+    Whether a ground tick starts a crouch slide: Tread's own physics and the
+    rules allowing both the slide and the crouch, the body crouched, and
+    crouch pressed, or held on the first ground tick after the air
+--]]
+
+local function starts(state: State, command: Command): boolean
+	local pressed: boolean = command.pressed.crouch or (command.crouch and state.groundTicks == 1)
+
+	return slidable and RuleAllow.slide and RuleAllow.crouch and state.posture == "Crouch" and pressed
+end
+
+-- Ground: a crouch slide where one starts, its first tick run at once, and the walk otherwise
+local function onGround(state: State, command: Command, world: World)
+	if not jumping and starts(state, command) then
+		began = true
+		Slide.start(state, world.settings)
+		slide(state, command, world)
+
+		return
+	end
+
+	ground(state, command, world)
+end
+
 -- Each mode's tick by its name, which a mode outside it errors naming
 local MODES: { [Mode]: Run } = {
-	Ground = ground,
+	Ground = onGround,
 	Air = air,
 	Swim = swim,
 	Ladder = ladder,
 	Mantle = Mantle.run,
+	Slide = slide,
 }
 
 --[[
-    Into a mantle or onto a ladder before the move, from the ground, the air
-    or the water and never downed: a jump press tries the mantle, and a walk
-    into a ladder's box while facing it starts the climb
+    Into a mantle or onto a ladder before the move, from the ground, a
+    slide, the air or the water and never downed: a jump press tries the
+    mantle, and a walk into a ladder's box while facing it starts the climb
 --]]
 
 local function enter(state: State, command: Command, world: World)
 	local mode: Mode = state.mode
-	if state.posture == "Downed" or (mode ~= "Ground" and mode ~= "Air" and mode ~= "Swim") then
+	local entering: boolean = mode == "Ground" or mode == "Slide" or mode == "Air" or mode == "Swim"
+	if state.posture == "Downed" or not entering then
 		return
 	end
 
@@ -382,15 +443,16 @@ end
 
 --[[
     Into and out of the water after the move. Feet in water at least the
-    game's swim depth deep start a swim, keeping the game's entry share of
-    the velocity, and a fall that ends there lands with water as its
-    material. A swimmer leaves once the water is shallower than the leave
-    depth or its feet are out, standing up where the standing hull fits
+    game's swim depth deep start a swim from the ground, a slide or the
+    air, keeping the game's entry share of the velocity, and a fall that
+    ends there lands with water as its material. A swimmer leaves once the
+    water is shallower than the leave depth or its feet are out, standing
+    up where the standing hull fits
 --]]
 
 local function wade(state: State, world: World)
 	local mode: Mode = state.mode
-	if mode ~= "Ground" and mode ~= "Air" and mode ~= "Swim" then
+	if mode ~= "Ground" and mode ~= "Slide" and mode ~= "Air" and mode ~= "Swim" then
 		return
 	end
 
@@ -472,15 +534,19 @@ end
     exact at every tenth command and while a platform's box presses into
     the body, the water where it starts, the rules' cap and permits, posture
     and a mantle or a ladder to enter, then its mode's move at that mode's
-    stance, the water where the move ends, the timers, and the platform it
-    then stands on. A mantle runs its path with no posture or entry. Gives
-    back how far it sank when no spot was clear
+    stance, the water where the move ends, a slide's cooldown once it has
+    ended, the timers, and the platform it then stands on. A mantle runs its
+    path with no posture or entry. Gives back how far it sank when no spot
+    was clear
 --]]
 
 local function walk(state: State, command: Command, world: World): number?
 	local settings: Settings = world.settings
 	local pressing: boolean = Platforms.carry(state, world)
 	local stuck: number? = Collide.depenetrate(state, world, pressing or command.number % EXACT_EVERY == 0)
+	local sliding: boolean = state.mode == "Slide"
+	began = false
+	airborne = false
 
 	surface = Swim.surface(state, world)
 	local top: number? = surface
@@ -528,6 +594,12 @@ local function walk(state: State, command: Command, world: World): number?
 
 	surface = Swim.surface(state, world)
 	wade(state, world)
+
+	-- Every end of a slide but leaving the ground with no jump starts its cooldown, one its first tick ends included
+	if (sliding or began) and state.mode ~= "Slide" and not airborne then
+		Slide.finish(state, world)
+	end
+
 	count(state, wasGrounded, mode)
 	Platforms.board(state, world)
 
@@ -567,12 +639,16 @@ end
 
 --[[
     Parked: the body holds still where it is, whatever its command says,
-    with no fall to count, and a mantle it was in ends there
+    with no fall to count, and a mantle it was in ends there, as a slide
+    does on the ground with its cooldown started
 --]]
 
-local function park(state: State)
+local function park(state: State, world: World)
 	if state.mode == "Mantle" then
 		Mantle.cancel(state)
+	elseif state.mode == "Slide" then
+		state.mode = "Ground"
+		Slide.finish(state, world)
 	end
 
 	state.velocity = vector.zero
@@ -646,15 +722,16 @@ local function quantize(state: State, settings: Settings)
 	state.groundTicks = math.min(state.groundTicks, TIMER_LIMIT)
 	state.airTicks = math.min(state.airTicks, TIMER_LIMIT)
 	state.mantleTicks = math.min(state.mantleTicks, TIMER_LIMIT)
+	state.slideCooldown = math.min(state.slideCooldown, TIMER_LIMIT)
 end
 
 --[[
     Moves a body one tick in place from its command and the world, the
-    same on every realm, allocating nothing: its look, then its move mode's
-    move, the eye eased, the water level, and the whole state rounded to
-    OwnerState's precisions. The command's head offset is clamped to the
-    game's cone in place, and a move mode other than walking ends a mantle
-    and a ride.
+    same on every realm, allocating nothing: a tick off the slide's
+    cooldown, its look, then its move mode's move, the eye eased, the water
+    level, and the whole state rounded to OwnerState's precisions. The
+    command's head offset is clamped to the game's cone in place, and a move
+    mode other than walking ends a mantle, a slide and a ride.
     Gives back the speed the body landed at, 0 for no landing that counted,
     and how far it sank when depenetration found no clear spot, nil when it
     is clear
@@ -671,6 +748,11 @@ function Step.advance(state: State, command: Command, world: World): (number, nu
 	state.tick = world.tick
 	landed = 0
 
+	-- The cooldown runs down in every move mode, so a staff mode's ticks count toward it
+	if state.slideCooldown > 0 then
+		state.slideCooldown -= 1
+	end
+
 	if moveMode == "Walk" then
 		face(state, command, settings, world.delta)
 		stuck = walk(state, command, world)
@@ -679,6 +761,8 @@ function Step.advance(state: State, command: Command, world: World): (number, nu
 	elseif moveMode == "Noclip" then
 		if state.mode == "Mantle" then
 			Mantle.cancel(state)
+		elseif state.mode == "Slide" then
+			Slide.finish(state, world)
 		end
 
 		state.platform = 0
@@ -689,7 +773,7 @@ function Step.advance(state: State, command: Command, world: World): (number, nu
 		state.waterLevel = Swim.level(state, surface)
 	elseif moveMode == "Parked" then
 		state.platform = 0
-		park(state)
+		park(state, world)
 	else
 		error(`The step has no move mode {moveMode}`)
 	end

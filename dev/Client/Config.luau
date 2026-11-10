@@ -1,7 +1,7 @@
 --[[
     The dev game's client values: Frontier Zero's remote smoothing, ragdoll,
     correction, draw distance and detail numbers, stand-ins where it sets
-    none, and the dev place's own view, prompt, elevator key and exploit kit
+    none, and the dev place's view, keys, prompt, shooter, replay and kit
 --]]
 
 --!strict
@@ -83,6 +83,11 @@ return {
 		aim = 600, -- Remote aim pitch shows inside this, and lean wherever a character is drawn
 	},
 
+	-- Standing in where Frontier Zero tunes its own with its rig and field of view
+	firstPerson = {
+		back = 1, -- Studs the first-person copy is drawn behind the world rig, so its torso sits behind the camera
+	},
+
 	-- The dev place's own shoulder view on V, standing in where Frontier Zero's camera sets none
 	view = {
 		side = 1.6, -- Studs right of the eye, just past the right shoulder of the 2.78-stud hull
@@ -98,9 +103,45 @@ return {
 		wait = 10, -- Seconds it waits at boot for the player's PlayerGui
 	},
 
+	-- The render distances this key cycles through, from the device's draw distance, and the label showing the one set
+	render = {
+		key = Enum.KeyCode.R, -- Bound to nothing else in the dev place
+		distances = { 1000, 500, 250 }, -- Studs
+		text = "Render distance: %g", -- The distance fills it
+		wait = 10, -- Seconds the label waits at boot for the player's PlayerGui
+	},
+
 	-- The test elevator's call button, pressed by a ray from the eye along the look on this key
 	elevator = {
 		key = Enum.KeyCode.E, -- Bound to nothing else in the dev place
+	},
+
+	-- G7's shooter, while the dev server's shoot names a hotbar slot
+	shots = {
+		every = 2, -- Ticks from one shot to the next, 10 a second at the 20 Hz tick
+		spread = 1.5, -- Studs either way along each axis a shot's aim is thrown off the target's body by
+		seed = 1, -- What the throw is drawn from, again at each shoot, so a run repeats its aims
+		lead = true, -- Whether a shot leads its target by the drawn velocity times the flight time
+	},
+
+	-- The replay of the clips the dev server's Playback scenario sends, on keys nothing else in the dev place binds
+	replay = {
+		keys = {
+			play = Enum.KeyCode.P, -- Plays the newest clip, then pauses it and plays it again
+			slower = Enum.KeyCode.M, -- Moves the speed on through speeds
+			back = Enum.KeyCode.Comma, -- One relay tick back, paused
+			forward = Enum.KeyCode.Period, -- One relay tick on, paused
+			rewind = Enum.KeyCode.Left, -- A seek back
+			skip = Enum.KeyCode.Right, -- A seek on
+			stop = Enum.KeyCode.X, -- Ends the playback, and the live view comes back
+		},
+
+		speeds = { 1, 0.5, 0.25 }, -- What the speed cycles through, the first the speed a clip starts at
+		seek = 1, -- Seconds a seek moves
+		labelWait = 10, -- Seconds the label waits at boot for the player's PlayerGui
+		ready = "Clip ready: %s plays it", -- The play key's name fills it
+		playing = "Clip %.2f / %.2f s at %gx%s", -- The time, the length, the speed and the paused text
+		paused = ", paused",
 	},
 
 	-- The dev place's exploit kit: what its panel counts, what each tool does, and how the ESP draws
@@ -141,6 +182,18 @@ return {
 			names = { Player = "Player", Npc = "NPC", Sleeper = "Sleeper", Body = "Body" } :: { [string]: string },
 			bot = "Bot", -- A player's kind whose slot table entry names no Player
 			unknown = "Unknown", -- A life with no Player and no reveal heard
+		},
+
+		-- What the hitboxes draw each character's hull, lying box and hit shapes with
+		hitboxes = {
+			hull = Color3.fromRGB(80, 170, 255), -- The collision hull's box
+			lying = Color3.fromRGB(255, 170, 40), -- The lying box, for a downed, sleeping or dead body
+			body = Color3.fromRGB(255, 255, 255), -- The body capsule
+			zone = Color3.fromRGB(255, 70, 70), -- Each zone capsule
+			boxTransparency = 0.75,
+			capsuleTransparency = 0.45,
+			anchorSize = Vector3.new(0.1, 0.1, 0.1), -- The invisible part each character's drawing is adorned to
+			drawn = "Hitboxes", -- The Workspace folder the hitboxes draw in
 		},
 	},
 }

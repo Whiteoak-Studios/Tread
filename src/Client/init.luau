@@ -16,7 +16,6 @@ local UserInputService = game:GetService("UserInputService")
 local Block = require(script.Parent.Codec.Block)
 local ClientPlatforms = require(script.Platforms)
 local Config = require(script.Parent.Config)
-local Constants = require(script.Parent.Constants)
 local Engine = require(script.Parent.Step.Engine)
 local Eye = require(script.Parent.Step.Eye)
 local Feed = require(script.Parent.Codec.Feed)
@@ -27,6 +26,7 @@ local Math = require(script.Parent.Step.Math)
 local Move = require(script.Parent.Codec.Move)
 local OwnerState = require(script.Parent.Codec.OwnerState)
 local Platforms = require(script.Parent.Step.Platforms)
+local Playback = require(script.Playback)
 local Predict = require(script.Predict)
 local Public = require(script.Parent.Step.Public)
 local Record = require(script.Parent.Codec.Record)
@@ -38,8 +38,8 @@ local Types = require(script.Parent.Types)
 local World = require(script.Parent.Step.World)
 
 local AHEAD: vector = vector.create(0, 0, -1) -- The look before the owner has a body, along -Z as a yaw of 0 looks
-local YAW_STEPS: number = Constants.ANGLE_STEPS / (2 * math.pi) -- Steps a radian of facing, the units Sequence wraps
 local WIRE: number = 2 ^ 16 -- The values a u16 wire tick holds
+local FARTHEST_VIEW: number = WIRE - 1 -- The farthest render distance View's u16 carries, in whole studs
 local CALLS_KEPT: number = 2 -- A platform's calls its path runs from, the latest and the one before
 
 -- The frame's render step runs just ahead of a camera bound at Camera priority, and Roblox runs every render step
@@ -52,6 +52,7 @@ type Footstep = Types.Footstep
 type Kind = Block.Kind
 type Part = FirstPerson.Part
 type Platform = State.Platform
+type Playback = Playback.Playback
 type PublicState = Public.State
 type Shared = Config.Shared
 type Slot = Types.Slot
@@ -93,7 +94,12 @@ type Fields = {
 	_verified: boolean, -- Whether the server's hash matched, before which no OwnerState or relay block is read
 	_refused: boolean, -- Whether it didn't, after which the client reads and sends nothing more
 	_world: World,
+	_collision: Collision, -- The step's casts with no platform in them, which a playback's own world wraps
 	_rigs: Rigs.Rigs,
+	_renderDistance: number, -- Studs this client draws characters to, and asks the server to send them to
+	_sendView: (distance: number) -> (), -- Hands View its distance, to go at the next flush
+	_layout: Fields.Layout, -- The game's declarations, compiled
+	_rates: Playback.Rates, -- The shared table's rates
 	_simulation: number, -- The shared table's simulation rate, which an OwnerState's ticks count in
 	_limits: Limits,
 	_radius: number, -- The client settings' bodies.radius and bodies.late, past which a death draws its body lying
@@ -114,6 +120,8 @@ type Fields = {
 	_clock: number, -- Seconds the frames have advanced
 	_ticks: number?, -- The server's simulation tick unwrapped with its fraction, nil until the handshake names it
 	_calls: { [number]: { number } }, -- Each platform's calls heard, by id, the latest two oldest first
+	_platforms: { [number]: Platform }, -- Each platform registered on the client, by id, which a playback registers again
+	_playback: Playback?, -- The clip playing, nil while none is, during which no live rig is drawn
 	_watching: Watch?, -- The spectated target, nil while the client spectates none
 	_feedRead: Feed.Feed, -- What each feed is read into
 	_public: PublicState,
@@ -187,33 +195,6 @@ local function drawDistance(distances: index<ClientSettings, "drawDistance">): n
 	return distances.tablet
 end
 
--- The aim pitch a look direction gives, radians, up positive
-local function pitchOf(look: vector): number
-	return math.asin(math.clamp(look.y, -1, 1))
-end
-
---[[
-    Moves a remote state drawn in its platform's space onto that
-    platform's copy as this frame placed it, so a rider stands on the
-    platform drawn. False while no copy of its platform has a place
---]]
-
-local function placeRider(state: StepState): boolean
-	local id: number = state.platform
-	if id == 0 then
-		return true
-	end
-
-	local copy: vector? = ClientPlatforms.position(id)
-	if copy == nil then
-		return false
-	end
-
-	state.position += copy
-
-	return true
-end
-
 --- Starts Tread's client, once: checks the shared table and the client
 --- settings, starts the owner's prediction, the remote interpolation and
 --- the rig pool, and connects Tread's own Volt scope, whose handshake goes
@@ -242,7 +223,8 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 
 	local collision: Collision = Engine.casts(shared.collision)
 	local world: World = World.new(shared.step, shared.rates.simulation, collision, shared.water, shared.rules, false)
-	local rigs: Rigs.Rigs = Rigs.new(client, drawDistance(client.drawDistance), collision, world)
+	local renderDistance: number = drawDistance(client.drawDistance)
+	local rigs: Rigs.Rigs = Rigs.new(client, renderDistance, collision, world)
 
 	Started = true
 
@@ -274,7 +256,12 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 		_verified = false,
 		_refused = false,
 		_world = world,
+		_collision = collision,
 		_rigs = rigs,
+		_renderDistance = renderDistance,
+		_sendView = Network.View.fire,
+		_layout = layout,
+		_rates = shared.rates,
 		_simulation = shared.rates.simulation,
 		_limits = limits,
 		_radius = client.bodies.radius,
@@ -295,6 +282,8 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 		_clock = 0,
 		_ticks = nil :: number?,
 		_calls = {} :: { [number]: { number } },
+		_platforms = {} :: { [number]: Platform },
+		_playback = nil :: Playback?,
 		_watching = nil :: Watch?,
 		_feedRead = Feed.new(),
 		_public = Public.new(),
@@ -399,6 +388,7 @@ function Client._handshake(self: Self, hash: number, tick: number)
 		-- What every later u16 tick unwraps against, a step's included
 		self._ticks = tick
 		self._world.clock = tick
+		self:_announce()
 
 		return
 	end
@@ -410,6 +400,11 @@ function Client._handshake(self: Self, hash: number, tick: number)
 	local message: string = `{ours} and the server's to {hash}, so Tread's client can't play here`
 	warn(message)
 	self._player:Kick(message)
+end
+
+-- Tells the server the render distance, rounded up to whole studs and held to what View carries, at the next flush
+function Client._announce(self: Self)
+	self._sendView(math.min(math.ceil(self._renderDistance), FARTHEST_VIEW))
 end
 
 --[[
@@ -715,36 +710,10 @@ function Client._view(self: Self): StepState?
 		t = math.clamp((self._clock - watching.arrived) / span, 0, 1)
 	end
 
-	if t >= 1 then
-		State.copy(newer, drawn)
-		watching.tick = newer.tick
-	else
-		State.copy(older, drawn)
-		watching.tick = older.tick
-
-		if older.epoch == newer.epoch and older.platform == newer.platform then
-			local fromTick: number = older.tick
-			watching.tick = Math.lerp(fromTick, fromTick + Sequence.difference(newer.tick, fromTick), t) % WIRE
-
-			local from: vector = older.position
-			local to: vector = newer.position
-			local moving: vector = older.velocity
-			local moved: vector = newer.velocity
-			local fromYaw: number = older.facing * YAW_STEPS
-			local toYaw: number = fromYaw + Sequence.difference(newer.facing * YAW_STEPS, fromYaw)
-
-			drawn.position =
-				vector.create(Math.lerp(from.x, to.x, t), Math.lerp(from.y, to.y, t), Math.lerp(from.z, to.z, t))
-			drawn.velocity = vector.create(
-				Math.lerp(moving.x, moved.x, t),
-				Math.lerp(moving.y, moved.y, t),
-				Math.lerp(moving.z, moved.z, t)
-			)
-			drawn.facing = (Math.lerp(fromYaw, toYaw, t) % Constants.ANGLE_STEPS) / YAW_STEPS
-			drawn.lean = Math.lerp(older.lean, newer.lean, t)
-			drawn.eyeHeight = Math.lerp(older.eyeHeight, newer.eyeHeight, t)
-		end
-	end
+	-- The tick goes with the share the state was drawn at, the older's while it holds and the newer's from its time on
+	local share: number = Playback.between(older, newer, t, drawn)
+	local fromTick: number = older.tick
+	watching.tick = Math.lerp(fromTick, fromTick + Sequence.difference(newer.tick, fromTick), share) % WIRE
 
 	local world: World = self._world
 	self._eye = Eye.clear(drawn, world)
@@ -794,10 +763,16 @@ end
     Takes a rig out of the pool for a slot, dressed and holding its item,
     and tells the spawn. The local player's own rig comes out with its
     first-person copy, and is hidden on their screen. A dress hook that
-    throws leaves the slot with no rig, so its next reveal tries again
+    throws leaves the slot with no rig, so its next reveal tries again.
+    While a playback runs no live rig comes out, and its end draws again
+    every live stretch still open
 --]]
 
 function Client._spawn(self: Self, slot: number, kind: Kind, player: Player?, outfit: Values, held: Values?)
+	if self._playback then
+		return
+	end
+
 	local rigs: Rigs.Rigs = self._rigs
 	local own: boolean = slot == self._own
 	local checked: boolean, rig: Model? = xpcall(rigs.checkout, warnHook, rigs, slot, outfit, own)
@@ -872,10 +847,16 @@ function Client._dress(self: Self, slot: number, outfit: Values)
 	end
 end
 
--- A slot's new held item on its rig, nil for none, kept for the local player's own rig as its look is
+--[[
+    A slot's new held item on its rig, nil for none, kept for the local
+    player's own rig as its look is, and handed to the owner's prediction,
+    whose rules read the item its body holds
+--]]
+
 function Client._hold(self: Self, slot: number, held: Values?)
 	if slot == self._own then
 		self._held = held
+		Predict.hold(held)
 	end
 
 	-- The pool puts it in the local player's own first-person copy's hands too
@@ -885,8 +866,17 @@ function Client._hold(self: Self, slot: number, held: Values?)
 	end
 end
 
--- Hands each footstep callback its own copy of a step, whose table the interpolation refills, crossed onto Vector3
+-- A live footstep, dropped while a playback runs, whose clip raises its own
 function Client._footstep(self: Self, step: Block.Footstep)
+	if self._playback then
+		return
+	end
+
+	self:_hear(step)
+end
+
+-- Hands each footstep callback its own copy of a step, whose table its reader refills, crossed onto Vector3
+function Client._hear(self: Self, step: Block.Footstep)
 	if next(self._heard) == nil then
 		return
 	end
@@ -916,8 +906,8 @@ end
     the simulation rate while it has none, and the world's clock is its
     floor, so every step and replay unwraps its tick against it. The copies
     stand at the owner's drawn tick, a viewed target's while the client
-    spectates, or the clock with no body. Before the handshake names the
-    server's tick nothing moves
+    spectates, or the clock with no body, and a playback places them
+    itself. Before the handshake names the server's tick nothing moves
 --]]
 
 function Client._place(self: Self, dt: number, viewed: StepState?)
@@ -942,6 +932,10 @@ function Client._place(self: Self, dt: number, viewed: StepState?)
 	self._ticks = ticks
 	world.clock = math.floor(ticks)
 
+	if self._playback then
+		return
+	end
+
 	local at: number = ticks
 	local watching: Watch? = self._watching
 	if watching and viewed then
@@ -959,7 +953,9 @@ end
     a remote rider on its platform's copy, each other player outlined while
     the client spectates, and the live players and NPCs drawn handed to the
     owner's prediction to block against. Nothing in the walk over the drawn
-    rigs makes a table
+    rigs makes a table. While a playback runs, prediction, the render clock
+    and the clock still run on live data, unseen, no live rig is drawn and
+    no live body is blocked against, and the playback sets its track speed
 --]]
 
 function Client._frame(self: Self, dt: number)
@@ -970,6 +966,15 @@ function Client._frame(self: Self, dt: number)
 	self._clock += dt
 	xpcall(Predict.frame, warnFrame, dt)
 	Interpolate.frame(dt)
+
+	local playback: Playback? = self._playback
+	if playback then
+		table.clear(self._bodies)
+		self:_place(dt, nil)
+		playback:frame(dt)
+
+		return
+	end
 
 	local own: number? = self._own
 	local body: StepState? = Predict.state()
@@ -982,7 +987,7 @@ function Client._frame(self: Self, dt: number)
 	end
 
 	-- The owner's aim pitch from the look it publishes, since its state holds none, before a target's eye replaces it
-	local ownPitch: number = pitchOf(self._look)
+	local ownPitch: number = Playback.pitchOf(self._look)
 
 	local watching: Watch? = self._watching
 	local viewed: StepState? = self:_view()
@@ -1001,7 +1006,7 @@ function Client._frame(self: Self, dt: number)
 
 	for _, slot: number in self._posed do
 		if slot == own then
-			-- The pool poses the owner's first-person copy beside its world rig with no aim pitch
+			-- The pool poses the owner's first-person copy behind its world rig with no aim pitch
 			if body then
 				rigs:pose(slot, body, vector.magnitude(body.position - eye), ownPitch)
 			end
@@ -1011,7 +1016,7 @@ function Client._frame(self: Self, dt: number)
 
 		local drawn: Slot = self._rigged[slot]
 		if slot == target and viewed then
-			rigs:pose(slot, viewed, vector.magnitude(viewed.position - eye), pitchOf(self._look))
+			rigs:pose(slot, viewed, vector.magnitude(viewed.position - eye), Playback.pitchOf(self._look))
 			table.insert(bodies, viewed)
 
 			continue
@@ -1022,7 +1027,7 @@ function Client._frame(self: Self, dt: number)
 
 		local state: StepState = self._states[slot]
 		local shown: boolean, pitch: number = Interpolate.pose(slot, state)
-		if not shown or not placeRider(state) then
+		if not shown or not Playback.ride(state) then
 			continue
 		end
 
@@ -1034,19 +1039,26 @@ function Client._frame(self: Self, dt: number)
 	end
 end
 
---- The cleared eye and look of what the client views: a spectated
---- target's from its feed, drawn between its last two states and looking
---- along its newest command's look, else the owner's own body as drawn
---- this frame, or where the eye was last drawn while there is none. Tread
---- draws each frame in a render step just ahead of Camera priority, so a
---- camera bound at Camera priority or later, or connected to PreRender,
---- reads this frame's eye.
+--- The cleared eye and look of what the client views: a playback's
+--- target as its last render drew it, a spectated target's from its feed,
+--- drawn between its last two states and looking along its newest
+--- command's look, else the owner's own body as drawn this frame, or where
+--- the eye was last drawn while there is none. Tread draws each frame in a
+--- render step just ahead of Camera priority, so a camera bound at Camera
+--- priority or later, or connected to PreRender, reads this frame's eye.
 --- @method getEye
 --- @within Client
 --- @return Vector3 -- The cleared eye
 --- @return Vector3 -- The look, a unit vector
 
 function Client.getEye(self: Self): (Vector3, Vector3)
+	local playback: Playback? = self._playback
+	if playback then
+		local eye: vector, look: vector = playback:eye()
+
+		return Engine.toVector3(eye), Engine.toVector3(look)
+	end
+
 	if self:_view() == nil and Predict.state() then
 		self._eye, self._look = Predict.eye()
 	end
@@ -1080,6 +1092,31 @@ end
 
 function Client.getRenderTime(self: Self): number
 	return Interpolate.renderTime()
+end
+
+--- Sets how far, in studs, this client draws characters and is sent
+--- them, as from a settings menu. It starts at the device class's
+--- drawDistance, and the server holds what it is sent to its own
+--- relevancy.leave. The server hears it once the handshake passes and
+--- again on each call, and drops the calls that come faster than the
+--- server settings' rates.view allows, so a game sets it once the player
+--- applies the setting. It errors on anything that is not a finite number
+--- above 0.
+--- @method setRenderDistance
+--- @within Client
+--- @param studs number -- The render distance
+
+function Client.setRenderDistance(self: Self, studs: number)
+	if type(studs) ~= "number" or not (studs > 0 and studs < math.huge) then
+		error(`client:setRenderDistance takes a finite number of studs above 0, not {studs}`, 2)
+	end
+
+	self._renderDistance = studs
+	self._rigs:setDrawDistance(studs)
+
+	if self._verified then
+		self:_announce()
+	end
 end
 
 --- Where the feet would end if jump were pressed now: the point on the
@@ -1153,15 +1190,102 @@ end
 function Client.addPlatform(self: Self, platform: Platform): () -> ()
 	local world: World = self._world
 	local remove: () -> () = ClientPlatforms.add(world, platform)
+	local id: number = platform.id
+	self._platforms[id] = platform
 
-	local calls: { number }? = self._calls[platform.id]
+	local calls: { number }? = self._calls[id]
 	if calls then
 		for _, tick: number in calls do
-			Platforms.call(world, platform.id, tick)
+			Platforms.call(world, id, tick)
 		end
 	end
 
-	return remove
+	-- Cleanup
+	return function ()
+		remove()
+
+		if self._platforms[id] == platform then
+			self._platforms[id] = nil
+		end
+	end
+end
+
+--- Plays a moderator's clip as the taps recorded it: its keyframe first,
+--- then the target's observed frames from the keyframe's tick on, and
+--- optionally the withheld frames over the same ticks. It never yields.
+--- Every live rig goes back to the pool while it runs, its rigs come from
+--- the client's own pool with slots that name no player, and getEye gives
+--- its eye and look, while prediction and the live characters carry on
+--- unseen. It errors, changing nothing, while another playback runs, and
+--- on a clip this client can't read.
+--- @method play
+--- @within Client
+--- @param ticks { buffer } -- The keyframe, then the observed frames, oldest first
+--- @param withheld { buffer }? -- The withheld frames over the same ticks, oldest first
+--- @return Playback -- What renders it and ends it
+
+function Client.play(self: Self, ticks: { buffer }, withheld: { buffer }?): Playback
+	if self._playback then
+		error("client:play plays one clip at a time, and one is playing", 2)
+	end
+
+	local platforms: { Platform } = {}
+	for _, platform: Platform in self._platforms do
+		table.insert(platforms, platform)
+	end
+
+	local playback: Playback = Playback.new({
+		rigs = self._rigs,
+		world = self._world,
+		collision = self._collision,
+		platforms = platforms,
+		clock = self._ticks,
+		layout = self._layout,
+		limits = self._limits,
+		rates = self._rates,
+		eye = self._eye,
+		look = self._look,
+
+		spawned = function (slot: Slot, rig: Model)
+			fire(self._spawned, slot, rig)
+		end,
+
+		despawned = function (slot: Slot)
+			fire(self._despawned, slot)
+		end,
+
+		heard = function (step: Block.Footstep)
+			self:_hear(step)
+		end,
+
+		ended = function ()
+			self:_resume()
+		end,
+	}, ticks, withheld)
+
+	-- Every live rig goes back to the pool, which holds one a slot, so no live rig is drawn beside the clip's
+	for slot: number in table.clone(self._rigged) do
+		self:_despawn(slot)
+	end
+
+	self._playback = playback
+
+	return playback
+end
+
+--[[
+    Ends the playback on the live characters: every live stretch still
+    open is drawn again, each told to the spawn, while the owner's and the
+    spectated target's rigs come back on the next frame as they first did
+--]]
+
+function Client._resume(self: Self)
+	self._playback = nil
+
+	-- Whiteoak TODO: a body a live death laid down before play has no stretch of its own, so it stays undrawn until
+	-- its own reveal; keep each such body's last drawn state through the playback and lay it down again here, once a
+	-- moderator's review shows the gap
+	Interpolate.revealOpen()
 end
 
 --- Calls back on every replay of the owner's prediction, with the
@@ -1180,8 +1304,9 @@ function Client.onCorrected(self: Self, callback: Corrected): () -> ()
 	return Predict.onCorrected(callback)
 end
 
---- Calls back on every animation marker a drawn rig's track reaches, with
---- its slot, the marker's name and its value.
+--- Calls back on every animation marker a drawn rig's track reaches, a
+--- playback's rigs included, with its slot, the marker's name and its
+--- value.
 --- @method onMarker
 --- @within Client
 --- @param callback (slot: Slot, marker: string, value: string) -> ()
@@ -1194,6 +1319,11 @@ function Client.onMarker(self: Self, callback: Marker): () -> ()
 
 	return self._rigs:onMarker(function (slot: number, marker: string, value: string)
 		local drawn: Slot? = self._rigged[slot]
+		local playback: Playback? = self._playback
+		if playback then
+			drawn = playback:slotOf(slot)
+		end
+
 		if drawn then
 			callback(drawn, marker, value)
 		end
@@ -1238,9 +1368,9 @@ end
 
 --- @class Client
 --- The client handle a game holds once Tread's client has started: the
---- eye, the state, the render time, where a mantle would end, the local
---- player's own body on their screen, ladders, platforms and the client's
---- signals.
+--- eye, the state, the render time and distance, where a mantle would
+--- end, the local player's own body on their screen, ladders, platforms,
+--- a moderator's clips and the client's signals.
 
 export type Client = Self
 type Self = typeof(setmetatable({} :: Fields, Client))

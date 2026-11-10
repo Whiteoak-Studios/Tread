@@ -25,6 +25,7 @@ local OCCLUSION: { Instance } = { Occluders, Workspace.Terrain }
 return {
 	rates = {
 		move = { perSecond = 35, burst = 60 },
+		view = { perSecond = 2, burst = 5 }, -- The render distance a settings menu sends
 	},
 
 	catchUp = 2, -- Most ticks one Heartbeat may run after a stall
@@ -50,6 +51,8 @@ return {
 		lookAheadMax = 0.45,
 		slice = 0.002, -- Seconds anti-ESP may take a Heartbeat
 		hiddenRate = 10,
+		nearRadius = 250, -- Studs from the viewer's eye inside which a hidden pair is rechecked at nearRate
+		nearRate = 30,
 		visibleRate = 2,
 		hold = 1,
 		failOpen = 0.15,

@@ -94,6 +94,15 @@ function Pool.new(): Pool
 		record({ member = "hold", slot = slot, held = held, rig = entry(slot, "hold") })
 	end
 
+	function rigs.setSpeed(_: any, speed: number)
+		record({ member = "setSpeed", speed = speed })
+	end
+
+	function rigs.setDrawDistance(_: any, distance: number)
+		pool.drawDistance = distance
+		record({ member = "setDrawDistance", distance = distance })
+	end
+
 	function rigs.onMarker(_: any, callback: (slot: number, marker: string, value: string) -> ()): () -> ()
 		local token: { nil } = {}
 		listeners[token] = callback

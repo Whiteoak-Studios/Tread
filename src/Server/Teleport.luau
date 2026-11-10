@@ -16,6 +16,7 @@ local Engine = require(script.Parent.Parent.Step.Engine)
 local Mantle = require(script.Parent.Parent.Step.Mantle)
 local Range = require(script.Parent.Range)
 local Reports = require(script.Parent.Reports)
+local Slide = require(script.Parent.Parent.Step.Slide)
 local Slots = require(script.Parent.Slots)
 local State = require(script.Parent.Parent.Step.State)
 local Types = require(script.Parent.Parent.Types)
@@ -286,12 +287,12 @@ end
 
 --[[
     Sets a body down at its teleport's destination, in this order: the
-    position and the facing, no velocity, the mantle ended in the air off
-    the ground with both timers at 0, off any ladder or platform, the apex
-    and the last ground at the destination, one more epoch, the exact
-    depenetration, the queued commands dropped and the range query moved.
-    Then a body no spot frees is reported stuck, and every teleport
-    callback hears of the landing
+    position and the facing, no velocity, a slide's cooldown started, the
+    mantle ended in the air off the ground with both timers at 0, off any
+    ladder or platform, the apex and the last ground at the destination,
+    one more epoch, the exact depenetration, the queued commands dropped and
+    the range query moved. Then a body no spot frees is reported stuck, and
+    every teleport callback hears of the landing
 --]]
 
 local function land(
@@ -305,6 +306,12 @@ local function land(
 	state.position = position
 	state.facing = facing
 	state.velocity = vector.zero
+
+	-- A teleport ends a slide as every end but leaving the ground does, so it starts the cooldown
+	if state.mode == "Slide" then
+		Slide.finish(state, world)
+	end
+
 	Mantle.cancel(state)
 	state.grounded = false
 	state.airTicks = 0

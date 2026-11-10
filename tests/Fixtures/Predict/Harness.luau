@@ -49,6 +49,9 @@ export type Options = {
 	ticks: { [string]: number }?, -- Ticks to set over its own
 	tolerances: { [string]: number }?,
 	platforms: { { [string]: any } }?, -- Platforms registered alike on the client's world and the twin's
+	step: { [string]: any }?, -- The step settings both worlds take, Frontier Zero's unless given
+	parts: { any }?, -- The fixture parts both worlds cast against, the step's fixture geometry unless given
+	spawn: vector?, -- Where the spawn OwnerState stands the body, on that geometry's floor unless given
 }
 
 local Harness = {}
@@ -113,7 +116,7 @@ function Harness.new(options: Options?): { [string]: any }
 	local client: any = Example.client()
 	local layout: any = Fields.compile(shared.fields)
 	local limits: any = { lean = Scene.settings.lean, headCone = Scene.settings.headCone }
-	local collision: any = Environment.load(COLLISION)(Geometry.parts)
+	local collision: any = Environment.load(COLLISION)(given.parts or Geometry.parts)
 
 	local rig: { [string]: any } = {
 		Predict = Predict,
@@ -145,8 +148,9 @@ function Harness.new(options: Options?): { [string]: any }
 		return math.huge
 	end
 
-	local world: any = World.new(Scene.settings, SIMULATION_RATE, collision, nil, clientRules, false)
-	local twinWorld: any = World.new(Scene.settings, SIMULATION_RATE, collision, nil, serverRules, true)
+	local step: any = given.step or Scene.settings
+	local world: any = World.new(step, SIMULATION_RATE, collision, nil, clientRules, false)
+	local twinWorld: any = World.new(step, SIMULATION_RATE, collision, nil, serverRules, true)
 	rig.world = world
 	rig.twinWorld = twinWorld
 	rig.delta = world.delta
@@ -289,7 +293,7 @@ function Harness.new(options: Options?): { [string]: any }
 
 	-- Hands Predict the spawn OwnerState, and starts the twin from exactly what it read
 	function rig.spawn(command: number?, tick: number?, depth: number?)
-		local spawned: any = Scene.state(vector.create(SPAWN_X, Geometry.floor, SPAWN_Z), true)
+		local spawned: any = Scene.state(given.spawn or vector.create(SPAWN_X, Geometry.floor, SPAWN_Z), true)
 		spawned.command = command or SPAWN_COMMAND
 		spawned.tick = tick or SPAWN_TICK
 		spawned.fields = { beingRevived = false }

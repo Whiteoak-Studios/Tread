@@ -18,6 +18,7 @@ local Sequence = require(script.Parent.Parent.Codec.Sequence)
 local Slots = require(script.Parent.Slots)
 local State = require(script.Parent.Parent.Step.State)
 local StateWord = require(script.Parent.Parent.Codec.StateWord)
+local Taps = require(script.Parent.Taps)
 
 local SLOTS: number = Constants.SLOTS
 local RECORD_BYTES: number = Constants.RECORD_BYTES
@@ -162,6 +163,7 @@ type Withheld = {
 -- its acknowledgment can still name with the pending entries each carried, and the moderators watching it
 type View = {
 	key: Key,
+	distance: number, -- Its client's render distance held to relevancy.leave, which is what it has until one comes
 	sequence: number, -- The message sequence its next block takes
 	newest: number, -- The sequence of the last block it was sent, 0 before the first
 	heard: number, -- The sequence of the newest block its client was sent, its own or a copy, 0 before the first
@@ -220,11 +222,12 @@ local Layout: Layout = Fields.compile({ command = {}, rules = {}, server = {}, s
 local DeclarationsHash: number = 0
 local Limits: Limits = { lean = 0, headCone = 0 }
 
--- The game's settings as the relay reads them, each distance squared and each budget in bytes a second
+-- The game's settings as the relay reads them, each distance squared and each budget in bytes a second, but the
+-- radii each viewer's own render distance caps, in studs, which share one table since Luau caps a chunk's locals
 local RelayRate: number = 0
 local StillRuns: number = 0
-local EnterSquared: number = 0
-local LeaveSquared: number = 0
+local Radii: { enter: number, leave: number, sleepers: number, npcs: number } =
+	{ enter = 0, leave = 0, sleepers = 0, npcs = 0 }
 local NearEnterSquared: number = 0
 local NearLeaveSquared: number = 0
 local NearAim: number = 0
@@ -239,13 +242,17 @@ local ShotRate: number = 0
 local ShotRuns: number = 0
 local Soft: number = 0
 local Hard: number = 0
-local SleeperSquared: number = 0
 local NpcNearSquared: number = 0
-local NpcRangeSquared: number = 0
 local NpcFarRate: number = 0
 local StrideWalk: number = 0
 local StrideSprint: number = 0
 local Heard: { number } = { SILENT, SILENT, SILENT, SILENT } -- Each footstep kind's squared range
+
+-- The radii of the viewer whose turn it is, squared, from its render distance, found once a turn
+local EnterSquared: number = 0
+local LeaveSquared: number = 0
+local SleeperSquared: number = 0
+local NpcRangeSquared: number = 0
 
 local Run: number = 0 -- The relay runs so far, which every timing counts in
 local TickWire: number = 0 -- The relay tick this run's blocks carry, a u16
@@ -387,8 +394,12 @@ function Relay.start(
 
 	RelayRate = shared.rates.relay
 	StillRuns = STILL_SECONDS * RelayRate
-	EnterSquared = server.relevancy.enter ^ 2
-	LeaveSquared = server.relevancy.leave ^ 2
+	Radii = {
+		enter = server.relevancy.enter,
+		leave = server.relevancy.leave,
+		sleepers = server.sleepers.radius,
+		npcs = server.npcs.range,
+	}
 	NearEnterSquared = server.tiers.nearEnter ^ 2
 	NearLeaveSquared = server.tiers.nearLeave ^ 2
 	NearAim = server.tiers.nearAim
@@ -403,9 +414,7 @@ function Relay.start(
 	ShotRuns = math.ceil(server.shotNear.seconds * RelayRate)
 	Soft = server.budget.soft * BYTES_PER_KB
 	Hard = server.budget.hard * BYTES_PER_KB
-	SleeperSquared = server.sleepers.radius ^ 2
 	NpcNearSquared = server.npcs.near ^ 2
-	NpcRangeSquared = server.npcs.range ^ 2
 	NpcFarRate = server.npcs.farRate
 	StrideWalk = server.footsteps.stride.walk
 	StrideSprint = server.footsteps.stride.sprint
@@ -491,6 +500,14 @@ local function same(packed: buffer, kept: buffer, at: number, length: number): b
 	return true
 end
 
+-- A copy of length bytes of source from at, in a buffer of its own
+local function slice(source: buffer, at: number, length: number): buffer
+	local part: buffer = buffer.create(length)
+	buffer.copy(part, 0, source, at, length)
+
+	return part
+end
+
 --[[
     Packs a slot's held item from its state and moves its version on when
     the bytes differ from the last run's. An empty table holds nothing,
@@ -504,8 +521,14 @@ local function hold(slot: number, held: Values)
 	end
 
 	local at: number = slot * MAX_HELD
-	if length == buffer.readu8(HeldLengths, slot) and same(HeldScratch, Helds, at, length) then
+	local kept: number = buffer.readu8(HeldLengths, slot)
+	if length == kept and same(HeldScratch, Helds, at, length) then
 		return
+	end
+
+	-- The change is handed to the taps while the held item before it is still there
+	if Taps.reliable then
+		Taps.held(slot, slice(Helds, at, kept), slice(HeldScratch, 0, length))
 	end
 
 	buffer.copy(Helds, at, HeldScratch, 0, length)
@@ -553,10 +576,14 @@ local function emit(slot: number, kind: number, at: vector, material: Enum.Mater
 	Block.writeFootstep(Footstep, StepData, index * FOOTSTEP_BYTES)
 end
 
--- Whether a state stands in a gait that steps: on the ground, standing and walking, so a crouch, a crawl, a swim, a
--- climb, a mantle and the staff modes are silent
+-- Whether a state stands in a gait that steps: on the ground standing or in a crouch slide, and walking, so a crouch,
+-- a crawl, a swim, a climb, a mantle and the staff modes are silent
 local function stepping(state: State): boolean
-	return state.grounded and state.mode == "Ground" and state.posture == "Stand" and state.moveMode == "Walk"
+	if not state.grounded or state.moveMode ~= "Walk" then
+		return false
+	end
+
+	return state.mode == "Slide" or (state.mode == "Ground" and state.posture == "Stand")
 end
 
 --[[
@@ -589,7 +616,7 @@ local function walk(slot: number, state: State, generation: number)
 		if stepping(state) and buffer.readu8(Stepping, slot) == 1 then
 			local stride: number = StrideWalk
 			local kind: number = WALK
-			if state.sprint then
+			if state.sprint or state.mode == "Slide" then
 				stride = StrideSprint
 				kind = SPRINT
 			end
@@ -976,6 +1003,10 @@ local function flush()
 	end
 
 	Send(Recipients, data)
+
+	if Taps.observing then
+		Taps.relayed(Recipients, RecipientCount, Out, data)
+	end
 
 	for index: number = 1, RecipientCount do
 		RecipientViews[index].heard = Out.sequence
@@ -1439,6 +1470,11 @@ local function sendWithheld()
 	end
 
 	SendWithheld(Watchers, data)
+
+	-- The target whose turn it is, whose withheld records these are
+	if Taps.observing then
+		Taps.withheld(Recipients[1], WithheldOut, data)
+	end
 end
 
 -- Makes room for an entry of bytes in a withheld block section holding count, in a fresh block once it would pass
@@ -1593,6 +1629,7 @@ local function viewOf(key: Key): View
 
 	local made: View = {
 		key = key,
+		distance = Radii.leave,
 		sequence = Constants.FIRST_SEQUENCE,
 		newest = 0,
 		heard = 0,
@@ -1806,6 +1843,14 @@ end
 local function turn(viewer: Viewer, states: { [number]: State })
 	local key: Key = viewer.key
 	local view: View = viewOf(key)
+
+	-- Its own radii: players and bodies enter inside its distance in the server's proportion and leave past it, and
+	-- sleepers and NPCs go no farther than it either
+	local distance: number = view.distance
+	EnterSquared = (distance * Radii.enter / Radii.leave) ^ 2
+	LeaveSquared = distance * distance
+	SleeperSquared = math.min(Radii.sleepers, distance) ^ 2
+	NpcRangeSquared = math.min(Radii.npcs, distance) ^ 2
 
 	-- Back from a spectate, its client may acknowledge the target's blocks a while yet, so its own go on past them
 	if view.watching ~= nil then
@@ -2038,6 +2083,16 @@ function Relay.setLook(slot: number, look: Values)
 	local length: number = Fields.write(Layout.slot, look, LookScratch, 0)
 	local generation: number = Slots.get(slot)
 
+	-- The change is handed to the taps while the life's look before it is still there, empty for none
+	if Taps.reliable then
+		local previous: number = 0
+		if buffer.readu8(LookLives, slot) == generation + 1 then
+			previous = buffer.readu8(LookLengths, slot)
+		end
+
+		Taps.look(slot, slice(Looks, slot * MAX_LOOK, previous), slice(LookScratch, 0, length))
+	end
+
 	buffer.copy(Looks, slot * MAX_LOOK, LookScratch, 0, length)
 	buffer.writeu8(LookLengths, slot, length)
 	buffer.writeu8(LookLives, slot, generation + 1)
@@ -2166,45 +2221,88 @@ function Relay.viewersOf(slot: number): { Key }
 	return keys
 end
 
--- A copy of length bytes of source from at, in a buffer of its own
-local function slice(source: buffer, at: number, length: number): buffer
-	local part: buffer = buffer.create(length)
-	buffer.copy(part, 0, source, at, length)
+-- What a slot wears for a keyframe, each in a new buffer: its look when it is set for the life, and its held item
+local function worn(slot: number, generation: number): (buffer, buffer)
+	local look: buffer = buffer.create(0)
+	if buffer.readu8(LookLives, slot) == generation + 1 then
+		look = slice(Looks, slot * MAX_LOOK, buffer.readu8(LookLengths, slot))
+	end
 
-	return part
+	return look, slice(Helds, slot * MAX_HELD, buffer.readu8(HeldLengths, slot))
+end
+
+-- A slot's character for a keyframe: its kind, newest record, look and held item
+local function keyed(slot: number, kind: Block.Kind, withheld: boolean, generation: number): Keyframe.Character
+	local look: buffer, held: buffer = worn(slot, generation)
+
+	return {
+		kind = kind,
+		withheld = withheld,
+		record = slice(Records, slot * RECORD_BYTES, RECORD_BYTES),
+		look = look,
+		held = held,
+	}
+end
+
+-- A view's own character for a keyframe, as its last turn claimed it, or nil while it claimed none
+local function ownOf(view: View): Keyframe.Own?
+	local slot: number? = view.own
+	if slot == nil or not bit32.btest(buffer.readu16(view.flags, slot * 2), OWN) then
+		return nil
+	end
+
+	local generation: number = buffer.readu8(view.generations, slot)
+	local look: buffer, held: buffer = worn(slot, generation)
+
+	return { id = Record.id(slot, generation), look = look, held = held }
 end
 
 --[[
     A viewer's current view as one buffer a clip ring starts from: each
-    character it is sent with its kind, newest record, look and held item,
-    and the called platforms the server handle passes in
+    character its client is sent with its kind, newest record, look and
+    held item, the called platforms the server handle passes in, and its
+    own character with its look and held item. A moderator watching a
+    target is sent the target's view, so its keyframe holds the target's
+    characters, its own character and, marked withheld, those withheld
+    from the target, with their looks
 --]]
 
 function Relay.keyframe(key: Key, platforms: { Keyframe.Platform }?): buffer
 	local characters: { Keyframe.Character } = {}
 	local view: View? = Views[key]
 	local sequence: number = 0
+	local own: Keyframe.Own? = nil
 
 	if view then
-		sequence = view.newest
+		sequence = view.heard
 
-		for _, slot: number in view.tracked do
-			if not bit32.btest(buffer.readu16(view.flags, slot * 2), SENT) then
-				continue
+		local source: View = view
+		local watching: Key? = view.watching
+		if watching ~= nil then
+			source = Views[watching] or view
+		end
+
+		own = ownOf(source)
+
+		for _, slot: number in source.tracked do
+			if bit32.btest(buffer.readu16(source.flags, slot * 2), SENT) then
+				local kind: Block.Kind = Block.KINDS[buffer.readu8(source.kinds, slot) + 1]
+				table.insert(characters, keyed(slot, kind, false, buffer.readu8(source.generations, slot)))
 			end
+		end
 
-			local look: buffer = buffer.create(0)
-			if buffer.readu8(LookLives, slot) == buffer.readu8(view.generations, slot) + 1 then
-				look = slice(Looks, slot * MAX_LOOK, buffer.readu8(LookLengths, slot))
+		-- The withheld set as the target's last turn left it, players alone
+		local withheld: Withheld? = source.withheld
+		if source ~= view and withheld then
+			for _, slot: number in source.tracked do
+				local life: number = buffer.readu8(withheld.lives, slot)
+				if
+					bit32.btest(buffer.readu8(withheld.flags, slot), WITHHELD)
+					and life == buffer.readu8(Generations, slot)
+				then
+					table.insert(characters, keyed(slot, "Player", true, life))
+				end
 			end
-
-			table.insert(characters, {
-				kind = Block.KINDS[buffer.readu8(view.kinds, slot) + 1],
-				withheld = false,
-				record = slice(Records, slot * RECORD_BYTES, RECORD_BYTES),
-				look = look,
-				held = slice(Helds, slot * MAX_HELD, buffer.readu8(HeldLengths, slot)),
-			})
 		end
 	end
 
@@ -2214,7 +2312,42 @@ function Relay.keyframe(key: Key, platforms: { Keyframe.Platform }?): buffer
 		sequence = sequence,
 		characters = characters,
 		platforms = platforms or {},
+		own = own,
 	})
+end
+
+--[[
+    What a slot wears, each in a new buffer: its look for its current life,
+    empty while none is set, and its held item as the last relay run packed
+    it, empty while nothing is held
+--]]
+
+function Relay.wearing(slot: number): (buffer, buffer)
+	checkSlot(slot, "wearing")
+
+	local generation: number = Slots.get(slot)
+	local look: number = 0
+	if buffer.readu8(LookLives, slot) == generation + 1 then
+		look = buffer.readu8(LookLengths, slot)
+	end
+
+	return slice(Looks, slot * MAX_LOOK, look), slice(Helds, slot * MAX_HELD, buffer.readu8(HeldLengths, slot))
+end
+
+--[[
+    Keeps the render distance a viewer's client sent, in studs, held to
+    relevancy.leave, which its relevancy reaches from its next turn until
+    it sends another or leaves
+--]]
+
+function Relay.setDistance(key: Key, distance: number)
+	if not Started then
+		error("Relay.setDistance ran before Relay.start", 2)
+	elseif type(distance) ~= "number" or not (distance > 0) then
+		error(`Relay.setDistance takes a render distance in studs above 0, not {distance}`, 2)
+	end
+
+	viewOf(key).distance = math.min(distance, Radii.leave)
 end
 
 --[[

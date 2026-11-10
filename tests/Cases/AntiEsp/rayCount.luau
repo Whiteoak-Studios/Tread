@@ -31,10 +31,10 @@ return function (): (boolean, string | nil)
 		return false, "The second ray was not the one to the hull's center"
 	end
 
-	-- Before the player pair's 10 Hz recheck, so the sleeper's new pair is the only one due
+	-- Before the player pair's 30 Hz recheck inside the near radius, so the sleeper's new pair is the only one due
 	Harness.AntiEsp.isHidden(viewer, target)
 	Harness.AntiEsp.isHidden(viewer, sleeper)
-	harness:slice(0.05)
+	harness:slice(0.02)
 
 	-- Facing 0 lies along -Z, so the head is half the box's length that way
 	local box: any = step.lyingBox

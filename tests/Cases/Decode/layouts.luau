@@ -117,8 +117,8 @@ return function (): (boolean, string | nil)
 	local owner: buffer = slice(ownerData, 0, ownerLength)
 
 	decoded = Decode.decode(version, "owner", owner)
-	local server: buffer = slice(owner, 42, 2)
-	local rules: buffer = slice(owner, 45, 3)
+	local server: buffer = slice(owner, 43, 2)
+	local rules: buffer = slice(owner, 46, 3)
 	if decoded.position ~= vector.create(1, 2, 3) or decoded.moveMode ~= "Noclip" or decoded.lean ~= 1 then
 		return false, "OwnerState decoded with other fields than it was written with"
 	elseif Same(server, decoded.fields, "server") or Same(rules, decoded.block, "rules") then
@@ -136,7 +136,7 @@ return function (): (boolean, string | nil)
 		generation = 2,
 		look = true,
 		lookData = owner,
-		lookAt = 42,
+		lookAt = 43,
 		lookLength = 2,
 		held = true,
 		heldData = owner,

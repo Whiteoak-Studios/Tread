@@ -1,7 +1,7 @@
 --[[
     The dev place's client: starts Tread's client as a game does, with the
-    dev game's shared table and Frontier Zero's client settings, then the
-    exploit kit, the test elevator, input, camera, mantle prompt and G2 counts
+    dev game's shared table and Frontier Zero's client settings, then its
+    kit, shooter, elevator, input, camera, render key, prompt, G2 and replay
 --]]
 
 --!strict
@@ -21,7 +21,9 @@ local Config = require(script.Config)
 local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
 local Exploits = require(script.Exploits)
 local Input = require(script.Input)
+local Replay = require(script.Replay)
 local Rig = require(script.Rig)
+local Shots = require(script.Shots)
 local View = require(script.View)
 local Shared = require(ReplicatedStorage.Shared.Dev.Config)
 
@@ -30,6 +32,10 @@ local Camera = Workspace.CurrentCamera
 local VIEW_KEY: Enum.KeyCode = Enum.KeyCode.V -- The dev place's own bind, which no game shares
 local PRESS_KEY: Enum.KeyCode = Config.elevator.key
 local PROMPT_WAIT: number = Config.prompt.wait
+local RENDER_KEY: Enum.KeyCode = Config.render.key
+local RENDER_DISTANCES: { number } = Config.render.distances
+local RENDER_TEXT: string = Config.render.text
+local RENDER_WAIT: number = Config.render.wait
 
 local input = Input.new()
 
@@ -84,6 +90,41 @@ local function prompt(): TextLabel
 	label.TextSize = 18
 	label.ZIndex = 1
 	label.Visible = false
+	label.Parent = screen
+
+	return label
+end
+
+--[[
+    The render distance label, a line made in code at the bottom left of
+    the screen, showing the distance it is given. It waits at boot for the
+    PlayerGui
+--]]
+
+local function renderLabel(distance: number): TextLabel
+	-- Boot-time wait: the PlayerGui may not have arrived when the client's scripts start
+	local playerGui = Player:WaitForChild("PlayerGui", RENDER_WAIT) :: PlayerGui?
+	if not playerGui then
+		error(`The render distance label found no PlayerGui within {RENDER_WAIT} s`)
+	end
+
+	local screen: ScreenGui = Instance.new("ScreenGui")
+	screen.Name = "DevRender"
+	screen.ResetOnSpawn = false
+	screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	screen.Parent = playerGui
+
+	local label: TextLabel = Instance.new("TextLabel")
+	label.Name = "Distance"
+	label.Text = string.format(RENDER_TEXT, distance)
+	label.AnchorPoint = Vector2.new(0, 1)
+	label.Position = UDim2.new(0, 16, 1, -16)
+	label.Size = UDim2.fromOffset(200, 28)
+	label.BackgroundColor3 = Color3.new(0, 0, 0)
+	label.BackgroundTransparency = 0.4
+	label.TextColor3 = Color3.new(1, 1, 1)
+	label.TextSize = 16
+	label.ZIndex = 1
 	label.Parent = screen
 
 	return label
@@ -145,6 +186,7 @@ end
 local clientSettings: Tread.ClientSettings = {
 	sample = function (command: Tread.Command)
 		input:sample(command)
+		Shots.sample(command)
 	end,
 
 	look = function (): (number, number, number, number)
@@ -162,14 +204,34 @@ local clientSettings: Tread.ClientSettings = {
 	smoothing = Config.smoothing,
 	drawDistance = Config.drawDistance,
 	lod = Config.lod,
+	firstPerson = Config.firstPerson,
 	spectate = Config.spectate,
 }
 
 local client: Tread.Client = Tread.startClient(Shared, clientSettings)
 Exploits.start({ client = client, shared = Shared }) -- In this frame, so the ESP hears the first slot table
+Shots.start(client, Shared) -- In this frame too, so it hears every slot drawn
 local view: View.View = View.new(client, Config.view, cast)
 local mantle: TextLabel? = nil -- The prompt, once the PlayerGui it waits for has come
+local replay: Replay.Replay? = nil -- The clip replay, once the PlayerGui its label waits for has come
+local render: TextLabel? = nil -- The render distance label, once the PlayerGui it waits for has come
 local button: Part = elevator(client)
+
+-- The render distance as last set, the device's draw distance until the key first moves it on. Tread's handle gives
+-- no read of it, so its own field is read once here
+local renderDistance: number = (client :: any)._renderDistance
+
+-- Moves the render distance on to the one listed after the one set, the first when the one set isn't listed
+local function cycle()
+	local index: number = table.find(RENDER_DISTANCES, renderDistance) or 0
+	renderDistance = RENDER_DISTANCES[index % #RENDER_DISTANCES + 1]
+	client:setRenderDistance(renderDistance)
+
+	local label: TextLabel? = render
+	if label then
+		label.Text = string.format(RENDER_TEXT, renderDistance)
+	end
+end
 
 -- The press's ray meets the elevator's button and the world the server's own cast of the press meets
 local reached: { Instance } = table.clone(include)
@@ -183,6 +245,12 @@ Camera.CameraType = Enum.CameraType.Scriptable
 
 -- Every connection below lives for the client session
 RunService.PreRender:Connect(function (dt: number)
+	-- A clip playing draws first, so the camera reads the clip's eye this frame
+	local playing: Replay.Replay? = replay
+	if playing then
+		playing:frame(dt)
+	end
+
 	local eye: Vector3, look: Vector3 = client:getEye()
 	Camera.CFrame = CFrame.lookAlong(view:frame(dt, eye, look), look)
 
@@ -198,13 +266,16 @@ RunService.PreRender:Connect(function (dt: number)
 	end
 end)
 
--- The view switches on its key, and a press while it blends turns it back. The elevator's key sends the press when a
--- ray from the eye along the look meets the button within reach before any world part, as the server checks again
+-- The view switches on its key, and a press while it blends turns it back. The render key moves the render distance
+-- on. The elevator's key sends the press when a ray from the eye along the look meets the button within reach before
+-- any world part, as the server checks again
 UserInputService.InputBegan:Connect(function (pressed: InputObject, processed: boolean)
 	if processed then
 		return
 	elseif pressed.KeyCode == VIEW_KEY then
 		view:toggle()
+	elseif pressed.KeyCode == RENDER_KEY then
+		cycle()
 	elseif pressed.KeyCode == PRESS_KEY then
 		local eye: Vector3, look: Vector3 = client:getEye()
 		local hit: RaycastResult? = Workspace:Raycast(eye, look * Elevator.reach, pressParams)
@@ -227,6 +298,9 @@ client:onCorrected(function (size: number, flagged: boolean)
 	Network.corrected.fire(size, flagged)
 end)
 
--- Last, since each waits at boot for the PlayerGui, the input on a touch screen alone
+-- Last, since each waits at boot for the PlayerGui, the input on a touch screen alone. The replay is held for the
+-- client session, and its destroy is what would disconnect its listener and keys
 input:start()
 mantle = prompt()
+render = renderLabel(renderDistance)
+replay = Replay.new(client, Shared)

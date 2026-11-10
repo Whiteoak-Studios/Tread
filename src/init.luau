@@ -20,6 +20,7 @@ export type ClientSettings = Config.ClientSettings
 -- The handles' own types, read off their constructors inside typeof, which never runs, so neither realm loads here
 export type Server = typeof(require(script.Server).start(nil :: any, nil :: any))
 export type Client = typeof(require(script.Client).start(nil :: any, nil :: any))
+export type Playback = typeof(require(script.Client.Playback).new(nil :: any, nil :: any))
 export type Character = Types.Character
 export type Npc = typeof(require(script.Server.Characters).createNpc(nil :: any))
 export type Sleeper = Types.Sleeper
@@ -41,6 +42,8 @@ export type Platform = State.Platform
 export type Outfit = State.Values
 export type Held = State.Values
 export type Slot = Types.Slot
+export type Change = Types.Change
+export type Sink = Types.Sink
 export type Footstep = Types.Footstep
 export type Mode = State.Mode
 export type Posture = State.Posture
@@ -111,10 +114,10 @@ end
 
 --- Decodes one of Tread's layouts, as a CODEC_VERSION packed it, into new
 --- tables, for clips and tools: relay, withheld, owner, feed, keyframe,
---- record or command. Every position and direction comes back a Vector3,
---- and each block of the game's declared fields as its packed bytes. It
---- errors on a version or kind it has no reader for, and on bytes that
---- aren't that layout.
+--- record, command, tap or snapshot. Every position and direction comes
+--- back a Vector3, and each block of the game's declared fields as its
+--- packed bytes. It errors on a version or kind it has no reader for, and
+--- on bytes that aren't that layout.
 --- @within Tread
 --- @param version number -- The CODEC_VERSION the bytes were packed with
 --- @param kind string -- The layout's name

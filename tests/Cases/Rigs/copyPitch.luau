@@ -1,6 +1,6 @@
 --[[
-    A pose of the local player's own slot draws its first-person copy where
-    its world rig stands, at full detail, with the same lean and no aim
+    A pose of the local player's own slot draws its first-person copy behind
+    its world rig, at full detail, with the same lean and no aim
     pitch, while the world rig keeps the pitch; the copy raises no marker,
     and another slot's pose draws no copy
 --]]
@@ -20,6 +20,7 @@ local OTHER: number = 3
 local PITCH: number = 0.4 -- Radians, the owner's aim
 local LEAN: number = 12 -- Degrees
 local DISTANCE: number = 4 -- Studs from the eye to the world rig's feet
+local TOLERANCE: number = 1e-4 -- Studs, since a CFrame holds 32-bit floats
 
 type Drawn = { pitch: number?, lean: number?, aims: number, full: boolean?, fire: ((string, string) -> ())? }
 
@@ -101,6 +102,8 @@ return function (): (boolean, string | nil)
 
 	local worldDrawn: Drawn? = drawn[world]
 	local copyDrawn: Drawn? = drawn[copy]
+	local placed: any = world.PrimaryPart.CFrame
+	local behind: any = placed.Position - placed.LookVector * Rig.back -- The fixture's back studs along its facing
 	if not worldDrawn or not copyDrawn then
 		return false, `A pose of the own slot drew the world rig {worldDrawn ~= nil} and the copy {copyDrawn ~= nil}`
 	elseif worldDrawn.pitch ~= PITCH or worldDrawn.lean ~= LEAN then
@@ -111,8 +114,10 @@ return function (): (boolean, string | nil)
 		return false, "The copy wasn't drawn at full detail"
 	elseif world.Parent == nil or copy.Parent ~= world.Parent then
 		return false, "The copy wasn't drawn into Workspace beside the world rig"
-	elseif world.PrimaryPart.CFrame ~= copy.PrimaryPart.CFrame then
-		return false, `The copy stands at {copy.PrimaryPart.CFrame}, not the world rig's {world.PrimaryPart.CFrame}`
+	elseif (copy.PrimaryPart.CFrame.Position - behind).Magnitude > TOLERANCE then
+		return false, `The copy stands at {copy.PrimaryPart.CFrame.Position}, not {Rig.back} studs behind the world rig`
+	elseif (copy.PrimaryPart.CFrame.LookVector - placed.LookVector).Magnitude > TOLERANCE then
+		return false, "The copy faces another way than the world rig"
 	end
 
 	-- The world rig's markers are the local player's, and the copy's reach nobody

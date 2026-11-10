@@ -130,6 +130,11 @@ local HeadPitch: number = 0
 local Ledge: vector? = nil -- Where a jump press at the newest predicted tick would end a mantle, nil for none
 local Searched: boolean = false -- Whether Ledge answers for the newest predicted tick
 
+-- The body's held item as the relay last gave it, which OwnerState never carries, so every reset to the server's
+-- state keeps it
+local Holding: State.Values = {}
+local NOTHING: State.Values = {} -- What nothing held copies as, never written
+
 local Predict = {}
 
 -- What start was handed, erroring for a call made before it
@@ -412,13 +417,13 @@ local function same(a: State.Values, b: State.Values): boolean
 	return true
 end
 
--- A state's tolerance in quanta: a rider's, or its mode's
+-- A state's tolerance in quanta: a rider's, or its mode's, a crouch slide taking the ground's
 local function toleranceOf(run: Run, state: State): number
 	local tolerances: Tolerances = run.settings.tolerances
 
 	if state.platform ~= 0 then
 		return tolerances.Rider
-	elseif state.mode == "Ground" then
+	elseif state.mode == "Ground" or state.mode == "Slide" then
 		return tolerances.Ground
 	elseif state.mode == "Air" then
 		return tolerances.Air
@@ -469,6 +474,7 @@ local function fits(run: Run, server: State, predicted: State, tolerance: number
 		and server.groundTicks == predicted.groundTicks
 		and server.airTicks == predicted.airTicks
 		and server.mantleTicks == predicted.mantleTicks
+		and server.slideCooldown == predicted.slideCooldown
 		and server.mantleRise == predicted.mantleRise
 		and server.ladder == predicted.ladder
 		and same(server.fields, predicted.fields)
@@ -844,6 +850,7 @@ function Predict.receive(data: buffer)
 	end
 
 	OwnerState.read(data, 0, buffer.len(data), Server, run.settings.layout, run.limits)
+	State.copyValues(Holding, Server.held)
 
 	if not Body then
 		adopt(run)
@@ -964,16 +971,35 @@ function Predict.mantle(): vector?
 end
 
 --[[
+    Holds the item the owner's own held-item fields name, nil for nothing,
+    as the relay last gave them: a copy of its own, which the body steps
+    with from its next tick and every reset to the server's state keeps,
+    since OwnerState never carries it
+--]]
+
+function Predict.hold(held: State.Values?)
+	started()
+	if held ~= nil and type(held) ~= "table" then
+		error(`Predict.hold takes the held-item fields as a table or nil, not a {typeof(held)}`, 2)
+	end
+
+	State.copyValues(held or NOTHING, Holding)
+	State.copyValues(Holding, Current.held)
+	State.copyValues(Holding, Previous.held)
+end
+
+--[[
     Ends the body, as when its character dies or the game replaces it, and
     puts prediction back as it was before the first OwnerState: no command
-    is kept, no Move goes, and the next OwnerState starts a new body as the
-    first did. The command numbers alone run on with the time, so the next
-    body sends none again and keeps the lead, and the correction callbacks
-    stay connected
+    is kept, no Move goes, nothing is held, and the next OwnerState starts a
+    new body as the first did. The command numbers alone run on with the
+    time, so the next body sends none again and keeps the lead, and the
+    correction callbacks stay connected
 --]]
 
 function Predict.reset()
 	started()
+	table.clear(Holding)
 
 	for index: number = #Held, 1, -1 do
 		local entry: Entry = Held[index]

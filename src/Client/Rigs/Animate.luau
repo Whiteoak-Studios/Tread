@@ -42,6 +42,16 @@ local STATES: { string } = {
 	"crawl",
 }
 
+-- The crouch slide's state, loaded where the game's map gives it, which the client's check requires with a slide
+local SLIDE: string = "slide"
+
+-- The still tracks on the ground a landing plays into, since one played over a gait blends into its stride
+local STILL: { [string]: boolean } = {
+	idle = true,
+	crouchIdle = true,
+	downed = true,
+}
+
 type Collision = State.Collision
 type State = State.State
 
@@ -91,6 +101,9 @@ export type Animated = {
 	animator: Animator,
 	tracks: { [string]: AnimationTrack }, -- One per state, by the state's name
 	playing: AnimationTrack?, -- The locomotion track now playing
+	speed: number, -- The pool's track speed, a share of each track's authored speed
+	rate: number, -- The speed the playing track was last given
+	still: boolean, -- Whether the playing track holds its pose, as a climb does while the climber is still
 	land: AnimationTrack,
 	lands: number?, -- The land counter the last pose saw, nil before the first
 	waist: AnimationConstraint, -- The joint the aim and lean layer turns
@@ -321,8 +334,9 @@ function Animate.legs(joints: { [string]: AnimationConstraint }, places: { Place
 end
 
 --[[
-    Loads every state's track once onto a rig in Workspace, with its legs
-    unplanted until a pose plants them
+    Loads every state's track once onto a rig in Workspace, the crouch
+    slide's where the map gives it, with its legs unplanted until a pose
+    plants them
 
     @ joints | the rig's own joint instances, by logical name
     @ fire | what each marker a track reaches calls once watch connects it
@@ -346,7 +360,12 @@ function Animate.load(
 		tracks[state] = animator:LoadAnimation(animations[state])
 	end
 
-	-- A landing plays once over the locomotion track, whatever its animation was authored as
+	local slide: Animation? = animations[SLIDE]
+	if slide then
+		tracks[SLIDE] = animator:LoadAnimation(slide)
+	end
+
+	-- A landing plays once over a still track, whatever its animation was authored as
 	local land: AnimationTrack = tracks.land
 	land.Looped = false
 
@@ -354,6 +373,9 @@ function Animate.load(
 		animator = animator,
 		tracks = tracks,
 		playing = nil,
+		speed = AUTHORED,
+		rate = AUTHORED,
+		still = false,
 		land = land,
 		lands = nil,
 		waist = joints.Waist,
@@ -383,6 +405,8 @@ function Animate.choose(state: State): string
 
 	if mode == "Mantle" then
 		return "mantle"
+	elseif mode == "Slide" then
+		return SLIDE
 	elseif mode == "Ladder" then
 		return "climb"
 	elseif mode == "Swim" then
@@ -403,15 +427,39 @@ function Animate.choose(state: State): string
 	return "idle"
 end
 
+-- Gives the playing track the speed it runs at, the pool's, or none while it holds its pose, telling it only of a change
+local function run(animated: Animated)
+	local playing: AnimationTrack? = animated.playing
+	if not playing then
+		return
+	end
+
+	local rate: number = animated.speed
+	if animated.still then
+		rate = HELD
+	end
+
+	if rate ~= animated.rate then
+		playing:AdjustSpeed(rate)
+		animated.rate = rate
+	end
+end
+
 --[[
-    Plays the track the state picks, fading from the one before, holds a
-    climb still while the climber is, and plays a landing once when the
-    state's land counter moves and the rig is drawn at full detail
+    Plays the track the state picks, fading from the one before, at the
+    pool's track speed, holds a climb still while the climber is, and plays
+    a landing once when the state's land counter moves while the rig is
+    drawn at full detail and the track picked is a still one on the ground,
+    stopping it once the track picked is any other, so a landing never
+    plays over a gait
+
+    @ speed | the pool's track speed, a share of each track's authored speed, 1 unless given
 --]]
 
-function Animate.pose(animated: Animated, state: State, full: boolean)
+function Animate.pose(animated: Animated, state: State, full: boolean, speed: number?)
 	local name: string = Animate.choose(state)
 	local track: AnimationTrack = animated.tracks[name]
+	animated.speed = speed or AUTHORED
 
 	if track ~= animated.playing then
 		local playing: AnimationTrack? = animated.playing
@@ -419,20 +467,45 @@ function Animate.pose(animated: Animated, state: State, full: boolean)
 			playing:Stop()
 		end
 
+		-- Play starts a track at its authored speed
 		track:Play()
 		animated.playing = track
+		animated.rate = AUTHORED
 	end
 
-	if name == "climb" then
-		local still: boolean = state.velocity == vector.zero
-		track:AdjustSpeed(still and HELD or AUTHORED)
-	end
+	animated.still = name == "climb" and state.velocity == vector.zero
+	run(animated)
 
 	local lands: number = state.lands
-	if animated.lands ~= nil and lands ~= animated.lands and full then
-		animated.land:Play()
+	local land: AnimationTrack = animated.land
+	if not STILL[name] then
+		if land.IsPlaying then
+			land:Stop()
+		end
+	elseif animated.lands ~= nil and lands ~= animated.lands and full then
+		land:Play()
+
+		if animated.speed ~= AUTHORED then
+			land:AdjustSpeed(animated.speed)
+		end
 	end
 	animated.lands = lands
+end
+
+--[[
+    Sets the pool's track speed on a rig at once, its playing track and a
+    landing playing over it, so a speed of 0 holds the rig still where it
+    is until the speed changes, and a climb held still stays still
+--]]
+
+function Animate.speed(animated: Animated, speed: number)
+	animated.speed = speed
+	run(animated)
+
+	local land: AnimationTrack = animated.land
+	if land.IsPlaying then
+		land:AdjustSpeed(speed)
+	end
 end
 
 --[[

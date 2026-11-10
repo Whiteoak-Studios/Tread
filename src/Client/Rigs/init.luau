@@ -24,6 +24,8 @@ local WORLD_RIG: boolean = false -- The dress hook's copy flag for a world rig, 
 local FIRST_PERSON: boolean = true -- Its flag for the owner's copy, which leaves off what the copy never shows
 local NEAR: number = 0 -- Studs from the eye the copy is posed at, since the eye is inside it, so at full detail
 local LEVEL: number = 0 -- The copy's aim pitch, radians: the torso turns with the camera for other viewers only
+local IN_PLACE: number = 0 -- Studs behind the state's place every rig but the copy is drawn
+local AUTHORED: number = 1 -- The track speed every rig starts at, each track's own
 local OUTLINED: string = "TreadOutlined" -- The model the outlined rigs are drawn in, under the one Highlight
 local THROUGH_WALLS: Enum.HighlightDepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- The outline shows through walls
 
@@ -75,6 +77,7 @@ export type Settings = {
 	hold: index<ClientSettings, "hold">,
 	lod: Lod,
 	bodies: Bodies,
+	firstPerson: index<ClientSettings, "firstPerson">, -- Read at each pose, so a change takes at the copy's next move
 	read spectate: Spectate?, -- Read the first time a rig is outlined, which errors without it
 }
 
@@ -96,6 +99,7 @@ type Entry = {
 
 type Fields = {
 	_settings: Settings,
+	_template: Model, -- The pool's own readied clone of the game's template, which every rig is cloned from
 	_drawDistance: number,
 	_collision: Collision,
 	_world: World?, -- The world whose casts each plant reads as they stand then, nil to plant through _collision
@@ -114,6 +118,7 @@ type Fields = {
 	_own: number?, -- The slot checked out as the local player's own, nil while none is
 	_copy: Entry?, -- Its first-person copy, held apart from every slot, nil while it has none
 	_watched: number?, -- The spectated target's slot, whose world rig takes the local player's rig setting
+	_speed: number, -- Every rig's track speed, a share of each track's authored speed
 	_firstPerson: FirstPerson.FirstPerson, -- What the local player sees of their own rigs
 	_container: Model?, -- What the outlined rigs are drawn in, made the first time one is
 	_destroyed: boolean,
@@ -199,6 +204,44 @@ local function keep(message: unknown)
 	Thrown = debug.traceback(tostring(message), 2)
 end
 
+--[[
+    The pool's own clone of the game's template, readied as every rig needs
+    it: no Humanoid, script, ball socket or no-collision pair, no part that
+    collides, is queried or is touched, the root alone anchored, and an
+    AnimationController with an Animator, so a stock R15 rig serves as it is
+--]]
+
+local function prepare(given: Model): Model
+	local template: Model = given:Clone()
+	local root: BasePart? = template.PrimaryPart
+
+	for _, item: Instance in template:GetDescendants() do
+		if
+			item:IsA("Humanoid")
+			or item:IsA("BaseScript")
+			or item:IsA("BallSocketConstraint")
+			or item:IsA("NoCollisionConstraint")
+		then
+			item:Destroy()
+		elseif item:IsA("BasePart") then
+			item.Anchored = item == root
+			item.CanCollide = false
+			item.CanQuery = false
+			item.CanTouch = false
+		end
+	end
+
+	-- A stock rig's Animator sits under its Humanoid, so it went with it
+	local controller: AnimationController = template:FindFirstChildOfClass("AnimationController")
+		or Instance.new("AnimationController")
+	controller.Parent = template
+	if not controller:FindFirstChildOfClass("Animator") then
+		Instance.new("Animator").Parent = controller
+	end
+
+	return template
+end
+
 -- Takes a rig's look off and puts a new one on
 local function restyle(settings: Settings, rig: Model, outfit: Outfit, copy: boolean)
 	settings.undress(rig)
@@ -214,11 +257,12 @@ local function layer(entry: Entry)
 end
 
 --[[
-    A pool over the game's rig template, checked against what the pool
-    needs from it: a PrimaryPart as its root, an AnimationController with
-    an Animator, each R15 joint as a kinematic AnimationConstraint, legs
-    whose knees can bend, an Animation for every state and the limits of
-    every joint but Root
+    A pool over its own readied clone of the game's rig template, any R15
+    model, Roblox's own included, while the game's model is never changed.
+    The clone is checked against what the pool needs from it: a PrimaryPart
+    as its root, each R15 joint as an AnimationConstraint, legs whose knees
+    can bend, an Animation for every state and the limits of every joint
+    but Root
 
     @ drawDistance | this device class's character draw distance
     @ collision | the step's own casts, which feet are planted with
@@ -227,21 +271,17 @@ end
 --]]
 
 function Rigs.new(settings: Settings, drawDistance: number, collision: Collision, world: World?): Self
-	local template: Model = settings.rig
-	if typeof(template) ~= "Instance" or not template:IsA("Model") then
-		error(`Rigs.new takes a Model as the rig template, not a {typeof(template)}`, 2)
-	elseif not template.Archivable then
-		error(`The rig template {template.Name} is not Archivable, so it can't be cloned`, 2)
+	local given: Model = settings.rig
+	if typeof(given) ~= "Instance" or not given:IsA("Model") then
+		error(`Rigs.new takes a Model as the rig template, not a {typeof(given)}`, 2)
+	elseif not given.Archivable then
+		error(`The rig template {given.Name} is not Archivable, so it can't be cloned`, 2)
 	end
 
+	local template: Model = prepare(given)
 	local root: BasePart? = template.PrimaryPart
 	if not root then
 		error(`The rig template {template.Name} has no PrimaryPart, the root its rigs are placed by`, 2)
-	end
-
-	local controller: AnimationController? = template:FindFirstChildOfClass("AnimationController")
-	if not controller or not controller:FindFirstChildOfClass("Animator") then
-		error(`The rig template {template.Name} has no AnimationController with an Animator`, 2)
 	end
 
 	local joints: { [string]: AnimationConstraint } = {}
@@ -270,6 +310,7 @@ function Rigs.new(settings: Settings, drawDistance: number, collision: Collision
 
 	return setmetatable({
 		_settings = settings,
+		_template = template,
 		_drawDistance = drawDistance,
 		_collision = collision,
 		_world = world,
@@ -288,6 +329,7 @@ function Rigs.new(settings: Settings, drawDistance: number, collision: Collision
 		_own = nil :: number?,
 		_copy = nil :: Entry?,
 		_watched = nil :: number?,
+		_speed = AUTHORED,
 		_firstPerson = FirstPerson.new(),
 		_container = nil :: Model?,
 		_destroyed = false,
@@ -377,7 +419,7 @@ end
 
 function Rigs._build(self: Self): Entry
 	local settings: Settings = self._settings
-	local rig: Model = settings.rig:Clone()
+	local rig: Model = self._template:Clone()
 
 	local joints: { [string]: AnimationConstraint } = {}
 	for _, logical: string in JOINTS do
@@ -533,15 +575,29 @@ function Rigs._put(self: Self, entry: Entry)
 end
 
 --[[
+    Sets the draw distance in studs, past which a rig's next pose takes it
+    out of Workspace, as the client's render distance changes
+--]]
+
+function Rigs.setDrawDistance(self: Self, distance: number)
+	if type(distance) ~= "number" or not (distance > 0) then
+		error(`Rigs.setDrawDistance takes a draw distance above 0, not {distance}`, 2)
+	end
+
+	self._drawDistance = distance
+end
+
+--[[
     Poses a slot's rig from a step state at its distance from the viewer:
     out of Workspace past the draw distance, and inside it placed by its
     root, playing the state's track, with its lean, its aim within lod.aim,
     full detail within lod.full and its feet planted within lod.footIk. A
     ragdoll is left to its physics. The local player's own first-person
-    copy is posed from the same state where its world rig stands, at full
-    detail, leaning with no aim pitch. Past a rig's first draw it makes no
-    table, closure or string; a move, a new aim or lean and a planted foot's
-    cast make the engine's own CFrames and results
+    copy is posed from the same state firstPerson.back studs behind where
+    its world rig stands, along its facing, at full detail, leaning with no
+    aim pitch. Past a rig's first draw it makes no table, closure or string;
+    a move, a new aim or lean and a planted foot's cast make the engine's
+    own CFrames and results
 
     @ distance | studs from the viewer's eye to the rig
     @ pitch | the character's aim pitch, radians, up positive
@@ -549,15 +605,16 @@ end
 
 function Rigs.pose(self: Self, slot: number, state: State, distance: number, pitch: number)
 	local entry: Entry = self:_entry(slot, "pose")
-	self:_draw(entry, state, distance, pitch)
+	self:_draw(entry, state, distance, pitch, IN_PLACE)
 
 	local copy: Entry? = self._copy
 	if copy and slot == self._own then
-		self:_draw(copy, state, NEAR, LEVEL)
+		self:_draw(copy, state, NEAR, LEVEL, self._settings.firstPerson.back)
 	end
 end
 
-function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pitch: number)
+-- Draws one rig from a state, its root back studs behind the state's place along its facing
+function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pitch: number, back: number)
 	if entry.body then
 		return
 	end
@@ -585,16 +642,21 @@ function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pi
 
 	-- The root goes where the state's feet are, turned to its facing, once the place changes
 	local position: vector = state.position
-	local moved: boolean = position ~= entry.placed or state.facing ~= entry.facing
+	local facing: number = state.facing
+	local moved: boolean = position ~= entry.placed or facing ~= entry.facing
 	if moved then
 		entry.placed = position
-		entry.facing = state.facing
+		entry.facing = facing
+
+		-- Back along the facing is (sin, 0, cos), since the facing's look vector is (-sin, 0, -cos)
+		local x: number = position.x + math.sin(facing) * back
+		local z: number = position.z + math.cos(facing) * back
+		local height: number = position.y + self._rootHeight
 
 		-- Whiteoak TODO: one BulkMoveTo per drawn rig; gather a frame's roots into one call once the client
 		-- handle has a point after its last pose of the frame, if G5 shows what the per-rig call costs
-		local height: number = position.y + self._rootHeight
 		self._moved[1] = entry.root
-		self._targets[1] = CFrame.new(position.x, height, position.z) * CFrame.Angles(0, state.facing, 0)
+		self._targets[1] = CFrame.new(x, height, z) * CFrame.Angles(0, facing, 0)
 		Workspace:BulkMoveTo(self._moved, self._targets, MOVE_EVENTS)
 	end
 
@@ -621,7 +683,7 @@ function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pi
 	end
 
 	Animate.detail(animated, full)
-	Animate.pose(animated, state, full)
+	Animate.pose(animated, state, full, self._speed)
 	Animate.aim(animated, distance <= lod.aim and pitch or 0, state.lean)
 	Animate.plant(animated, entry.root, position.y, self._rootHeight, collision, planting, moved)
 end
@@ -921,6 +983,34 @@ function Rigs.show(self: Self, part: FirstPerson.Part, shown: boolean)
 end
 
 --[[
+    Sets every rig's track speed, a share of each track's authored speed,
+    on the rigs drawn now and on every pose after, the first-person copy's
+    included: 0 holds each rig's pose where it is, as a paused clip's
+    rigs hold, and 1 plays each track as it was authored
+--]]
+
+function Rigs.setSpeed(self: Self, speed: number)
+	if type(speed) ~= "number" or not (speed >= 0 and speed < math.huge) then
+		error(`Rigs.setSpeed takes a finite speed of 0 or more, not {speed}`, 2)
+	end
+
+	self._speed = speed
+
+	for _, entry: Entry in self._slots do
+		local animated: Animated? = entry.animated
+		if animated then
+			Animate.speed(animated, speed)
+		end
+	end
+
+	local copy: Entry? = self._copy
+	local copied: Animated? = copy and copy.animated
+	if copied then
+		Animate.speed(copied, speed)
+	end
+end
+
+--[[
     Calls back on every animation marker a drawn rig's track reaches, with
     its slot, the marker's name and its value. Returns the closure that
     disconnects the callback
@@ -975,6 +1065,7 @@ function Rigs.destroy(self: Self)
 	self._own = nil
 	self._copy = nil
 	self._folder:Destroy()
+	self._template:Destroy()
 end
 
 export type Rigs = Self

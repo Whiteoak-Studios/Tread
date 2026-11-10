@@ -1,7 +1,8 @@
 --[[
     The dev game's shared table holds the approved example's values: its
     collision is engine casts over the place's test content and terrain, and
-    with the fixture's collision in a copy the two hash alike
+    with the fixture's collision and head slide and no crouch slide in a
+    copy the two hash alike
 --]]
 
 --!strict
@@ -52,6 +53,17 @@ return function (): (boolean, string | nil)
 
 	local copy: { [string]: any } = table.clone(shared)
 	copy.collision = example.collision
+
+	-- The other parts that differ by design: the dev place's own head slide, where Frontier Zero has set none, and
+	-- its crouch slide, which Frontier Zero has asked for none of
+	if shared.step.slide == nil or example.step.slide ~= nil then
+		return false, "The dev table gives no crouch slide, or the approved example's gives one"
+	end
+
+	local step: { [string]: any } = table.clone(shared.step)
+	step.headSlide = example.step.headSlide
+	step.slide = nil
+	copy.step = step
 
 	if Config.hash(copy) == Config.hash(example) then
 		return true, nil

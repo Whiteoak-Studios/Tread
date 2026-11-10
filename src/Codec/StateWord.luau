@@ -9,9 +9,12 @@
 local Constants = require(script.Parent.Parent.Constants)
 local State = require(script.Parent.Parent.Step.State)
 
--- Each value's place in its list, from 0, is its code. Mantle's is the fifth, and the code after it stays free for a
--- mounted mode
-local MODES: { State.Mode } = { "Ground", "Air", "Swim", "Ladder", "Mantle" }
+-- Each mode's code. The code after Mantle's stays free for a mounted mode, so the crouch slide takes the one after it
+local MODE_CODES: { [State.Mode]: number } = { Ground = 0, Air = 1, Swim = 2, Ladder = 3, Mantle = 4, Slide = 6 }
+local MODES: { [number]: State.Mode } =
+	{ [0] = "Ground", [1] = "Air", [2] = "Swim", [3] = "Ladder", [4] = "Mantle", [6] = "Slide" }
+
+-- Each other value's place in its list, from 0, is its code
 local POSTURES: { State.Posture } = { "Stand", "Crouch", "Downed" }
 local WATER_LEVELS: { State.WaterLevel } = { "Dry", "Wading", "Surface", "Under" }
 
@@ -56,14 +59,14 @@ end
 --]]
 
 function StateWord.pack(state: Word): number
-	local mode: number? = table.find(MODES, state.mode)
+	local mode: number? = MODE_CODES[state.mode]
 	local posture: number? = table.find(POSTURES, state.posture)
 	local water: number? = table.find(WATER_LEVELS, state.waterLevel)
 	if not (mode and posture and water) then
 		error(`A state word holds no {state.mode} mode, {state.posture} posture or {state.waterLevel} water level`)
 	end
 
-	local word: number = bit32.replace(0, mode - 1, MODE_AT, Constants.MODE_BITS)
+	local word: number = bit32.replace(0, mode, MODE_AT, Constants.MODE_BITS)
 	word = bit32.replace(word, posture - 1, POSTURE_AT, Constants.POSTURE_BITS)
 	word = bit32.replace(word, state.sprint and 1 or 0, SPRINT_AT)
 	word = bit32.replace(word, state.aim and 1 or 0, AIM_AT)
@@ -83,7 +86,7 @@ end
 --]]
 
 function StateWord.unpack(word: number, into: Word)
-	local mode: State.Mode? = MODES[bit32.extract(word, MODE_AT, Constants.MODE_BITS) + 1]
+	local mode: State.Mode? = MODES[bit32.extract(word, MODE_AT, Constants.MODE_BITS)]
 	local posture: State.Posture? = POSTURES[bit32.extract(word, POSTURE_AT, Constants.POSTURE_BITS) + 1]
 	if not (mode and posture) then
 		error(`{word} is no state word, since its mode or posture code has no value`)

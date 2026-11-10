@@ -1,7 +1,7 @@
 --[[
     The keyframe a clip ring starts from: a viewer's current view as one
     buffer, every character it is sent with its kind, newest record, look and
-    held item, and every called platform's latest press
+    held item, every called platform's latest press, and its own character
 --]]
 
 --!strict
@@ -9,6 +9,9 @@ local Block = require(script.Parent.Block)
 local Constants = require(script.Parent.Parent.Constants)
 
 local WITHHELD_AT: number = 7 -- The kind byte's top bit, marking a character withheld from a spectated target
+local ID_BYTES: number = 2 -- The own character's slot and generation, 0 for none
+local OWN_BYTES: number = ID_BYTES + 2 * Constants.PREFIX_BYTES -- Its id and the lengths of its look and held item
+local WRAP: number = 2 ^ 16
 
 type Kind = Block.Kind
 
@@ -25,12 +28,20 @@ export type Platform = {
 	tick: number, -- Its latest press's server tick, a u32
 }
 
+-- The view's own character, which the relay never lists among those it sends: a spectating moderator's is its target's
+export type Own = {
+	id: number, -- Its slot plus its generation times 4,096
+	look: buffer, -- Empty while none is set for its life
+	held: buffer, -- Empty while nothing is held
+}
+
 export type Keyframe = {
 	hash: number, -- The declarations' hash, which names how its game fields are packed
 	tick: number, -- The relay tick it samples
 	sequence: number, -- The viewer's newest message sequence
 	characters: { Character },
 	platforms: { Platform },
+	own: Own?, -- Nil while the view has no character of its own
 }
 
 local Keyframe = {}
@@ -44,14 +55,30 @@ end
 
 --[[
     Writes a keyframe into a new buffer of its exact length, stamped with
-    CODEC_VERSION, erroring on a part past its bound or more characters or
-    platforms than its counts hold
+    CODEC_VERSION, erroring on a part past its bound, more characters or
+    platforms than its counts hold, or an own character's id outside 1 to
+    65,535, since 0 means none
 --]]
 
 function Keyframe.write(keyframe: Keyframe): buffer
+	local own: Own? = keyframe.own
+	local ownLook: buffer = own and own.look or buffer.create(0)
+	local ownHeld: buffer = own and own.held or buffer.create(0)
+	local lookLength: number = buffer.len(ownLook)
+	local heldLength: number = buffer.len(ownHeld)
+
+	if own and not (own.id >= 1 and own.id < WRAP and own.id % 1 == 0) then
+		error(`A keyframe's own character's id is 1 to {WRAP - 1}, not {own.id}`)
+	elseif lookLength > Constants.MAX_LOOK or heldLength > Constants.MAX_HELD then
+		error(`A keyframe's own look of {lookLength} B or held item of {heldLength} B passes its bound`)
+	end
+
 	local bytes: number = Constants.KEYFRAME_HEADER_BYTES
 		+ Constants.PREFIX_BYTES
 		+ #keyframe.platforms * Constants.KEYFRAME_PLATFORM_BYTES
+		+ OWN_BYTES
+		+ lookLength
+		+ heldLength
 
 	for _, character: Character in keyframe.characters do
 		local look: number = buffer.len(character.look)
@@ -107,6 +134,10 @@ function Keyframe.write(keyframe: Keyframe): buffer
 		buffer.writeu32(data, offset + 1, platform.tick)
 		offset += Constants.KEYFRAME_PLATFORM_BYTES
 	end
+
+	buffer.writeu16(data, offset, own and own.id or 0)
+	offset = writePart(data, offset + ID_BYTES, ownLook)
+	writePart(data, offset, ownHeld)
 
 	return data
 end
@@ -188,9 +219,7 @@ function Keyframe.read(data: buffer): Keyframe
 
 	local platforms: number = buffer.readu8(data, offset)
 	offset += Constants.PREFIX_BYTES
-	if offset + platforms * Constants.KEYFRAME_PLATFORM_BYTES ~= length then
-		error(`A keyframe's {platforms} platforms don't end its {length} B`)
-	end
+	within(offset, platforms * Constants.KEYFRAME_PLATFORM_BYTES + OWN_BYTES, length)
 
 	for _ = 1, platforms do
 		table.insert(keyframe.platforms, {
@@ -198,6 +227,21 @@ function Keyframe.read(data: buffer): Keyframe
 			tick = buffer.readu32(data, offset + 1),
 		})
 		offset += Constants.KEYFRAME_PLATFORM_BYTES
+	end
+
+	local id: number = buffer.readu16(data, offset)
+	local look: buffer, held: buffer
+	look, offset = readPart(data, offset + ID_BYTES, length, Constants.MAX_LOOK)
+	held, offset = readPart(data, offset, length, Constants.MAX_HELD)
+
+	if id ~= 0 then
+		keyframe.own = { id = id, look = look, held = held }
+	elseif buffer.len(look) > 0 or buffer.len(held) > 0 then
+		error("A keyframe with no own character carries a look or a held item for it")
+	end
+
+	if offset ~= length then
+		error(`A keyframe of {length} B carries {length - offset} B past its own character`)
 	end
 
 	return keyframe

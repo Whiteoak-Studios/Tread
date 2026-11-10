@@ -14,8 +14,8 @@ local Refuses = require("../../Fixtures/Codec/Refuses")
 
 local SPECTATE: string = "src/Server/Spectate.luau"
 local ID: number = 4097
-local OWNER_BYTES: number = 43 -- OwnerState with both game blocks empty, the shortest a feed carries
-local LONGEST_OWNER: number = 91
+local OWNER_BYTES: number = 44 -- OwnerState with both game blocks empty, the shortest a feed carries
+local LONGEST_OWNER: number = 92
 
 -- Ids and ticks a u16 doesn't hold, each with what it gets wrong
 local BAD_WIRE: { [string]: any } = {

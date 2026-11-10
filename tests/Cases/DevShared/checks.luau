@@ -1,7 +1,8 @@
 --[[
     The dev game's shared table passes both entry points' checks beside the
-    approved example's server and client settings, and two loads of it, as
-    the server and a client each make, hash alike
+    approved example's server and client settings, the client's given the
+    slide animation the dev table's crouch slide needs, and two loads of it,
+    as the server and a client each make, hash alike
 --]]
 
 --!strict
@@ -17,7 +18,11 @@ return function (): (boolean, string | nil)
 		return false, `Config.server refused the dev table: {serverFailure}`
 	end
 
-	local started: boolean, clientFailure: any = pcall(Config.client, first.shared, Example.client())
+	-- Frontier Zero plays no slide, so its client settings give no animation for one
+	local client: any = Example.client()
+	client.animations.slide = client.animations.crouchWalk
+
+	local started: boolean, clientFailure: any = pcall(Config.client, first.shared, client)
 	if not started then
 		return false, `Config.client refused the dev table: {clientFailure}`
 	end

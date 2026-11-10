@@ -1,7 +1,7 @@
 --[[
-    A hidden player pair is rechecked at the hidden rate, the example's
-    10 Hz: a slice before its recheck is due tests nothing, and one at or
-    past it tests the pair again
+    A hidden player pair past the near radius is rechecked at the hidden
+    rate, the example's 10 Hz: a slice before its recheck is due tests
+    nothing, and one at or past it tests the pair again
 --]]
 
 --!strict
@@ -27,7 +27,7 @@ return function (): (boolean, string | nil)
 	harness.wall = Harness.solid
 
 	local _, viewer: any = harness:player("Viewer", vector.zero)
-	local target: number = harness:body("Player", vector.create(0, 0, -50))
+	local target: number = harness:body("Player", vector.create(0, 0, -300))
 	Harness.AntiEsp.isHidden(viewer, target)
 
 	for _, slice: { number | boolean } in SLICES do

@@ -77,19 +77,20 @@ end
 --[[
     The ledge a jump press would mantle onto from where the body is, found
     as a press finds it and changing nothing: a walking body, not downed,
-    on the ground, in the air or swimming, facing a face too steep to walk
-    within its hull's radius ahead with no body nearer, whose own top rises
-    past a step, a walkable top past it over a step and within the game's
-    reach of the ground last stood on, or of a swimmer's feet, and room for
-    the path. Gives back the posture it would end in, nil for none, then the
-    feet's x and z at the face, where the path starts, and its rise
+    on the ground, sliding, in the air or swimming, facing a face too steep
+    to walk within the game's mantle reach ahead with no body nearer, whose
+    own top rises past a step, a walkable top past it over a step and
+    within the game's height of the ground last stood on, or of a swimmer's
+    feet, and room for the path. Gives back the posture it would end in,
+    nil for none, then the feet's x and z at the face, where the path
+    starts, and its rise
 --]]
 
 function Mantle.find(state: State, world: World): (Posture?, number, number, number)
 	local mode: Mode = state.mode
 	if state.moveMode ~= "Walk" or state.posture == "Downed" then
 		return nil, 0, 0, 0
-	elseif mode ~= "Ground" and mode ~= "Air" and mode ~= "Swim" then
+	elseif mode ~= "Ground" and mode ~= "Slide" and mode ~= "Air" and mode ~= "Swim" then
 		return nil, 0, 0, 0
 	end
 
@@ -97,6 +98,7 @@ function Mantle.find(state: State, world: World): (Posture?, number, number, num
 	local collision: Collision = world.collision
 	local radius: number = settings.radius
 	local width: number = radius + radius
+	local search: number = settings.mantleReach
 	local feet: vector = state.position
 	local aheadX: number = -Math.sin(state.facing)
 	local aheadZ: number = -Math.cos(state.facing)
@@ -105,7 +107,7 @@ function Mantle.find(state: State, world: World): (Posture?, number, number, num
 	local height: number = Hulls.height(state, settings)
 	local center: vector = vector.create(feet.x, feet.y + height / 2, feet.z)
 	local size: vector = vector.create(width, height, width)
-	local toward: vector = vector.create(aheadX * radius, 0, aheadZ * radius)
+	local toward: vector = vector.create(aheadX * search, 0, aheadZ * search)
 	local face: Hit? = collision.sweep(center, size, toward)
 	if not face then
 		return nil, 0, 0, 0

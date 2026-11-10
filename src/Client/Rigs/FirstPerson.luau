@@ -10,6 +10,7 @@ FirstPerson.__index = FirstPerson
 
 local HIDDEN: number = 1 -- A LocalTransparencyModifier that hides a part on this screen alone
 local SHOWN: number = 0
+local COPY_NAME: string = "FirstPersonCopy" -- The copy's model name, telling it from the world rig in Workspace
 
 -- The regions of the copy a part falls in, as bits, so a piece welded across two takes both
 local BODY: number = 1 -- Every part's, so hiding it hides the whole copy
@@ -45,6 +46,7 @@ type Fields = {
 	_world: Model?, -- The local player's world rig, while it has one
 	_watched: Model?, -- The spectated target's world rig, which takes the same setting, while there is one
 	_copy: Copy?, -- Its first-person copy, nil when none could be dressed
+	_copyName: string?, -- The name the copy's model had before it was the copy, which its release puts back
 	_regions: { [BasePart | Decal]: number }, -- Each of the copy's parts and decals by the regions it falls in
 }
 
@@ -145,13 +147,16 @@ function FirstPerson.new(): Self
 		_world = nil :: Model?,
 		_watched = nil :: Model?,
 		_copy = nil :: Copy?,
+		_copyName = nil :: string?,
 		_regions = {} :: { [BasePart | Decal]: number },
 	}, FirstPerson)
 end
 
 --[[
     Takes a new body's rigs, the world rig and its copy, each hidden on
-    this screen as the game's settings say, which stay from the last body
+    this screen as the game's settings say, which stay from the last body.
+    The copy's model is named FirstPersonCopy until its release, which puts
+    its own name back, and the world rig keeps its name
 
     @ copy | nil when the copy couldn't be dressed, which leaves the world rig alone
 --]]
@@ -159,6 +164,12 @@ end
 function FirstPerson.build(self: Self, world: Model, copy: Copy?)
 	self._world = world
 	self._copy = copy
+
+	if copy then
+		self._copyName = copy.rig.Name
+		copy.rig.Name = COPY_NAME
+	end
+
 	self:refresh()
 end
 
@@ -305,8 +316,9 @@ end
 
 --[[
     Gives the local player's rigs back as the pool and a body need them,
-    every part and decal shown, before they are undressed or ragdolled. The
-    game's settings stay for the next body
+    every part and decal shown and the copy under its own name again, before
+    they are undressed or ragdolled, so a pooled rig never carries the
+    copy's name. The game's settings stay for the next body
 --]]
 
 function FirstPerson.release(self: Self)
@@ -318,10 +330,12 @@ function FirstPerson.release(self: Self)
 	local copy: Copy? = self._copy
 	if copy then
 		level(copy.rig, SHOWN)
+		copy.rig.Name = self._copyName :: string
 	end
 
 	self._world = nil
 	self._copy = nil
+	self._copyName = nil
 	table.clear(self._regions)
 end
 

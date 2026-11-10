@@ -57,6 +57,7 @@ local SETTINGS: Settings = {
 	floatDepth = 1.83,
 	crouchDepth = 2.22,
 	mantleHeight = 4,
+	mantleReach = 1.39, -- The hull's radius
 	mantleTime = 0.5,
 	mantleArc = 0.5,
 	ladderJump = 25,

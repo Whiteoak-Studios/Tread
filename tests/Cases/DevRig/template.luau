@@ -1,19 +1,38 @@
 --[[
-    The dev rig stands inside the standing hull with the eye in its head, is
-    a template Tread's pool takes, anchored at its root alone and colliding
-    with nothing, and gives each state Tread plays a Roblox animation
+    The dev rig is the place's own ReplicatedStorage.DevRig, refused by name
+    while the place holds none or holds no Model there, its joints are the 15
+    R15 joints by their own names, and each state Tread plays has an animation
 --]]
 
 --!strict
+local roblox: any = require("@lune/roblox") -- Its typedefs leave out the datatypes
+
 local Harness = require("../../Fixtures/DevClient/Harness")
-local Shared = require("../../Fixtures/DevShared/Harness")
+local Template = require("../../Fixtures/DevRig/Template")
 
 local RIG: string = "dev/Client/Rig.luau"
-local CONFIG: string = "dev/Client/Config.luau"
-local ROOT: string = "HumanoidRootPart"
+local NAMED: string = "ReplicatedStorage.DevRig" -- What a refusal names
+local NAME: string = "DevRig"
 local ASSET: string = "^rbxassetid://%d+$" -- An asset id, as each animation's must be
-local SLOT: number = 3
-local ROUNDING: number = 1e-6 -- Studs a part's edge may pass the hull's by in floating point
+
+-- The R15 joints, each of which the joints map names for itself
+local JOINTS: { string } = {
+	"Root",
+	"Waist",
+	"Neck",
+	"LeftShoulder",
+	"LeftElbow",
+	"LeftWrist",
+	"RightShoulder",
+	"RightElbow",
+	"RightWrist",
+	"LeftHip",
+	"LeftKnee",
+	"LeftAnkle",
+	"RightHip",
+	"RightKnee",
+	"RightAnkle",
+}
 
 -- The states Tread plays an animation for
 local STATES: { string } = {
@@ -33,58 +52,55 @@ local STATES: { string } = {
 	"crawl",
 }
 
--- How far a part reaches from the origin: its lowest and highest point, and its farthest across
-local function extent(part: any): (number, number, number)
-	local center: any = part.CFrame.Position
-	local half: any = part.Size / 2
-
-	return center.Y - half.Y, center.Y + half.Y, math.max(math.abs(center.X - half.X), math.abs(center.X + half.X))
+-- Whether a failure names the model the place must hold
+local function names(failure: any): boolean
+	return tostring(failure):find(NAMED, 1, true) ~= nil
 end
 
 return function (): (boolean, string | nil)
-	local step: any = Shared.load().shared.step
 	local place: Harness.Game = Harness.new()
 	local Rig: any = place.load(RIG)
-	local Config: any = place.load(CONFIG)
-	local Rigs: any = place.tread("Client.Rigs")
-	local collision: any = place.fixture("Rigs.Rig").collision()
 
-	local template: any = Rig.template()
-	if template.PrimaryPart == nil or template.PrimaryPart.Name ~= ROOT then
-		return false, `The template's PrimaryPart is {template.PrimaryPart}, not its {ROOT}`
-	elseif template:FindFirstChildOfClass("Humanoid") then
-		return false, "The template holds a Humanoid"
+	-- Refused by name while the place holds no DevRig
+	local found: boolean, missing: any = pcall(Rig.template)
+	if found or not names(missing) then
+		return false, `With no DevRig in the place, the template gave {missing} where it should refuse by name`
 	end
 
-	local controller: any = template:FindFirstChildOfClass("AnimationController")
-	if not controller or not controller:FindFirstChildOfClass("Animator") then
-		return false, "The template has no AnimationController with an Animator"
+	-- And while what it holds under that name is no Model
+	local folder: any = roblox.Instance.new("Folder")
+	folder.Name = NAME
+	folder.Parent = place.game:GetService("ReplicatedStorage")
+
+	local taken: boolean, wrong: any = pcall(Rig.template)
+	if taken or not names(wrong) then
+		return false, `With a Folder for the DevRig, the template gave {wrong} where it should refuse by name`
 	end
 
-	local bottom: number, top: number, across: number = math.huge, -math.huge, 0
-	local head: any = template:FindFirstChild("Head")
-	for _, item: any in template:GetDescendants() do
-		if not item:IsA("BasePart") then
-			continue
-		end
+	folder:Destroy()
 
-		if item.Anchored ~= (item.Name == ROOT) then
-			return false, `The template's {item.Name} is anchored {item.Anchored}, where only the root is`
-		elseif item.CanCollide or item.CanQuery or item.CanTouch then
-			return false, `The template's {item.Name} collides, is queried or is touched`
-		end
+	-- The place's own model, handed over as it stands
+	local model: any = Template(place.game)
+	if Rig.template() ~= model then
+		return false, "The template is not the place's own DevRig"
+	end
 
-		if item.Name ~= ROOT then
-			local low: number, high: number, wide: number = extent(item)
-			bottom, top, across = math.min(bottom, low), math.max(top, high), math.max(across, wide)
+	local count: number = 0
+	for name: string, joint: string in Rig.joints do
+		count += 1
+		if joint ~= name then
+			return false, `The joints map names {joint} for {name}, not itself`
 		end
 	end
 
-	local headLow: number, headHigh: number = extent(head)
-	if math.abs(bottom) > ROUNDING or top > step.standing + ROUNDING or across > step.radius + ROUNDING then
-		return false, `The template spans {bottom} to {top} and {across} across, outside the hull`
-	elseif step.eyeStanding < headLow or step.eyeStanding > headHigh then
-		return false, `The eye at {step.eyeStanding} sits outside the head, {headLow} to {headHigh}`
+	for _, name: string in JOINTS do
+		if Rig.joints[name] ~= name then
+			return false, `The joints map leaves out {name}`
+		end
+	end
+
+	if count ~= #JOINTS then
+		return false, `The joints map names {count} joints, not the {#JOINTS} R15 joints`
 	end
 
 	local animations: any = Rig.animations()
@@ -94,42 +110,6 @@ return function (): (boolean, string | nil)
 			return false, `The animations give {state} no Animation with an asset id`
 		end
 	end
-
-	-- Tread's pool takes the template, the joints and the animations, and a rig goes out and back
-	local calls: number = 0
-	local settings: any = {
-		rig = template,
-		joints = Rig.joints,
-		animations = animations,
-		lod = Config.lod,
-		bodies = Config.bodies,
-
-		dress = function (rig: any, outfit: any, copy: boolean)
-			calls += 1
-			Rig.dress(rig, outfit, copy)
-		end,
-
-		undress = function (rig: any)
-			calls += 1
-			Rig.undress(rig)
-		end,
-
-		hold = Rig.hold,
-	}
-
-	local built: boolean, rigs: any = pcall(Rigs.new, settings, Config.drawDistance.desktop, collision)
-	if not built then
-		return false, `Tread's rig pool refused the dev template: {rigs}`
-	end
-
-	local rig: any = rigs:checkout(SLOT, { head = 1 })
-	rigs:hold(SLOT, { item = 2 })
-	rigs:release(SLOT)
-	if calls ~= 2 or rig:FindFirstChild("Held") then
-		return false, `A checkout and release made {calls} look calls and left the hand holding`
-	end
-
-	rigs:destroy()
 
 	return true, nil
 end

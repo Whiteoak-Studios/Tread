@@ -1,7 +1,7 @@
 --[[
     A fresh fake game for a case with the dev game's server side mounted as
-    dev.project.json mounts it, dev/Server and the dev scope's generated
-    modules beside Tread, and a require that runs them as the place would
+    dev.project.json mounts it, dev/Server, dev/Shared and the dev scope's
+    generated modules beside Tread, and a require that runs them in place
 --]]
 
 --!strict
@@ -23,6 +23,7 @@ type Mount = { directory: string, service: string, path: { string } }
 local MOUNTS: { Mount } = {
 	{ directory = "dev/Server", service = "ServerScriptService", path = { "Server" } },
 	{ directory = "dev/Network", service = "ReplicatedStorage", path = { "Shared", "Network" } },
+	{ directory = "dev/Shared", service = "ReplicatedStorage", path = { "Shared", "Dev" } },
 }
 
 export type Loaded = {

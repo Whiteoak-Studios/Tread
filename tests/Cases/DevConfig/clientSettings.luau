@@ -7,6 +7,7 @@
 --!strict
 local Harness = require("../../Fixtures/DevClient/Harness")
 local Shared = require("../../Fixtures/DevShared/Harness")
+local Template = require("../../Fixtures/DevRig/Template")
 
 local INPUT: string = "dev/Client/Input.luau"
 local RIG: string = "dev/Client/Rig.luau"
@@ -32,6 +33,7 @@ local FRONTIER: { string } = {
 return function (): (boolean, string | nil)
 	local loaded: Shared.Loaded = Shared.load()
 	local place: Harness.Game = Harness.new()
+	Template(place.game) -- The place holds its rig from the start
 	local Input: any = place.load(INPUT)
 	local Rig: any = place.load(RIG)
 	local Config: any = place.load(CONFIG)
@@ -58,6 +60,7 @@ return function (): (boolean, string | nil)
 		smoothing = Config.smoothing,
 		drawDistance = Config.drawDistance,
 		lod = Config.lod,
+		firstPerson = Config.firstPerson,
 		spectate = Config.spectate,
 	}
 

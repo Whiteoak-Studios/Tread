@@ -47,6 +47,7 @@ local Slots = require(script.Parent.Slots)
 local Spectate = require(script.Parent.Spectate)
 local State = require(script.Parent.Parent.Step.State)
 local Step = require(script.Parent.Parent.Step)
+local Taps = require(script.Parent.Taps)
 local Teleport = require(script.Parent.Teleport)
 local Types = require(script.Parent.Parent.Types)
 local World = require(script.Parent.Parent.Step.World)
@@ -416,6 +417,32 @@ local function remember(slot: number, number: number, tick: number, wait: number
 	buffer.writeu8(RecentHeld, slot, math.min(buffer.readu8(RecentHeld, slot) + 1, RECENT))
 end
 
+-- Where a slot's ring keeps the stepped command of a number, or nil when none of its last RECENT is numbered so
+local function recent(slot: number, number: number): number?
+	for at: number = 0, buffer.readu8(RecentHeld, slot) - 1 do
+		local index: number = slot * RECENT + at
+		if buffer.readu16(RecentNumbers, index * NUMBER_BYTES) == number then
+			return index
+		end
+	end
+
+	return nil
+end
+
+--[[
+    The seconds a viewer's view lags the tick of the command its OwnerState
+    names, as History.lag gives it from the connection's smoothed round
+    trip, that command's queue wait, 0 when the ring has none, and the
+    client's delay, the terms rewindFor reads for the same command
+--]]
+
+local function lagOf(slot: number, connection: Connection, command: number): number
+	local index: number? = recent(slot, command)
+	local wait: number = index and buffer.readu8(RecentWaits, index) or 0
+
+	return History.lag(connection:rtt(), wait, Commands.delay(connection) / MILLISECONDS)
+end
+
 -- Copies the look of a command a body stepped into the slot's own, so the record and the history read it later
 local function keepLook(slot: number, command: Command)
 	local look: Command = Stepped[slot]
@@ -523,8 +550,10 @@ function Characters.start(context: Context)
 	Teleport.start({ shared = shared, server = server }, world)
 	AntiEsp.start({ shared = shared, server = server }, world, States, blocked)
 
-	-- Connected before any game callback can be, and lives as long as the server
+	-- Connected before any game callback can be, and lives as long as the server, so a getState read in a game's
+	-- callback refills from the landed body
 	Teleport.onTeleported(function (character: Self)
+		Versions[character._slot] += 1
 		AntiEsp.moved(character._slot)
 	end)
 end
@@ -925,26 +954,26 @@ function Characters.rewindFor(key: Key, command: number, renderTime: number): (n
 	end
 
 	local slot: number = character._slot
-	for at: number = 0, buffer.readu8(RecentHeld, slot) - 1 do
-		local index: number = slot * RECENT + at
-
-		if buffer.readu16(RecentNumbers, index * NUMBER_BYTES) == command then
-			local connection: Connection = Links[slot]
-			local tick: number = buffer.readf64(RecentTicks, index * TICK_BYTES)
-			local wait: number = buffer.readu8(RecentWaits, index)
-			local delay: number = Commands.delay(connection) / MILLISECONDS
-
-			local time: number, inside: boolean, offset: number =
-				History.rewindFor(tick, connection:rtt(), connection:jitter(), wait, delay, renderTime)
-			if not inside then
-				Reports.fire(key, "band", offset)
-			end
-
-			return time, inside
-		end
+	local index: number? = recent(slot, command)
+	if index == nil then
+		error(
+			`server:rewindFor takes one of the last {RECENT} commands the character stepped, and {command} is none`,
+			2
+		)
 	end
 
-	error(`server:rewindFor takes one of the last {RECENT} commands the character stepped, and {command} is none`, 2)
+	local connection: Connection = Links[slot]
+	local tick: number = buffer.readf64(RecentTicks, index * TICK_BYTES)
+	local wait: number = buffer.readu8(RecentWaits, index)
+	local delay: number = Commands.delay(connection) / MILLISECONDS
+
+	local time: number, inside: boolean, offset: number =
+		History.rewindFor(tick, connection:rtt(), connection:jitter(), wait, delay, renderTime)
+	if not inside then
+		Reports.fire(key, "band", offset)
+	end
+
+	return time, inside
 end
 
 --[[
@@ -1175,6 +1204,10 @@ function Characters.leave(key: Key)
 	Relay.remove(key)
 	AntiEsp.leave(key)
 
+	if Taps.observing then
+		Taps.leave(key)
+	end
+
 	if typeof(key) == "Instance" then
 		local player: Player = key :: Player
 		local part: Part? = Focus[player]
@@ -1235,7 +1268,7 @@ end
 local function stepCharacter(character: Self, tick: number, wire: number, setup: Setup)
 	local slot: number = character._slot
 	local state: StepState = States[slot]
-	local command: Command, _: boolean, wait: number = Commands.take(Links[slot], wire)
+	local command: Command, standIn: boolean, wait: number = Commands.take(Links[slot], wire)
 
 	remember(slot, command.number, tick, wait)
 	setup.beforeCommand(character, command)
@@ -1252,6 +1285,11 @@ local function stepCharacter(character: Self, tick: number, wire: number, setup:
 
 	keepLook(slot, command)
 	Spectate.stepped(character.player, command)
+
+	if Taps.observing then
+		Taps.stepped(character.player, command)
+	end
+
 	Versions[slot] += 1
 	Range.set(slot, state.position, character.player.Name)
 
@@ -1261,6 +1299,10 @@ local function stepCharacter(character: Self, tick: number, wire: number, setup:
 
 	if speed > 0 then
 		landed(character, speed, state.groundMaterial, state.apex)
+	end
+
+	if Taps.commanding and character._live then
+		Taps.command(character, tick, command, standIn, fill(slot, setup))
 	end
 end
 
@@ -1378,7 +1420,8 @@ function Characters.history(tick: number, relayTick: number)
 end
 
 -- Fires a character's OwnerState to its owner in a buffer of its exact length, with its queue depth set
-local function sendOwnerState(slot: number, key: Key, connection: Connection, setup: Setup)
+local function sendOwnerState(character: Self, key: Key, connection: Connection, setup: Setup)
+	local slot: number = character._slot
 	local state: StepState = States[slot]
 	state.depth = Commands.depth(connection)
 
@@ -1391,6 +1434,11 @@ local function sendOwnerState(slot: number, key: Key, connection: Connection, se
 
 	-- The moderators watching it get the same bytes beside the looks it stepped
 	Spectate.feed(key, data, length)
+
+	if Taps.observing then
+		local lag: number = lagOf(slot, connection, state.command)
+		Taps.owner(key, Record.id(slot, character._generation), data, lag, setup.limits)
+	end
 end
 
 --[[
@@ -1452,7 +1500,7 @@ function Characters.relay(relayTick: number, tick: number)
 			viewer.target = Spectate.targetOf(key)
 
 			connection:sample(setup.relayInterval)
-			sendOwnerState(slot, key, connection, setup)
+			sendOwnerState(character, key, connection, setup)
 
 			count += 1
 			ViewerList[count] = viewer
@@ -1581,6 +1629,10 @@ local function bury(slot: number, generation: number, owner: Key?, push: vector,
 	local dying: number, body: number, x: number, y: number, z: number =
 		Reliable.writeDeath(slot, generation, bodySlot, bodyGeneration, push)
 	setup.sendDeath(witnesses(slot, owner), dying, body, x, y, z)
+
+	if Taps.reliable then
+		Taps.death(slot, dying, body, push)
+	end
 
 	local fields: Types.BodyFields = { _slot = bodySlot, _generation = bodyGeneration, _live = true }
 

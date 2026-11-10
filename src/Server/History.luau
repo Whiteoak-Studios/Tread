@@ -8,10 +8,10 @@
 --!native
 local Config = require(script.Parent.Parent.Config)
 local Constants = require(script.Parent.Parent.Constants)
-local Engine = require(script.Parent.Parent.Step.Engine)
 local Math = require(script.Parent.Parent.Step.Math)
 local Record = require(script.Parent.Parent.Codec.Record)
 local Sequence = require(script.Parent.Parent.Codec.Sequence)
+local Shapes = require(script.Parent.Parent.Step.Shapes)
 local Slots = require(script.Parent.Slots)
 local State = require(script.Parent.Parent.Step.State)
 local StateWord = require(script.Parent.Parent.Codec.StateWord)
@@ -21,7 +21,6 @@ local ANGLE_STEPS: number = Constants.ANGLE_STEPS
 local YAW_SCALE: number = ANGLE_STEPS / (2 * math.pi) -- Steps a radian of yaw
 local PITCH_SCALE: number = Constants.PITCH_LIMIT / (math.pi / 2) -- Steps a radian of pitch, a quarter turn at 90°
 local LEAN_STEPS: number = Constants.LEAN_STEPS
-local DEGREES: number = math.pi / 180 -- Radians a degree of lean
 local TICK_WRAP: number = 2 ^ 16 -- The ticks a sample's u16 tick holds
 local EPOCH_BITS: number = 8 -- The full epoch's u8
 local TIME_WRAP: number = 2 ^ 32 -- The milliseconds a sample's u32 server time holds
@@ -49,18 +48,16 @@ local SPARE_AT: number = 23
 local LYING: number = 1 -- A sleeper's lying sample written at wake, hit through its Downed shapes
 local ABSENT: number = 2 -- A tick the body spent in Noclip or Parked, which no hit test finds
 
+type Placed = Shapes.Placed
 type Posture = State.Posture
 type ServerSettings = Config.ServerSettings
+type Shapes = Shapes.Shapes
 type Shared = Config.Shared
 type State = State.State
 type Word = StateWord.Word
 
 -- One capsule of a hit shape, on the step's vector: in the character's own space, or placed in the world
-export type Shape = {
-	from: vector,
-	to: vector,
-	radius: number,
-}
+export type Shape = Shapes.Shape
 
 -- A body's state at a render time for a hit test. Each slot has one, rewritten by the next sampleAt for the slot
 export type Sample = {
@@ -81,31 +78,11 @@ export type Lying = {
 	yaw: number,
 }
 
--- One posture's hit shapes as the shared table's hitShapes give them
-type GameShapes = {
-	body: Config.Shape,
-	zones: { [string]: Config.Shape },
-	waist: number,
-}
-
--- One posture's hit shapes crossed onto vector, and the height a lean tilts every point above about
-type Shapes = {
-	body: Shape,
-	zones: { [string]: Shape },
-	waist: number,
-}
-
--- A slot's placed shapes for one posture, which its Sample points at
-type Placed = {
-	body: Shape,
-	zones: { [string]: Shape },
-}
-
 local Buffers: { [number]: buffer } = {} -- Each slot's ring of samples, a tick at its tick's index, kept through its lives
 local Newest: { [number]: number } = {} -- Each slot's newest tick written, nil while it holds no history
 local Oldest: { [number]: number } = {} -- The tick its current history starts at
 local Samples: { [number]: Sample } = {} -- Each slot's Sample, made on its first read
-local PlacedShapes: { [number]: { [Posture]: Placed } } = {}
+local PlacedShapes: { [number]: { [Posture]: Placed } } = {} -- Each slot's placed shapes by posture, its Sample's
 local Postures: { [Posture]: Shapes } = {} -- The shared table's hit shapes, crossed at start
 
 -- The state word a sample holds, unpacked or packed in place
@@ -143,20 +120,6 @@ local BandMax: number = 0
 
 local History = {}
 
-local function crossShape(shape: Config.Shape): Shape
-	return { from = Engine.toVector(shape.from), to = Engine.toVector(shape.to), radius = shape.radius }
-end
-
-local function crossShapes(shapes: GameShapes): Shapes
-	local zones: { [string]: Shape } = {}
-
-	for name: string, shape: Config.Shape in shapes.zones do
-		zones[name] = crossShape(shape)
-	end
-
-	return { body = crossShape(shapes.body), zones = zones, waist = shapes.waist }
-end
-
 --[[
     Takes the settings the history reads: the shared table's rates, its
     queue-wait cap, its lean limit and its hit shapes, and the server
@@ -184,9 +147,9 @@ function History.start(shared: Shared, server: ServerSettings)
 	BandSigmas = server.rewind.bandSigmas
 	BandMax = server.rewind.bandMax
 
-	Postures.Stand = crossShapes(shared.hitShapes.Stand)
-	Postures.Crouch = crossShapes(shared.hitShapes.Crouch)
-	Postures.Downed = crossShapes(shared.hitShapes.Downed)
+	Postures.Stand = Shapes.cross(shared.hitShapes.Stand)
+	Postures.Crouch = Shapes.cross(shared.hitShapes.Crouch)
+	Postures.Downed = Shapes.cross(shared.hitShapes.Downed)
 
 	StartedAt = os.clock()
 	Started = true
@@ -466,47 +429,6 @@ local function sampleFor(slot: number): Sample
 end
 
 --[[
-    A point of a shape in the character's own space, placed: tilted by the
-    lean about the waist when it sits above it, a positive lean to the
-    right, then turned by the yaw and moved to the feet. Own space has +X
-    right and +Z back, as the step reads it
---]]
-
-local function point(
-	at: vector,
-	feet: vector,
-	sine: number,
-	cosine: number,
-	waist: number,
-	leanSine: number,
-	leanCosine: number
-): vector
-	local x: number, y: number, z: number = at.x, at.y, at.z
-
-	if y > waist then
-		local up: number = y - waist
-		x, y = x * leanCosine + up * leanSine, waist - x * leanSine + up * leanCosine
-	end
-
-	return vector.create(feet.x + cosine * x + sine * z, feet.y + y, feet.z - sine * x + cosine * z)
-end
-
-local function place(
-	from: Shape,
-	into: Shape,
-	feet: vector,
-	sine: number,
-	cosine: number,
-	waist: number,
-	leanSine: number,
-	leanCosine: number
-)
-	into.from = point(from.from, feet, sine, cosine, waist, leanSine, leanCosine)
-	into.to = point(from.to, feet, sine, cosine, waist, leanSine, leanCosine)
-	into.radius = from.radius
-end
-
---[[
     Fills a slot's Sample from a sample's values, with the posture's shapes
     placed: the word's posture, Crouch while it swims, and Downed for a
     lying sample
@@ -526,28 +448,12 @@ local function fill(
 ): Sample
 	StateWord.unpack(word, Scratch)
 
-	local posture: Posture = Scratch.posture
-	if lying then
-		posture = "Downed"
-	elseif Scratch.mode == "Swim" then
-		posture = "Crouch"
-	end
-
+	local posture: Posture = Shapes.posture(Scratch.posture, Scratch.mode, lying)
 	local sample: Sample = sampleFor(slot)
 	local placed: Placed = PlacedShapes[slot][posture]
-	local shapes: Shapes = Postures[posture]
-
 	local yaw: number = (yawSteps % ANGLE_STEPS) / YAW_SCALE
-	local sine: number = Math.sin(yaw)
-	local cosine: number = Math.cos(yaw)
-	local leanSine: number = Math.sin(lean * DEGREES)
-	local leanCosine: number = Math.cos(lean * DEGREES)
 
-	place(shapes.body, placed.body, position, sine, cosine, shapes.waist, leanSine, leanCosine)
-
-	for name: string, shape: Shape in shapes.zones do
-		place(shape, placed.zones[name], position, sine, cosine, shapes.waist, leanSine, leanCosine)
-	end
+	Shapes.place(Postures[posture], placed, position, yaw, lean)
 
 	sample.epoch = epoch
 	sample.position = position
@@ -697,11 +603,29 @@ function History.lying(slot: number, position: vector, yaw: number, epoch: numbe
 end
 
 --[[
+    The seconds a command's expected render time sits behind its tick: the
+    round trip, the queue wait capped at ticks.queueWait and the delay
+    clamped to the rewind's range, the sum rewindFor reaches back by
+
+    @ rtt | the connection's smoothed round trip, seconds
+    @ wait | the simulation ticks the command waited in the queue
+    @ delay | the client's reported interpolation delay, seconds
+--]]
+
+function History.lag(rtt: number, wait: number, delay: number): number
+	if not Started then
+		error("History.lag ran before History.start", 2)
+	end
+
+	return rtt + math.min(wait, QueueWait) / SimulationRate + math.clamp(delay, DelayMin, DelayMax)
+end
+
+--[[
     The render time a shot rewinds to in relay ticks, whether its claimed
     render time was inside the band, and the claim's offset from the
     expected time, which a band report carries. The expected time is the
-    command's tick less the RTT, its capped queue wait and the clamped
-    delay; a claim inside the band is used as claimed, and one outside
+    command's tick less its lag, the RTT, its capped queue wait and the
+    clamped delay; a claim inside the band is used as claimed, and one outside
     gives way to the expected time. The result is then held inside the
     rewind's cap and the history, never later than the command's tick or
     the newest sample. A simulation tick falls at relay tick tick * relay /
@@ -737,9 +661,7 @@ function History.rewindFor(
 	end
 
 	local now: number = tick * RelayRate / SimulationRate
-	local queued: number = math.min(wait, QueueWait) / SimulationRate
-	local delayed: number = math.clamp(delay, DelayMin, DelayMax)
-	local expected: number = now - (rtt + queued + delayed) * RelayRate
+	local expected: number = now - History.lag(rtt, wait, delay) * RelayRate
 
 	-- The claim's whole ticks unwrapped against the command's, so the low 16 bits of a shot field read as the full tick
 	local base: number = math.floor(now)
@@ -752,7 +674,8 @@ function History.rewindFor(
 	local chosen: number = inside and claimed or expected
 
 	-- The cap wins over the newest sample, which a read past it answers anyway
-	local reach: number = math.min(Ceiling * RelayRate, (math.min(rtt, RttCap) + queued + delayed) * RelayRate + Extra)
+	local reach: number =
+		math.min(Ceiling * RelayRate, History.lag(math.min(rtt, RttCap), wait, delay) * RelayRate + Extra)
 	local earliest: number = now - reach
 	local latest: number = now
 

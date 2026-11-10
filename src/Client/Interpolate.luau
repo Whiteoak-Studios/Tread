@@ -622,16 +622,36 @@ end
 --]]
 
 local function falling(slot: number, tick: number): (vector, number)
-	local elapsed: number = (tick - FallTicks[slot]) / Rate
+	return Interpolate.fall(FallFrom[slot], FallFromYaws[slot], FallTo[slot], FallToYaws[slot], FallTicks[slot], tick)
+end
+
+--[[
+    Where a sleeper's fall from where it lay to where it moved puts it at a
+    relay tick, with its yaw in radians, turned the shortest way by the
+    share of the fall done, under the shared table's gravity. Before the
+    fall's own tick it lies where it was
+
+    @ start | the relay tick the fall starts at, its move's
+--]]
+
+function Interpolate.fall(
+	from: vector,
+	fromYaw: number,
+	to: vector,
+	toYaw: number,
+	start: number,
+	tick: number
+): (vector, number)
+	local elapsed: number = (tick - start) / Rate
 	if elapsed < 0 then
-		return FallFrom[slot], FallFromYaws[slot]
+		return from, fromYaw
 	end
 
-	local at: vector, fraction: number = Math.fall(FallFrom[slot], FallTo[slot], Gravity, elapsed)
-	local fromYaw: number = FallFromYaws[slot] * YAW_STEPS
-	local toYaw: number = fromYaw + Sequence.difference(FallToYaws[slot] * YAW_STEPS, fromYaw)
+	local at: vector, fraction: number = Math.fall(from, to, Gravity, elapsed)
+	local fromSteps: number = fromYaw * YAW_STEPS
+	local toSteps: number = fromSteps + Sequence.difference(toYaw * YAW_STEPS, fromSteps)
 
-	return at, (Math.lerp(fromYaw, toYaw, fraction) % Constants.ANGLE_STEPS) / YAW_STEPS
+	return at, (Math.lerp(fromSteps, toSteps, fraction) % Constants.ANGLE_STEPS) / YAW_STEPS
 end
 
 --[[
@@ -962,8 +982,9 @@ function Interpolate.delay(): number
 	return Delay
 end
 
-local function tickOf(base: number, head: number, back: number): number
-	return buffer.readf64(RingTicks, (base + (head - back) % RING) * TICK_BYTES)
+-- A ring sample's tick and its record's offset, the sample back from the newest at head, base the ring's first
+local function tickOf(ticks: buffer, base: number, head: number, back: number): number
+	return buffer.readf64(ticks, (base + (head - back) % RING) * TICK_BYTES)
 end
 
 local function recordOf(base: number, head: number, back: number): number
@@ -994,7 +1015,7 @@ end
 
 local function poseLying(slot: number, into: State, base: number, head: number, count: number): boolean
 	local back: number = 0
-	while back < count and tickOf(base, head, back) > RenderTime do
+	while back < count and tickOf(RingTicks, base, head, back) > RenderTime do
 		back += 1
 	end
 
@@ -1048,9 +1069,37 @@ function Interpolate.pose(slot: number, into: State): (boolean, number)
 		return poseLying(slot, into, base, head, count), 0
 	end
 
+	return Interpolate.sample(RingTicks, RingRecords, base, head, count, RenderTime, into)
+end
+
+--[[
+    Fills into with a standing character's drawn state at a render time
+    from a window of its samples, and gives whether it has one, with the
+    aim pitch in radians, as pose does for a live slot's ring. The window
+    is count samples, the newest at head, each sample back from it at
+    base + (head - back) % 8 of ticks, f64 relay ticks, and records, 16 B
+    each, so a live ring and a contiguous run, head count - 1, both serve
+
+    @ at | the render time, in relay ticks with their fraction
+--]]
+
+function Interpolate.sample(
+	ticks: buffer,
+	records: buffer,
+	base: number,
+	head: number,
+	count: number,
+	at: number,
+	into: State
+): (boolean, number)
+	begun("sample")
+	if not (count >= 0 and count <= RING) then
+		error(`Interpolate.sample takes a window of 0 to {RING} samples, not {count}`, 2)
+	end
+
 	-- How far back from the newest the last sample at or before the render time sits
 	local back: number = 0
-	while back < count and tickOf(base, head, back) > RenderTime do
+	while back < count and tickOf(ticks, base, head, back) > at do
 		back += 1
 	end
 
@@ -1066,10 +1115,10 @@ function Interpolate.pose(slot: number, into: State): (boolean, number)
 		newer = 0
 	end
 
-	local olderTick: number = tickOf(base, head, older)
-	local newerTick: number = tickOf(base, head, newer)
-	Record.read(RingRecords, recordOf(base, head, older), Older, LookLimits)
-	Record.read(RingRecords, recordOf(base, head, newer), Newer, LookLimits)
+	local olderTick: number = tickOf(ticks, base, head, older)
+	local newerTick: number = tickOf(ticks, base, head, newer)
+	Record.read(records, recordOf(base, head, older), Older, LookLimits)
+	Record.read(records, recordOf(base, head, newer), Newer, LookLimits)
 
 	local from: Record = back == 0 and Newer or Older
 	local other: Record = back == 0 and Older or Newer
@@ -1083,18 +1132,18 @@ function Interpolate.pose(slot: number, into: State): (boolean, number)
 
 	if not still and back == 0 then
 		-- Past the newest, along the last two for one interval more, where it holds
-		t = math.min((RenderTime - olderTick) / span, REACH)
+		t = math.min((at - olderTick) / span, REACH)
 	elseif not still then
 		-- A move from rest began inside the interval the samples after it keep, not across the gap from rest
 		if older + 1 < count and newer > 0 then
-			Record.read(RingRecords, recordOf(base, head, older + 1), Earlier, LookLimits)
+			Record.read(records, recordOf(base, head, older + 1), Earlier, LookLimits)
 
 			if Earlier.position == Older.position then
-				span = math.min(span, tickOf(base, head, newer - 1) - newerTick)
+				span = math.min(span, tickOf(ticks, base, head, newer - 1) - newerTick)
 			end
 		end
 
-		t = (RenderTime - (newerTick - span)) / span
+		t = (at - (newerTick - span)) / span
 
 		if t < 0 then
 			t = 0
@@ -1116,7 +1165,7 @@ function Interpolate.pose(slot: number, into: State): (boolean, number)
 	into.facing = (yaw % Constants.ANGLE_STEPS) / YAW_STEPS
 	into.lean = Math.lerp(Older.lean, Newer.lean, t)
 	into.platform = from.platform
-	into.grounded = into.mode == "Ground"
+	into.grounded = into.mode == "Ground" or into.mode == "Slide"
 
 	if still then
 		into.velocity = vector.zero
@@ -1151,7 +1200,7 @@ function Interpolate.restart(tick: number)
 
 	for slot: number in Kinds do
 		local count: number = buffer.readu8(RingCounts, slot)
-		if count == 0 or tickOf(slot * RING, buffer.readu8(RingHeads, slot), 0) < since then
+		if count == 0 or tickOf(RingTicks, slot * RING, buffer.readu8(RingHeads, slot), 0) < since then
 			close(slot)
 			publishHide(slot)
 		end
@@ -1160,6 +1209,20 @@ function Interpolate.restart(tick: number)
 	Acking = false
 	Acknowledged = 0
 	Mask = 0
+end
+
+--[[
+    Tells every reveal callback again of each stretch open now, with its
+    kind, the slot table's player, its look and its held item, as when it
+    opened, for a handle that put its rigs away and draws them again
+--]]
+
+function Interpolate.revealOpen()
+	begun("revealOpen")
+
+	for slot: number, kind: Kind in Kinds do
+		publishReveal(slot, kind)
+	end
 end
 
 --[[
@@ -1287,7 +1350,7 @@ function Interpolate.death(
 	if Generations[slot] == generation then
 		if buffer.readu8(RingCounts, slot) > 0 and Receiving then
 			local newest: number = Newest + (Clock - NewestAt) * Rate
-			local last: number = tickOf(slot * RING, buffer.readu8(RingHeads, slot), 0)
+			local last: number = tickOf(RingTicks, slot * RING, buffer.readu8(RingHeads, slot), 0)
 			age = math.max(newest - last, 0) / Rate
 		end
 

@@ -15,6 +15,7 @@ local Math = require(script.Parent.Parent.Step.Math)
 local Relay = require(script.Parent.Relay)
 local Slots = require(script.Parent.Slots)
 local State = require(script.Parent.Parent.Step.State)
+local Tap = require(script.Parent.Parent.Codec.Tap)
 
 local SLOTS: number = Constants.SLOTS
 local PLAYER_RAYS: number = Constants.PLAYER_RAYS -- The rays a player pair's test has
@@ -39,10 +40,19 @@ local HIDDEN_DUE: number = 1
 local VISIBLE_DUE: number = 2
 local LYING_DUE: number = 3
 
+-- A pair's verdict, why it is sent or why not, every one that hides it at HIDDEN or above, so one compare answers
+local CLEAR: number = 1 -- Its last test found a ray open
+local HOLD: number = 2 -- Its last test found every ray blocked, inside the hold since a test found it open
+local FAIL_OPEN: number = 3 -- It went untested past the fail-open time while hidden, and is sent untested since
+local HIDDEN: number = 4 -- Its last test found every ray blocked past the hold
+local UNTESTED: number = 5 -- A new pair or a new life, hidden until its first test
+local VERDICTS: { Reason } = { "Clear", "Hold", "FailOpen", "Hidden", "Untested" } -- Each verdict's send reason
+
 type Bot = { Name: string }
 type Entry = Slots.Entry
 type Key = Player | Bot
 type LyingBox = State.LyingBox
+type Reason = Tap.Reason
 type ServerSettings = Config.ServerSettings
 type Settings = State.Settings
 type Shared = Config.Shared
@@ -103,6 +113,8 @@ local LyingRays: number = 0
 local LookAheadMin: number = 0
 local LookAheadMax: number = 0
 local HiddenInterval: number = 0
+local NearInterval: number = 0 -- A hidden pair's, while its target is within NearSquared of the viewer's eye
+local NearSquared: number = 0
 local VisibleInterval: number = 0
 local Hold: number = 0
 local FailOpen: number = 0
@@ -144,7 +156,7 @@ local PairSights: { number } = {} -- Its viewer's place in Sights, NONE while fr
 local PairSlots: { number } = {} -- Its target's slot
 local PairLives: { number } = {} -- And the target's generation
 local PairLying: { boolean } = {} -- A sleeper or body, on the sleepers' schedule
-local PairHidden: { boolean } = {}
+local PairVerdicts: { number } = {} -- Why it is sent, or why not
 local PairChecked: { number } = {} -- When it was last tested, made or moved to another schedule
 local PairSeen: { number } = {} -- When a test last found it visible, -math.huge for never
 local PairAsked: { number } = {} -- The round the relay last asked about it
@@ -168,9 +180,11 @@ local GroupPrevious: { number } = {}
 local FreeGroups: { number } = {}
 local GroupTop: number = 0
 
--- The schedules whose due times come in the order they are set, as the schedule's clock never runs back
+-- The schedules whose due times come in the order they are set, as the schedule's clock never runs back, so each
+-- interval keeps a queue of its own
 local NowQueue: Queue = { ids = {}, stamps = {}, times = {}, head = 1, tail = 0 }
 local HiddenQueue: Queue = { ids = {}, stamps = {}, times = {}, head = 1, tail = 0 }
+local NearQueue: Queue = { ids = {}, stamps = {}, times = {}, head = 1, tail = 0 }
 local VisibleQueue: Queue = { ids = {}, stamps = {}, times = {}, head = 1, tail = 0 }
 
 -- The sleepers' timers by time: a pair's id for a held retest, and a group's negated for its rate
@@ -241,6 +255,8 @@ function AntiEsp.start(
 	LookAheadMin = server.antiEsp.lookAheadMin
 	LookAheadMax = server.antiEsp.lookAheadMax
 	HiddenInterval = 1 / server.antiEsp.hiddenRate
+	NearInterval = 1 / server.antiEsp.nearRate
+	NearSquared = server.antiEsp.nearRadius ^ 2
 	VisibleInterval = 1 / server.antiEsp.visibleRate
 	Hold = server.antiEsp.hold
 	FailOpen = server.antiEsp.failOpen
@@ -544,7 +560,7 @@ local function admit(pair: number)
 	if PairLying[pair] then
 		heapPush(LyingDue, pair, stamp, PairChecked[pair])
 		PairHeaped[pair] = LYING_DUE
-	elseif PairHidden[pair] then
+	elseif PairVerdicts[pair] >= HIDDEN then
 		local offset: vector = target.position - Sights[PairSights[pair]].viewer.position
 		heapPush(HiddenDue, pair, stamp, vector.dot(offset, offset))
 		PairHeaped[pair] = HIDDEN_DUE
@@ -687,7 +703,7 @@ local function fresh(pair: number, generation: number, lying: boolean)
 
 	PairLives[pair] = generation
 	PairLying[pair] = lying
-	PairHidden[pair] = true
+	PairVerdicts[pair] = UNTESTED
 	PairChecked[pair] = Now
 	PairSeen[pair] = -math.huge
 
@@ -782,13 +798,57 @@ function AntiEsp.isHidden(viewer: Viewer, slot: number): boolean
 
 	PairAsked[pair] = Round
 
-	if PairHidden[pair] and not lying and Now - PairChecked[pair] > FailOpen then
-		PairHidden[pair] = false
+	if PairVerdicts[pair] >= HIDDEN and not lying and Now - PairChecked[pair] > FailOpen then
+		PairVerdicts[pair] = FAIL_OPEN
 		FailOpens += 1
 		schedule(pair, NowQueue, DUE_NOW)
 	end
 
-	return PairHidden[pair]
+	return PairVerdicts[pair] >= HIDDEN
+end
+
+--[[
+    Why anti-ESP has a slot sent to a viewer, or held back from it, as the
+    relay last asked: an NPC and a player carrying the viewer's team are
+    never tested, and any other pair gives its verdict. A pair the relay
+    never asked about is untested. It changes nothing, and only a tap asks
+--]]
+
+function AntiEsp.reason(key: Key, slot: number): Reason
+	if not Started then
+		error("AntiEsp.reason ran before AntiEsp.start", 2)
+	elseif not Slots.valid(slot) then
+		error(`AntiEsp.reason takes one of the slot table's slots, not {slot}`, 2)
+	end
+
+	local kind: number = KindOf[slot + 1]
+	if kind == NPC then
+		return "Npc"
+	end
+
+	local index: number? = SightOf[key]
+	if index == nil or kind == NONE then
+		return "Untested"
+	end
+
+	local sight: Sight = Sights[index]
+	local generation: number = LifeOf[slot + 1]
+	local own: number? = sight.viewer.slot
+
+	if kind == PLAYER and own ~= nil then
+		local ownGeneration: number = Slots.get(own)
+		local team: number? = teamOf(own, ownGeneration)
+		if team ~= nil and teamOf(slot, generation) == team then
+			return "Teammate"
+		end
+	end
+
+	local pair: number = buffer.readu32(sight.targets, slot * 4)
+	if pair == NONE or PairLives[pair] ~= generation then
+		return "Untested"
+	end
+
+	return VERDICTS[PairVerdicts[pair]]
 end
 
 --[[
@@ -929,7 +989,7 @@ local function test(pair: number, world: World, now: number)
 	PairChecked[pair] = now
 
 	if open then
-		PairHidden[pair] = false
+		PairVerdicts[pair] = CLEAR
 		PairSeen[pair] = now
 
 		if lying then
@@ -937,7 +997,9 @@ local function test(pair: number, world: World, now: number)
 		else
 			schedule(pair, VisibleQueue, now + VisibleInterval)
 		end
-	elseif not PairHidden[pair] and now - PairSeen[pair] <= hold then
+	elseif PairVerdicts[pair] < HIDDEN and now - PairSeen[pair] <= hold then
+		PairVerdicts[pair] = HOLD
+
 		-- A sleeper or body held visible is retested once its hold has passed, as often as its rate allows
 		if lying then
 			heapPush(Timers, pair, restamp(pair), math.max(PairSeen[pair] + hold, now + LyingInterval))
@@ -945,11 +1007,16 @@ local function test(pair: number, world: World, now: number)
 			schedule(pair, VisibleQueue, now + VisibleInterval)
 		end
 	else
-		PairHidden[pair] = true
+		PairVerdicts[pair] = HIDDEN
 		HiddenResults += 1
+
+		-- From the viewer's eye to the target's root, its feet
+		local offset: vector = target.position - sight.eye
 
 		if lying then
 			restamp(pair)
+		elseif vector.dot(offset, offset) <= NearSquared then
+			schedule(pair, NearQueue, now + NearInterval)
 		else
 			schedule(pair, HiddenQueue, now + HiddenInterval)
 		end
@@ -1078,6 +1145,7 @@ function AntiEsp.run(budget: number, now: number)
 	-- 3) Each schedule's front
 	drain(NowQueue, now)
 	drain(HiddenQueue, now)
+	drain(NearQueue, now)
 	drain(VisibleQueue, now)
 
 	-- Whiteoak TODO: a hidden pair waits keyed by its distance when it came due, at most its fail-open time and a

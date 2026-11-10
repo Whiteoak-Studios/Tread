@@ -386,9 +386,25 @@ local function writeShared(hash: number, tick: number)
 	buffer.writeu32(out, offset + 5, tick)
 end
 
+local function readView(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 2 > length then
+		error("View: truncated")
+	end
+
+	local distance: number = buffer.readu16(packet, cursor)
+
+	if distance < 1 then
+		error("View.distance: out of range")
+	end
+
+	cursor += 2
+
+	return runtime:deliver(2, player, cursor, sideCursor, distance)
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x1D5387B3,
+	hash = 0x9814AF4F,
 	scope = "Tread",
 	side = "server",
 	idBytes = 1,
@@ -404,6 +420,7 @@ runtime = Volt.start({
 
 	messages = {
 		[1] = { name = "Move", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readMove },
+		[2] = { name = "View", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readView },
 	},
 
 	outgoing = {
@@ -657,6 +674,16 @@ local Network = {
 		end,
 	}) :: ServerEvent<(number, number)>,
 
+	View = table.freeze({
+		on = function (listener: (player: Player | Bot, distance: number) -> ()): () -> ()
+			return runtime:on(2, listener)
+		end,
+
+		iter = function (): () -> (number, Player | Bot, number)
+			return runtime:iter(2)
+		end,
+	}) :: ServerListener<(number)>,
+
 	version = "0.1.0",
 
 	hooks = table.freeze({
@@ -712,6 +739,7 @@ Network.events = table.freeze({
 	["Platform"] = Network.Platform,
 	["Spectate"] = Network.Spectate,
 	["Shared"] = Network.Shared,
+	["View"] = Network.View,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

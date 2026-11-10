@@ -148,11 +148,24 @@ local Shared: Tread.Shared = {
 		floatDepth = 1.83, -- An idle swimmer's feet below the surface
 		crouchDepth = 2.22,
 		mantleHeight = 4,
+		mantleReach = 1.39, -- Studs past the hull's front a ledge's face may stand, the hull's radius
 		mantleTime = 0.5,
 		mantleArc = 0.5, -- Studs the mantle's path arches over the top before it settles onto it
 		ladderJump = 25,
-		headSlide = 4, -- Studs/s a body slides off another's head
+		headSlide = 1, -- Studs/s a body slides off another's head
 		lyingBox = { length = 5, width = 2, height = 2, lift = 1 },
+
+		-- The crouch slide, which Frontier Zero gives none of
+		slide = {
+			start = 15, -- Studs/s a slide needs to start, so only a sprint starts one
+			boost = 0,
+			friction = 6, -- Studs/s it loses each second
+			slope = 0.5, -- Share of gravity along the ground
+			max = 27,
+			stop = 6, -- Studs/s below which it ends
+			steer = 60, -- Degrees a second
+			cooldown = 2, -- Seconds from its end to the next start
+		},
 	},
 
 	-- Quanta of 1/512 stud a prediction may drift before the owner replays

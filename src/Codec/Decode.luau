@@ -14,6 +14,7 @@ local OwnerState = require(script.Parent.OwnerState)
 local Record = require(script.Parent.Record)
 local State = require(script.Parent.Parent.Step.State)
 local StateWord = require(script.Parent.StateWord)
+local Tap = require(script.Parent.Tap)
 
 -- Lean and the head offset come back as shares of the game's limits, from -1 to 1, since a decoder isn't given them
 local SHARES: Command.Limits = { lean = 1, headCone = 1 }
@@ -113,6 +114,7 @@ local function readOwner(data: buffer, offset: number, length: number): Decoded
 		groundTicks = state.groundTicks,
 		airTicks = state.airTicks,
 		mantleTicks = state.mantleTicks,
+		slideCooldown = state.slideCooldown,
 		mantleRise = state.mantleRise,
 		ladder = state.ladder,
 		fields = slice(data, serverAt, serverLength), -- The server-set block
@@ -219,6 +221,14 @@ local function readKeyframe(data: buffer): Decoded
 		platforms[index] = { id = platform.id, tick = platform.tick }
 	end
 
+	-- The view's own character, which no relay block lists, nil when it has none
+	local own: Decoded? = nil
+	local kept: Keyframe.Own? = keyframe.own
+	if kept then
+		local slot: number, generation: number = Record.split(kept.id)
+		own = { id = kept.id, slot = slot, generation = generation, look = kept.look, held = kept.held }
+	end
+
 	return {
 		version = Constants.CODEC_VERSION,
 		hash = keyframe.hash,
@@ -226,6 +236,7 @@ local function readKeyframe(data: buffer): Decoded
 		sequence = keyframe.sequence,
 		characters = characters,
 		platforms = platforms,
+		own = own,
 	}
 end
 
@@ -284,6 +295,66 @@ local function readCommand(data: buffer): Decoded
 	}
 end
 
+--[[
+    A tap frame: each block decoded as a relay block, each record with its
+    send reason beside its fields, and the OwnerState with the slot and
+    generation of the character it is for, the view lag in milliseconds
+    and the looks it stepped in the feed's shape, nil when it has none
+--]]
+
+local function readTap(data: buffer): Decoded
+	local frame: Tap.Frame = Tap.read(data, SHARES)
+
+	local blocks: { Decoded } = {}
+	for index: number, part: Tap.Part in frame.blocks do
+		local block: Decoded = readBlock(part.data)
+		for at: number, record: Decoded in block.records do
+			record.reason = part.reasons[at]
+		end
+
+		blocks[index] = block
+	end
+
+	local owner: Decoded? = nil
+	local kept: Tap.Owner? = frame.owner
+	if kept then
+		local decoded: Decoded = readOwnerState(kept.data)
+		decoded.slot, decoded.generation = Record.split(kept.id)
+		decoded.lag = kept.lag
+		decoded.looks = kept.looks
+		owner = decoded
+	end
+
+	return {
+		tick = frame.tick,
+		blocks = blocks,
+		owner = owner,
+	}
+end
+
+-- A snapshot: every taken slot with its kind, rig, look and held item, the parts as their packed bytes
+local function readSnapshot(data: buffer): Decoded
+	local snapshot: Tap.Snapshot = Tap.readSnapshot(data)
+
+	local slots: { Decoded } = {}
+	for index: number, entry: Tap.Entry in snapshot.slots do
+		slots[index] = {
+			slot = entry.slot,
+			generation = entry.generation,
+			kind = entry.kind,
+			rig = entry.rig,
+			look = entry.look,
+			held = entry.held,
+		}
+	end
+
+	return {
+		version = Constants.CODEC_VERSION,
+		hash = snapshot.hash,
+		slots = slots,
+	}
+end
+
 -- Each CODEC_VERSION's readers by the layout's name, the live codec's for the current version
 local Readers: { [number]: { [string]: Reader } } = {
 	[Constants.CODEC_VERSION] = {
@@ -294,15 +365,17 @@ local Readers: { [number]: { [string]: Reader } } = {
 		keyframe = readKeyframe,
 		record = readOneRecord,
 		command = readCommand,
+		tap = readTap,
+		snapshot = readSnapshot,
 	},
 }
 
 --[[
     Decodes data as the layout kind names, relay, withheld, owner, feed,
-    keyframe, record or command, as CODEC_VERSION version packed it. It may
-    allocate, since nothing calls it on a hot path, and it errors on a
-    version or kind it has no reader for and on bytes that aren't that
-    layout
+    keyframe, record, command, tap or snapshot, as CODEC_VERSION version
+    packed it. It may allocate, since nothing calls it on a hot path, and it
+    errors on a version or kind it has no reader for and on bytes that
+    aren't that layout
 --]]
 
 function Decode.decode(version: number, kind: string, data: buffer): { [string]: any }
@@ -313,7 +386,8 @@ function Decode.decode(version: number, kind: string, data: buffer): { [string]:
 
 	local reader: Reader? = readers[kind]
 	if not reader then
-		error(`Tread decodes relay, withheld, owner, feed, keyframe, record and command, not {kind}`)
+		local kinds: string = "relay, withheld, owner, feed, keyframe, record, command, tap and snapshot"
+		error(`Tread decodes {kinds}, not {kind}`)
 	elseif type(data) ~= "buffer" then
 		error(`Tread decodes a buffer, not a {type(data)}`)
 	end

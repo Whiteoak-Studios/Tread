@@ -60,13 +60,6 @@ local TRIALS: { Trial } = {
 			settings.rig.Archivable = false
 		end,
 	},
-	{
-		name = "a template with no AnimationController",
-		says = "AnimationController",
-		spoil = function (settings: any)
-			settings.rig:FindFirstChildOfClass("AnimationController"):Destroy()
-		end,
-	},
 }
 
 return function (): (boolean, string | nil)

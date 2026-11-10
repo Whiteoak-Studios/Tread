@@ -86,7 +86,7 @@ local function crawlOf(shared: Tread.Shared): number
 		isNpc = false,
 	}
 
-	local allow: Tread.Allow = { jump = true, sprint = true, crouch = true, stand = true }
+	local allow: Tread.Allow = { jump = true, sprint = true, crouch = true, stand = true, slide = false }
 
 	return shared.rules(step, allow)
 end

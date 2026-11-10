@@ -93,6 +93,22 @@ local function writeshot(sequence: number, target: number?)
 	trimReliable(offset)
 end
 
+local function readshoot(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 1 > length then
+		error("shoot: truncated")
+	end
+
+	local slot_2: number = buffer.readu8(packet, cursor)
+
+	if slot_2 > 6 then
+		error("shoot.slot: out of range")
+	end
+
+	cursor += 1
+
+	return runtime:deliver(1, player, cursor, sideCursor, slot_2)
+end
+
 local function readreport(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
 	if cursor + 6 > length then
 		error("report: truncated")
@@ -127,12 +143,69 @@ local function readreport(player: (Player | Bot)?, packet: buffer, cursor: numbe
 	local detail: string = buffer.readstring(packet, cursor, detailLength)
 	cursor += detailLength
 
-	return runtime:deliver(1, player, cursor, sideCursor, kind, detail, dropped)
+	return runtime:deliver(2, player, cursor, sideCursor, kind, detail, dropped)
+end
+
+local function readclip(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 5 > length then
+		error("clip: truncated")
+	end
+
+	local flags: number = buffer.readu8(packet, cursor)
+	local index: number = buffer.readu8(packet, cursor + 1)
+
+	if index < 1 then
+		error("clip.index: out of range")
+	end
+
+	local total: number = buffer.readu8(packet, cursor + 2)
+
+	if total < 1 then
+		error("clip.total: out of range")
+	end
+
+	local bytesLength: number = buffer.readu16(packet, cursor + 3)
+
+	if bytesLength > 4096 then
+		error("clip.bytes: length out of range")
+	end
+
+	cursor += 5
+
+	if cursor + bytesLength > length then
+		error("clip.bytes: truncated")
+	end
+
+	local bytes: buffer = buffer.create(bytesLength)
+	buffer.copy(bytes, 0, packet, cursor, bytesLength)
+
+	cursor += bytesLength
+
+	return runtime:deliver(3, player, cursor, sideCursor, bit32.btest(flags, 1), index, total, bytes)
+end
+
+local function writeplayed(time: number, stopped: boolean)
+	local offset: number, out: buffer = beginReliable(6)
+	buffer.writeu8(out, offset, 4)
+	local flags: number = 0
+
+	if type(time) ~= "number" or time ~= time then
+		refuseReliable("played.time: expected f32")
+	end
+
+	buffer.writef32(out, offset + 2, time)
+
+	if type(stopped) ~= "boolean" then
+		refuseReliable("played.stopped: expected boolean")
+	end
+
+	flags += stopped and 1 or 0
+	buffer.writeu8(out, offset + 1, flags)
 end
 
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x1B5F716C,
+	hash = 0x0E43105F,
 	scope = "Dev",
 	side = "client",
 	idBytes = 1,
@@ -147,13 +220,16 @@ runtime = Volt.start({
 	},
 
 	messages = {
-		[1] = { name = "report", kind = "event", mode = "SingleSync", queue = 64, read = readreport },
+		[1] = { name = "shoot", kind = "event", mode = "SingleSync", queue = 64, read = readshoot },
+		[2] = { name = "report", kind = "event", mode = "SingleSync", queue = 64, read = readreport },
+		[3] = { name = "clip", kind = "event", mode = "SingleSync", queue = 64, read = readclip },
 	},
 
 	outgoing = {
 		[1] = { name = "press", kind = "event", reliable = true, minBytes = 2, maxBytes = 2 },
 		[2] = { name = "corrected", kind = "event", reliable = true, minBytes = 6, maxBytes = 6 },
 		[3] = { name = "shot", kind = "event", reliable = true, minBytes = 4, maxBytes = 6 },
+		[4] = { name = "played", kind = "event", reliable = true, minBytes = 6, maxBytes = 6 },
 	},
 })
 
@@ -188,15 +264,43 @@ local Network = {
 		end,
 	}) :: ClientEvent<(number, number?)>,
 
-	report = table.freeze({
-		on = function (listener: (kind: string, detail: string, dropped: number) -> ()): () -> ()
+	shoot = table.freeze({
+		on = function (listener: (slot_2: number) -> ()): () -> ()
 			return runtime:on(1, listener)
 		end,
 
-		iter = function (): () -> (number, string, string, number)
+		iter = function (): () -> (number, number)
 			return runtime:iter(1)
 		end,
+	}) :: ClientListener<(number)>,
+
+	report = table.freeze({
+		on = function (listener: (kind: string, detail: string, dropped: number) -> ()): () -> ()
+			return runtime:on(2, listener)
+		end,
+
+		iter = function (): () -> (number, string, string, number)
+			return runtime:iter(2)
+		end,
 	}) :: ClientListener<(string, string, number)>,
+
+	clip = table.freeze({
+		on = function (listener: (withheld: boolean, index: number, total: number, bytes: buffer) -> ()): () -> ()
+			return runtime:on(3, listener)
+		end,
+
+		iter = function (): () -> (number, boolean, number, number, buffer)
+			return runtime:iter(3)
+		end,
+	}) :: ClientListener<(boolean, number, number, buffer)>,
+
+	played = table.freeze({
+		fire = function (time: number, stopped: boolean)
+			if before[4] == nil or before[4](nil, time, stopped) then
+				writeplayed(time, stopped)
+			end
+		end,
+	}) :: ClientEvent<(number, boolean)>,
 
 	version = "0.1.0",
 
@@ -224,7 +328,10 @@ Network.events = table.freeze({
 	["press"] = Network.press,
 	["corrected"] = Network.corrected,
 	["shot"] = Network.shot,
+	["shoot"] = Network.shoot,
 	["report"] = Network.report,
+	["clip"] = Network.clip,
+	["played"] = Network.played,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

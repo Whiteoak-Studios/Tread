@@ -1,17 +1,23 @@
 --[[
     The dev place's server bootstrap: starts the dev game, and Tread's
-    server with it, then runs each scenario a test or a check asks for
+    server with it, G7's shot telemetry and the clips' played reports, then
+    runs each scenario a test or a check asks for
 --]]
 
 --!strict
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local Clips = require(ServerScriptService.Server.Clips)
 local Game = require(ServerScriptService.Server.Game)
+local Hits = require(ServerScriptService.Server.Hits)
 local Runner = require(ServerScriptService.Server.Runner)
 
 local SCENARIO_ATTRIBUTE: string = "Scenario" -- What a check sets on this script to the name of a scenario to run
 
+-- Hits and Clips are started here, since Game requiring either would close a require cycle through its run
 Game.start()
+Hits.start()
+Clips.start()
 
 -- Each call is guarded, since a game script may be refused StudioTestService's calls, a live server may lack the
 -- service, and outside a test GetTestArgs may refuse

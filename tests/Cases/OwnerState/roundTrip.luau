@@ -1,7 +1,7 @@
 --[[
     OwnerState round-trips every field of the step state at its edges and
     its precision's step, with the game's server-set and rule-state blocks
-    behind it, 91 B with both blocks at their bounds
+    behind it, 92 B with both blocks at their bounds
 --]]
 
 --!strict
@@ -52,6 +52,7 @@ local ROWS: { Row } = {
 			groundTicks = 255,
 			airTicks = 255,
 			mantleTicks = 255,
+			slideCooldown = 255,
 			mantleRise = 255 * EYE_STEP,
 			ladder = 65535,
 		},
@@ -85,6 +86,7 @@ local ROWS: { Row } = {
 			groundTicks = 1,
 			airTicks = 1,
 			mantleTicks = 1,
+			slideCooldown = 1,
 			mantleRise = EYE_STEP,
 			ladder = 1,
 		},
@@ -121,8 +123,8 @@ return function (): (boolean, string | nil)
 			local bytes: number = OwnerState.write(state, data, 3, layout, Game.limits)
 			local blocks: number = Fields.write(layout.server, state.fields, buffer.create(64), 0)
 				+ Fields.write(layout.rules, state.block, buffer.create(64), 0)
-			if bytes ~= 41 + 2 + blocks then
-				return false, `{row.name} filled {bytes} B, where its 41 B and blocks fill {41 + 2 + blocks}`
+			if bytes ~= 42 + 2 + blocks then
+				return false, `{row.name} filled {bytes} B, where its 42 B and blocks fill {42 + 2 + blocks}`
 			end
 
 			local into: { [string]: any } = State.new()
@@ -135,15 +137,15 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- Both game blocks at their bounds: 41 + 1 + 16 + 1 + 32 = 91 B
+	-- Both game blocks at their bounds: 42 + 1 + 16 + 1 + 32 = 92 B
 	local largest: any = Fields.compile(Game.largest)
 	local state: { [string]: any } = State.new()
 	state.fields = words(Game.largest.server, WORD)
 	state.block = words(Game.largest.rules, WORD)
 
 	local bytes: number = OwnerState.write(state, data, 0, largest, Game.limits)
-	if bytes ~= 91 then
-		return false, `OwnerState with both blocks at their bounds filled {bytes} B, not 91`
+	if bytes ~= 92 then
+		return false, `OwnerState with both blocks at their bounds filled {bytes} B, not 92`
 	end
 
 	local into: { [string]: any } = State.new()

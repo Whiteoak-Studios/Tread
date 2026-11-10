@@ -100,6 +100,9 @@ local Rig = {
 	lod = { full = 128, footIk = 128, aim = 600 } :: Lod,
 	drawDistance = 1000,
 
+	-- Studs the first-person copy is drawn behind the world rig, the dev place's, so every own case runs shifted
+	back = 1,
+
 	-- Frontier Zero's bodies values; its joint limits are tuned in its Studio test, so these are the fixture's own
 	bodies = {
 		radius = 250,
@@ -220,6 +223,7 @@ function Rig.settings(calls: { Call }, animations: Animations?): Settings
 		animations = animations or Rig.animations(),
 		lod = Rig.lod,
 		bodies = Rig.bodies,
+		firstPerson = { back = Rig.back },
 
 		dress = function (rig: Model, outfit: Outfit, copy: boolean)
 			table.insert(calls, { hook = "dress", rig = rig, outfit = outfit, copy = copy })

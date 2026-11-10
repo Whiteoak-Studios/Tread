@@ -93,3 +93,10 @@ event Shared {
 	call: SingleSync,
 	data: (hash: u32, tick: u32),
 }
+
+event View {
+	from: Client,
+	type: Reliable,
+	call: SingleSync,
+	data: (distance: u16(1..65535)),
+}

@@ -17,7 +17,7 @@ return function (): (boolean, string | nil)
 	harness.wall = Harness.solid
 
 	local _, viewer: any = harness:player("Viewer", vector.zero)
-	local target: number = harness:body("Player", vector.create(0, 0, -50))
+	local target: number = harness:body("Player", vector.create(0, 0, -300)) -- Past the near radius
 
 	-- The module's own sum, so each recheck lands on its slice's time to the bit
 	local interval: number = 1 / harness.server.antiEsp.hiddenRate

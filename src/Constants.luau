@@ -14,7 +14,7 @@ local VELOCITY_QUANTUM: number = 1 / 64 -- Studs a second a velocity steps by, e
 local VELOCITY_LIMIT: number = 2 ^ 15 * VELOCITY_QUANTUM -- 512 studs a second either way, what that i16 holds
 local EYE_QUANTUM: number = 1 / 32 -- Studs the eased eye height and the mantle's rise step by, each a u8
 local EYE_BITS: number = 8 -- That u8's bits, which bound every eye height and mantle height a game gives
-local TIMER_LIMIT: number = 255 -- Ticks the ground, air and mantle timers stop at, the top of the u8 each rides in
+local TIMER_LIMIT: number = 255 -- Ticks the ground, air, mantle and slide timers stop at, the top of the u8 each rides in
 local EXACT_EVERY: number = 10 -- Command numbers apart that both realms run depenetration's exact overlap check at
 local SKIN: number = 0.02 -- Studs collide-and-slide keeps between the hull and every surface
 local MAX_BUMPS: number = 4 -- The most bumps one collide-and-slide move takes, each a hit and a slide
@@ -48,11 +48,11 @@ local MAX_LOOK: number = 64 -- The slot-table fields, a character's look
 local MAX_HELD: number = 16 -- The held-item fields
 
 -- OwnerState, server to owner once a relay tick: Tread's fields, then the two game blocks behind their prefixes
-local OWNER_STATE_BYTES: number = 41
+local OWNER_STATE_BYTES: number = 42
 local MAX_OWNER_STATE: number = OWNER_STATE_BYTES + PREFIX_BYTES + MAX_SERVER_SET + PREFIX_BYTES + MAX_RULE_STATE
 
 -- The state word's fields wider than a bit, beside its sprint, aim and heavy landing flags
-local MODE_BITS: number = 3 -- The step's mode, with two values spare
+local MODE_BITS: number = 3 -- The step's mode, with one value spare beside the one kept for a mounted mode
 local POSTURE_BITS: number = 2
 local WATER_BITS: number = 2 -- Dry, wading, surface swim and head under
 local COUNTER_BITS: number = 2 -- Each of the jump and land counters

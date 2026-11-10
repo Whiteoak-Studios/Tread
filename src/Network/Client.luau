@@ -37,6 +37,8 @@ export type Exported<T> = {
 }
 
 local runtime: Volt.Runtime
+local beginReliable: (number) -> (number, buffer)
+local refuseReliable: (string) -> never
 local beginUnreliable: (number) -> (number, buffer)
 local trimUnreliable: (number) -> ()
 local refuseUnreliable: (string) -> never
@@ -394,9 +396,20 @@ local function readShared(player: (Player | Bot)?, packet: buffer, cursor: numbe
 	return runtime:deliver(9, player, cursor, sideCursor, hash, tick)
 end
 
+local function writeView(distance: number)
+	local offset: number, out: buffer = beginReliable(3)
+	buffer.writeu8(out, offset, 2)
+
+	if type(distance) ~= "number" or bit32.band(distance, 65535) ~= distance or distance < 1 then
+		refuseReliable("View.distance: expected u16(1..65535)")
+	end
+
+	buffer.writeu16(out, offset + 1, distance)
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x1D5387B3,
+	hash = 0x9814AF4F,
 	scope = "Tread",
 	side = "client",
 	idBytes = 1,
@@ -424,9 +437,12 @@ runtime = Volt.start({
 
 	outgoing = {
 		[1] = { name = "Move", kind = "event", reliable = false, minBytes = 9, maxBytes = 617 },
+		[2] = { name = "View", kind = "event", reliable = true, minBytes = 3, maxBytes = 3 },
 	},
 })
 
+beginReliable = runtime.reliable.begin
+refuseReliable = runtime.reliable.refuse
 beginUnreliable = runtime.unreliable.begin
 trimUnreliable = runtime.unreliable.trim
 refuseUnreliable = runtime.unreliable.refuse
@@ -533,6 +549,14 @@ local Network = {
 		end,
 	}) :: ClientListener<(number, number)>,
 
+	View = table.freeze({
+		fire = function (distance: number)
+			if before[2] == nil or before[2](nil, distance) then
+				writeView(distance)
+			end
+		end,
+	}) :: ClientEvent<(number)>,
+
 	version = "0.1.0",
 
 	hooks = table.freeze({
@@ -566,6 +590,7 @@ Network.events = table.freeze({
 	["Platform"] = Network.Platform,
 	["Spectate"] = Network.Spectate,
 	["Shared"] = Network.Shared,
+	["View"] = Network.View,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

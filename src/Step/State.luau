@@ -33,7 +33,7 @@ export type Fields = {
 	held: { Field }, -- The held-item fields
 }
 
-export type Mode = "Ground" | "Air" | "Swim" | "Ladder" | "Mantle"
+export type Mode = "Ground" | "Air" | "Swim" | "Ladder" | "Mantle" | "Slide"
 export type Posture = "Stand" | "Crouch" | "Downed"
 export type MoveMode = "Walk" | "Noclip" | "Parked"
 export type WaterLevel = "Dry" | "Wading" | "Surface" | "Under"
@@ -93,6 +93,7 @@ export type State = {
 	groundTicks: number, -- Ticks on the ground since it landed
 	airTicks: number, -- Ticks off the ground since it left it
 	mantleTicks: number, -- The mantle's progress
+	slideCooldown: number, -- Ticks left before a crouch slide may start again
 	mantleRise: number, -- The mantle's rise, in studs
 	ladder: number, -- The ladder being climbed, 0 for none
 	fields: Values, -- The game's server-set block
@@ -170,6 +171,7 @@ export type Allow = {
 	sprint: boolean,
 	crouch: boolean,
 	stand: boolean,
+	slide: boolean, -- A crouch slide's start, false while the step block gives no slide
 }
 
 -- The rules function: returns the speed cap, which the stance speed never passes
@@ -180,6 +182,18 @@ export type LyingBox = {
 	width: number,
 	height: number,
 	lift: number, -- How far above the ground its center sits
+}
+
+-- The crouch slide, which runs only for a game whose step block gives it
+export type Slide = {
+	start: number, -- The horizontal speed a slide needs to start, studs/s
+	boost: number, -- The studs/s it adds at the start, never past the sprint plus the boost
+	friction: number, -- The studs/s it loses each second
+	slope: number, -- The share of gravity along the ground that speeds it downhill and slows it uphill, 0 to 1
+	max: number, -- Its top speed
+	stop: number, -- The speed below which it ends, below start
+	steer: number, -- Degrees a second its direction turns toward the move input
+	cooldown: number, -- Seconds from a slide's end to the next start
 }
 
 -- The shared table's step block, every key a game gives
@@ -221,11 +235,13 @@ export type Settings = {
 	floatDepth: number, -- An idle swimmer's feet below the surface
 	crouchDepth: number, -- The depth past which crouch is refused
 	mantleHeight: number, -- The mantle's reach above the last ground
+	mantleReach: number, -- How far past the hull's front a ledge's face may stand for a mantle
 	mantleTime: number,
 	mantleArc: number, -- How far the mantle's path arches over the point where its feet clear the top
 	ladderJump: number,
 	headSlide: number, -- How fast a character slides off another's head
 	lyingBox: LyingBox,
+	slide: Slide?,
 }
 
 -- An oriented box in the step's numbers: its center, its unit axes and its full size along them
@@ -321,6 +337,7 @@ function State.new(): State
 		groundTicks = 0,
 		airTicks = 0,
 		mantleTicks = 0,
+		slideCooldown = 0,
 		mantleRise = 0,
 		ladder = 0,
 		fields = {},
@@ -338,7 +355,7 @@ end
     longer holds. Only a nested value into lacks makes a table
 --]]
 
-local function copyValues(from: Values, into: Values)
+function State.copyValues(from: Values, into: Values)
 	for key, value in from do
 		local existing = into[key]
 
@@ -348,7 +365,7 @@ local function copyValues(from: Values, into: Values)
 				into[key] = existing
 			end
 
-			copyValues(value, existing)
+			State.copyValues(value, existing)
 		else
 			into[key] = value
 		end
@@ -393,15 +410,16 @@ function State.copy(from: State, into: State)
 	into.groundTicks = from.groundTicks
 	into.airTicks = from.airTicks
 	into.mantleTicks = from.mantleTicks
+	into.slideCooldown = from.slideCooldown
 	into.mantleRise = from.mantleRise
 	into.ladder = from.ladder
 	into.groundNormal = from.groundNormal
 	into.groundMaterial = from.groundMaterial
 	into.npc = from.npc
 
-	copyValues(from.fields, into.fields)
-	copyValues(from.block, into.block)
-	copyValues(from.held, into.held)
+	State.copyValues(from.fields, into.fields)
+	State.copyValues(from.block, into.block)
+	State.copyValues(from.held, into.held)
 end
 
 return State
