@@ -48,7 +48,34 @@ return {
 	budget = { soft = 64, hard = 96 }, -- KB/s a viewer gets across every Volt stream
 
 	antiEsp = {
-		rays = 5,
+		-- Studs above the feet and across the line from the viewer, for the DevRig in its 5-stud hull; the torso's
+		-- ray leads with both bodies' movement
+		aim = {
+			Stand = {
+				{ up = 5, side = 0 }, -- The head's top
+				{ up = 4, side = -1.4 }, -- The shoulders
+				{ up = 4, side = 1.4 },
+				{ up = 3, side = 0, lead = true }, -- The torso's center
+				{ up = 1, side = -0.5 }, -- The lower legs
+				{ up = 1, side = 0.5 },
+			},
+			Crouch = {
+				{ up = 3, side = 0 },
+				{ up = 2.4, side = -1.4 },
+				{ up = 2.4, side = 1.4 },
+				{ up = 1.9, side = 0, lead = true },
+				{ up = 0.6, side = -0.5 },
+				{ up = 0.6, side = 0.5 },
+			},
+			Downed = {
+				{ up = 1.2, side = 0 },
+				{ up = 0.8, side = -1.4 },
+				{ up = 0.8, side = 1.4 },
+				{ up = 0.6, side = 0, lead = true },
+				{ up = 0.4, side = -0.5 },
+				{ up = 0.4, side = 0.5 },
+			},
+		},
 		lookAheadMin = 0.15,
 		lookAheadMax = 0.45,
 		slice = 0.002, -- Seconds anti-ESP may take a Heartbeat

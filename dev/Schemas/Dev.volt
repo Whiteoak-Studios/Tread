@@ -3,8 +3,8 @@ option serverOutput = "../Network/Server.luau"
 option runtime = "ReplicatedStorage.Packages.Volt"
 option scope = Dev
 
--- The dev game's own traffic: the test elevator's button, the telemetry the live gates need from clients, and the
--- reports the exploit kit's panel shows
+-- The dev game's own traffic: the test elevator's button, the telemetry the live gates need from clients, the
+-- reports the exploit kit's panel shows, and the live runs' trigger and reports
 event press {
 	from: Client,
 	type: Reliable,
@@ -59,4 +59,21 @@ event played {
 	type: Reliable,
 	call: SingleSync,
 	data: (time: f32, stopped: boolean),
+}
+
+-- A client's ask that the server start the live run of that name
+event run {
+	from: Client,
+	type: Reliable,
+	call: SingleSync,
+	data: (name: string(1..32)),
+}
+
+-- What the server says of a live run a client asked for: refused with the reason, running with the run's name, each
+-- piece of its report in order, then passed or failed with the name. A piece stays well under Volt's 8,192 B maxPacket
+event runReport {
+	from: Server,
+	type: Reliable,
+	call: SingleSync,
+	data: (state: enum { Refused, Running, Piece, Passed, Failed }, text: string(0..4000)),
 }

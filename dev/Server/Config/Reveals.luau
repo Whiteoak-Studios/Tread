@@ -1,13 +1,17 @@
 --[[
-    G8's late-reveal numbers: the viewers observed, the exact test's inset
-    and grace, the G8 load's timings, and the doorway and window check's
-    folders, batches, waits and where it stands each pair
+    G8's late-reveal numbers: the viewers observed, the body points' names,
+    the hull test's inset, the grace, the G8 load's timings, and the doorway
+    and window check's folders, batches, waits and where it stands each pair
 --]]
 
 --!strict
 return {
 	viewers = 8, -- Bots observed beside every real player, the first of their group by build order
 	group = "city", -- The group of the G8 load they come from
+
+	-- Each body point's name, in the order the dev place's antiEsp.aim lists them for every posture
+	body = { "head-top", "left shoulder", "right shoulder", "torso", "left lower leg", "right lower leg" },
+
 	inset = 0.05, -- Studs each of the hull's points is pulled inside it, so a ray to a corner ends in the hull
 	grace = 1, -- Relay intervals a target may stay visible and unsent before a late reveal counts
 

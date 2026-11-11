@@ -16,13 +16,14 @@ return function (): (boolean, string | nil)
 	harness.wall = Harness.solid
 
 	local _, viewer: any = harness:player("Viewer", vector.zero)
-	local eye: number = harness.shared.step.eyeStanding
+	local top: number = harness.server.antiEsp.aim.Stand[1].up -- The head's top, a standing target's first point
+	local rays: number = #harness.server.antiEsp.aim.Stand
 	local targets: { number } = {}
 	local heads: { vector } = {}
 
 	for index: number, z: number in { -20, -30, -40 } do
 		targets[index] = harness:body("Player", vector.create(0, 0, z))
-		heads[index] = vector.create(0, eye, z)
+		heads[index] = vector.create(0, top, z)
 	end
 
 	local function ask(...: number)
@@ -38,8 +39,8 @@ return function (): (boolean, string | nil)
 	AntiEsp.moved(targets[3])
 	harness:slice(0.01)
 
-	if #harness.rays ~= 15 then
-		return false, `The three waiting pairs cast {#harness.rays} rays, not 5 each`
+	if #harness.rays ~= 3 * rays then
+		return false, `The three waiting pairs cast {#harness.rays} rays, not {rays} each`
 	end
 
 	for index: number, head: vector in heads do
@@ -54,7 +55,7 @@ return function (): (boolean, string | nil)
 	ask(1, 3)
 	harness:slice(0.13)
 
-	if #harness.rays ~= 10 or harness:endingAt(heads[2]) ~= 0 then
+	if #harness.rays ~= 2 * rays or harness:endingAt(heads[2]) ~= 0 then
 		return false, `With the second pair left out, the slice cast {#harness.rays} rays, the second's among them`
 	end
 
@@ -62,8 +63,8 @@ return function (): (boolean, string | nil)
 	ask(1, 2, 3)
 	harness:slice(0.14)
 
-	if #harness.rays ~= 5 or harness:endingAt(heads[2]) ~= 1 then
-		return false, `The second pair asked about again cast {#harness.rays} rays, not its own 5 at once`
+	if #harness.rays ~= rays or harness:endingAt(heads[2]) ~= 1 then
+		return false, `The second pair asked about again cast {#harness.rays} rays, not its own {rays} at once`
 	end
 
 	return true, nil

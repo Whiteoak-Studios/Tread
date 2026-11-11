@@ -10,7 +10,6 @@ local Config = require(script.Parent.Parent.Config)
 local Connections = require(script.Parent.Connections)
 local Constants = require(script.Parent.Parent.Constants)
 local Eye = require(script.Parent.Parent.Step.Eye)
-local Hulls = require(script.Parent.Parent.Step.Hulls)
 local Math = require(script.Parent.Parent.Step.Math)
 local Relay = require(script.Parent.Relay)
 local Slots = require(script.Parent.Slots)
@@ -22,7 +21,7 @@ local PLAYER_RAYS: number = Constants.PLAYER_RAYS -- The rays a player pair's te
 local LYING_RAYS: number = Constants.LYING_RAYS -- A sleeper's or body's
 local NONE: number = 0 -- No pair, group, kind or heap, in every index and link
 local DUE_NOW: number = -math.huge -- A due time every slice has reached
-local ACROSS: vector = vector.create(1, 0, 0) -- The side rays' axis toward a target straight above or below the eye
+local ACROSS: vector = vector.create(1, 0, 0) -- The side points' axis toward a target straight above or below the eye
 
 -- A slot's kind as anti-ESP keeps it
 local PLAYER: number = 1
@@ -48,10 +47,13 @@ local HIDDEN: number = 4 -- Its last test found every ray blocked past the hold
 local UNTESTED: number = 5 -- A new pair or a new life, hidden until its first test
 local VERDICTS: { Reason } = { "Clear", "Hold", "FailOpen", "Hidden", "Untested" } -- Each verdict's send reason
 
+type AimPoint = Config.AimPoint
+type AimPoints = Config.AimPoints
 type Bot = { Name: string }
 type Entry = Slots.Entry
 type Key = Player | Bot
 type LyingBox = State.LyingBox
+type Posture = State.Posture
 type Reason = Tap.Reason
 type ServerSettings = Config.ServerSettings
 type Settings = State.Settings
@@ -95,6 +97,14 @@ type Heap = {
 	stale: number, -- Entries whose pair has a newer stamp, which a due heap is cleared of once they outnumber the rest
 }
 
+-- One posture's aim points as a test reads them, each field an array by the point's place in the settings' list
+type Aim = {
+	ups: { number }, -- Studs above the feet
+	sides: { number }, -- Studs to the viewer's right, across the line from its eye to the target
+	leads: { boolean }, -- Cast from the eye moved over the look-ahead to the end moved by the target's velocity
+	count: number,
+}
+
 local Started: boolean = false
 
 -- What start hands in
@@ -108,7 +118,7 @@ local Blocked: (origin: vector, direction: vector) -> boolean = function (_: vec
 end
 
 -- The server settings as the slices read them, each rate as the seconds between tests
-local PlayerRays: number = 0
+local Aims: { [Posture]: Aim } = {}
 local LyingRays: number = 0
 local LookAheadMin: number = 0
 local LookAheadMax: number = 0
@@ -215,6 +225,29 @@ local function note(slot: number, generation: number, entry: Entry?)
 end
 
 --[[
+    A posture's aim points read into the arrays a test reads, refusing more
+    than the rays a player pair's test has
+--]]
+
+local function aimOf(posture: Posture, points: AimPoints): Aim
+	local count: number = #points
+	if count > PLAYER_RAYS then
+		error(`server.antiEsp.aim.{posture} is at most the {PLAYER_RAYS} rays a player pair's test has, not {count}`, 3)
+	end
+
+	local aim: Aim = { ups = {}, sides = {}, leads = {}, count = count }
+
+	for index: number = 1, count do
+		local point: AimPoint = points[index]
+		aim.ups[index] = point.up
+		aim.sides[index] = point.side
+		aim.leads[index] = point.lead == true
+	end
+
+	return aim
+end
+
+--[[
     Starts anti-ESP with the game's checked tables, the server's world for
     each viewer's cleared eye, the states the server keeps by slot, and
     blocked, true when a ray from origin along direction meets an occluder.
@@ -236,12 +269,14 @@ function AntiEsp.start(
 	end
 
 	local server: ServerSettings = settings.server
-	local rays: number = server.antiEsp.rays
-	local lyingRays: number = server.sleepers.rays
+	local aims: { [Posture]: Aim } = {
+		Stand = aimOf("Stand", server.antiEsp.aim.Stand),
+		Crouch = aimOf("Crouch", server.antiEsp.aim.Crouch),
+		Downed = aimOf("Downed", server.antiEsp.aim.Downed),
+	}
 
-	if rays > PLAYER_RAYS then
-		error(`server.antiEsp.rays is at most the {PLAYER_RAYS} rays a player pair's test has, not {rays}`, 2)
-	elseif lyingRays > LYING_RAYS then
+	local lyingRays: number = server.sleepers.rays
+	if lyingRays > LYING_RAYS then
 		error(`server.sleepers.rays is at most the {LYING_RAYS} rays a sleeper's test has, not {lyingRays}`, 2)
 	end
 
@@ -250,7 +285,7 @@ function AntiEsp.start(
 	Bodies = states
 	Blocked = blocked
 
-	PlayerRays = rays
+	Aims = aims
 	LyingRays = lyingRays
 	LookAheadMin = server.antiEsp.lookAheadMin
 	LookAheadMax = server.antiEsp.lookAheadMax
@@ -896,40 +931,57 @@ local function anyOpen(count: number): boolean
 end
 
 --[[
-    A player pair's rays from the eye: to the target's head and its hull's
-    center, to that center pushed either way across the line by the hull
-    radius and how far the target moves over the look-ahead, and from the
-    eye moved by the viewer's velocity to the center moved by the target's
+    Fills this test's rays from an eye to a player target's aim points for
+    its posture, a swimming body taking a crouched one's as its hull does,
+    and gives how many. Each ends side studs to the viewer's right of the
+    feet raised by up, pushed further out along its side by how far the
+    target moves over the look-ahead, and the leading point's ray runs from
+    the eye moved by drift to its end moved by the target's velocity
 --]]
 
-local function playerOpen(sight: Sight, target: State, settings: Settings): boolean
-	local eye: vector = sight.eye
-	local lookAhead: number = sight.lookAhead
-	local feet: vector = target.position
-	local center: vector = vector.create(feet.x, feet.y + Hulls.height(target, settings) / 2, feet.z)
-	local toward: vector = center - eye
-	local level: number = math.sqrt(toward.x * toward.x + toward.z * toward.z)
-
-	local across: vector = ACROSS
-	if level > 0 then
-		across = vector.create(toward.z / level, 0, -toward.x / level)
+local function aimRays(eye: vector, drift: vector, lookAhead: number, target: State): number
+	local posture: Posture = target.posture
+	if posture == "Stand" and target.mode == "Swim" then
+		posture = "Crouch"
 	end
 
-	local push: vector = across * (settings.radius + vector.magnitude(target.velocity) * lookAhead)
-	local moved: vector = eye + sight.drift
+	local points: Aim = Aims[posture]
+	local feet: vector = target.position
+	local velocity: vector = target.velocity
+	local reach: number = vector.magnitude(velocity) * lookAhead
+	local moved: vector = eye + drift
 
-	Origins[1] = eye
-	Ends[1] = vector.create(feet.x, feet.y + target.eyeHeight, feet.z)
-	Origins[2] = eye
-	Ends[2] = center
-	Origins[3] = eye
-	Ends[3] = center + push
-	Origins[4] = eye
-	Ends[4] = center - push
-	Origins[5] = moved
-	Ends[5] = center + target.velocity * lookAhead
+	-- Level across the line to the target, the same to its feet as to its hull's center straight above them
+	local x: number = feet.x - eye.x
+	local z: number = feet.z - eye.z
+	local level: number = math.sqrt(x * x + z * z)
 
-	return anyOpen(PlayerRays)
+	local right: vector = ACROSS
+	if level > 0 then
+		right = vector.create(-z / level, 0, x / level)
+	end
+
+	for index: number = 1, points.count do
+		local side: number = points.sides[index]
+		side += math.sign(side) * reach
+
+		local finish: vector =
+			vector.create(feet.x + right.x * side, feet.y + points.ups[index], feet.z + right.z * side)
+		if points.leads[index] then
+			Origins[index] = moved
+			Ends[index] = finish + velocity * lookAhead
+		else
+			Origins[index] = eye
+			Ends[index] = finish
+		end
+	end
+
+	return points.count
+end
+
+-- Whether any of a player pair's rays from the viewer's eye this slice meets no occluder
+local function playerOpen(sight: Sight, target: State): boolean
+	return anyOpen(aimRays(sight.eye, sight.drift, sight.lookAhead, target))
 end
 
 --[[
@@ -982,7 +1034,7 @@ local function test(pair: number, world: World, now: number)
 		unlink(pair)
 		join(pair, groupFor(index, sight, now))
 	else
-		open = playerOpen(sight, target, world.settings)
+		open = playerOpen(sight, target)
 	end
 
 	Tests += 1
@@ -1258,6 +1310,25 @@ end
 
 function AntiEsp.counts(): (number, number, number)
 	return Tests, HiddenResults, FailOpens
+end
+
+--[[
+    Writes the points a player pair's rays from an eye aim at on a target,
+    for its posture with no look-ahead, into into's first entries, and
+    gives how many it wrote
+--]]
+
+function AntiEsp.aimPoints(eye: vector, target: State, into: { vector }): number
+	if not Started then
+		error("AntiEsp.aimPoints ran before AntiEsp.start", 2)
+	end
+
+	local count: number = aimRays(eye, vector.zero, 0, target)
+	for index: number = 1, count do
+		into[index] = Ends[index]
+	end
+
+	return count
 end
 
 return AntiEsp

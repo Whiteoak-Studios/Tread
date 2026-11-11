@@ -1,7 +1,7 @@
 --[[
     The dev place's client: starts Tread's client as a game does, with the
     dev game's shared table and Frontier Zero's client settings, then its
-    kit, shooter, elevator, input, camera, render key, prompt, G2 and replay
+    kit, shooter, elevator, input, camera, keys, prompt, G2, replay and panel
 --]]
 
 --!strict
@@ -21,6 +21,7 @@ local Config = require(script.Config)
 local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
 local Exploits = require(script.Exploits)
 local Input = require(script.Input)
+local Live = require(script.Live)
 local Replay = require(script.Replay)
 local Rig = require(script.Rig)
 local Shots = require(script.Shots)
@@ -37,7 +38,8 @@ local RENDER_DISTANCES: { number } = Config.render.distances
 local RENDER_TEXT: string = Config.render.text
 local RENDER_WAIT: number = Config.render.wait
 
-local input = Input.new()
+-- The look holds while the live panel shows, since the mouse is free then to click it
+local input = Input.new(Live.open)
 
 -- The shoulder view's cast meets the same parts the dev game's collision does
 local include: { Instance }? = Shared.collision.include
@@ -254,9 +256,10 @@ RunService.PreRender:Connect(function (dt: number)
 	local eye: Vector3, look: Vector3 = client:getEye()
 	Camera.CFrame = CFrame.lookAlong(view:frame(dt, eye, look), look)
 
-	-- Set every frame rather than once, so a lock anything else lets go of comes back
+	-- Set every frame rather than once, so a lock anything else lets go of comes back, and free while the live panel
+	-- shows, so its buttons and report can be clicked
 	if UserInputService.MouseEnabled then
-		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+		UserInputService.MouseBehavior = Live.open() and Enum.MouseBehavior.Default or Enum.MouseBehavior.LockCenter
 	end
 
 	-- Shown exactly while a jump press now would start a mantle
@@ -299,8 +302,10 @@ client:onCorrected(function (size: number, flagged: boolean)
 end)
 
 -- Last, since each waits at boot for the PlayerGui, the input on a touch screen alone. The replay is held for the
--- client session, and its destroy is what would disconnect its listener and keys
+-- client session, and its destroy is what would disconnect its listener and keys. The live panel's listeners and keys
+-- live for the client session
 input:start()
 mantle = prompt()
 render = renderLabel(renderDistance)
 replay = Replay.new(client, Shared)
+Live.start()

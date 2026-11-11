@@ -1,7 +1,7 @@
 --[[
     G8's late reveals: what each observed viewer holds, rebuilt from the
-    relay tap, an exact eye-to-hull test of each enemy it doesn't, episodes
-    counted two ways, and the doorway and window check
+    relay tap, each enemy it doesn't tested at anti-ESP's body points and
+    its hull's, episodes counted two ways, and the doorway and window check
 --]]
 
 --!strict
@@ -23,6 +23,7 @@ local AntiEsp = require(Packages.Tread.Server.AntiEsp)
 
 local VIEWERS: number = require(ServerScriptService.Server.Config.Reveals).viewers
 local GROUP: string = require(ServerScriptService.Server.Config.Reveals).group
+local BODY: { string } = require(ServerScriptService.Server.Config.Reveals).body
 local INSET: number = require(ServerScriptService.Server.Config.Reveals).inset
 local GRACE: number = require(ServerScriptService.Server.Config.Reveals).grace
 local OpeningsConfig = require(ServerScriptService.Server.Config.Reveals).openings
@@ -49,6 +50,10 @@ local FOLDER: string = "Openings" -- The folder the check lays its platforms in
 local OPENINGS_GROUP: string = "openings" -- What the fleet's entries call the check's bots
 local SEPARATOR: string = "; " -- Between the parts of one line
 local CENTER: number = 1 -- The hull's center, the first of its points
+local BODY_SET: string = "body" -- The points anti-ESP aims at, which G8's line counts
+local HULL_SET: string = "hull" -- The hull's center and corners
+local HULL_ONLY: string = "hull only" -- The summary's group of hull reveals that began with no body point open
+local GROUPS: { string } = { BODY_SET, HULL_SET, HULL_ONLY } -- In the order the summary prints them
 local READINGS: { string } = { "lenient", "strict" } -- Each reading, in the order the summary prints them
 local LEVELS: { number } = { 1, -1 } -- The corners' shares up the hull, the top four first, as the summary groups them
 
@@ -77,31 +82,43 @@ export type Blocked = (origin: vector, direction: vector) -> boolean
 -- How far a cast from origin along direction, its whole length, gets before it meets the world
 export type Free = (origin: Vector3, direction: Vector3) -> number
 
--- One episode of a target visible to a viewer that isn't sent it
+-- The fields of the step's state AntiEsp.aimPoints reads, which the harness fills from a public state
+export type Aimed = {
+	position: vector, -- The feet
+	velocity: vector,
+	posture: Tread.Posture,
+	mode: Tread.Mode,
+}
+
+-- One episode of a target visible to a viewer that isn't sent it, under one set of points
 export type Episode = {
+	set: string, -- body or hull
 	reading: string, -- lenient or strict
 	viewer: string,
 	target: string,
 	real: boolean, -- Whether the viewer is a real player
 	distance: number, -- Studs from the viewer's eye to the target's hull center at its start
-	point: number, -- The index in POINTS of the point whose ray opened at its start
+	point: number, -- The index in its set of the point whose ray opened at its start
 	height: number, -- That point's height over the target's feet, in studs
 	speed: number, -- The target's speed across the ground at its start, in studs a second
 	start: number, -- The relay tick it began on
 	length: number, -- Relay ticks it lasted
 	reason: string, -- Anti-ESP's reason for the pair at its start
+	hullOnly: boolean, -- A hull episode that began with no body point open
 }
 
--- One tick's look at a pair, which the harness refills for each
+-- One tick's look at a pair under one set, which the harness refills for each
 export type Sighting = {
+	set: string, -- body or hull, which a refill never changes
 	tick: number,
 	sent: boolean,
 	visible: boolean, -- Read only while unsent
 	distance: number, -- Read only while visible and unsent, as is each field after it
-	point: number, -- The index in POINTS of the first point whose ray was open
+	point: number, -- The index in its set of the first point whose ray was open
 	height: number, -- That point's height over the target's feet, in studs
 	speed: number, -- The target's speed across the ground, in studs a second
 	reason: string,
+	hullOnly: boolean, -- A hull sighting with no body point open on its tick
 }
 
 -- What one viewer and one target's life keep from tick to tick
@@ -143,7 +160,8 @@ type Watch = {
 	real: boolean,
 	character: () -> Tread.Character?, -- Read each tick, since a real player's may change
 	held: Held,
-	pairs: { [number]: Pair }, -- By the target's id
+	bodies: { [number]: Pair }, -- The body set's, by the target's id
+	hulls: { [number]: Pair }, -- The hull set's
 	stop: () -> (),
 }
 
@@ -156,10 +174,15 @@ type Opening = {
 	key: Key?,
 	held: Held,
 	stop: (() -> ())?,
-	seen: boolean, -- Whether the exact test ever found its target visible
+	seen: boolean, -- Whether the body set ever found its target visible
 	failed: boolean, -- Whether it ever did while the viewer wasn't sent it
+	hullFailed: boolean, -- Whether the hull set ever did
 	failOpens: number, -- Ticks the pair was sent by failing open
 }
+
+-- One test's aim ends, and the fields of its target's step state that AntiEsp.aimPoints reads, refilled by each test
+local Ends: { vector } = {}
+local AimTarget: Aimed = { position = vector.zero, velocity = vector.zero, posture = "Stand", mode = "Ground" }
 
 local Reveals = {}
 
@@ -200,7 +223,7 @@ function Reveals.apply(held: Held, frame: { [string]: any })
 end
 
 --[[
-    The exact test: rays from the eye to the hull's center and then its
+    The hull set's test: rays from the eye to the hull's center and then its
     eight corners, each pulled inset studs inside, and whether one was open,
     with the rays cast, the test stopping at the first open one, so a
     visible hull's count is its open point's index in POINTS
@@ -220,6 +243,67 @@ function Reveals.visible(eye: Vector3, box: Tread.Box, blocked: Blocked, inset: 
 	return false, #POINTS
 end
 
+--[[
+    The body set's test: rays from the eye to the first count aim ends, and
+    whether one was open, with the rays cast, the test stopping at the first
+    open one, so a visible body's count is its open point's index
+--]]
+
+function Reveals.bodyVisible(eye: vector, ends: { vector }, count: number, blocked: Blocked): (boolean, number)
+	for index: number = 1, count do
+		if not blocked(eye, ends[index] - eye) then
+			return true, index
+		end
+	end
+
+	return false, count
+end
+
+-- Fills in place the fields of the step's state AntiEsp.aimPoints reads from a public state
+function Reveals.adapt(into: Aimed, state: Tread.State)
+	into.position = Engine.toVector(state.root)
+	into.velocity = Engine.toVector(state.velocity)
+	into.posture = state.posture
+	into.mode = state.mode
+end
+
+--[[
+    Tests an unsent target from a viewer's eye on both sets and refills each
+    set's sighting with what it found: the body set at the points anti-ESP
+    aims at for the pair with no look-ahead, and the hull set at its
+    standing box, a hull sighting hull only while no body point is open
+--]]
+
+function Reveals.sight(body: Sighting, hull: Sighting, eye: Vector3, target: Tread.State, blocked: Blocked)
+	local from: vector = Engine.toVector(eye)
+	Reveals.adapt(AimTarget, target)
+
+	-- A cast, since the step's state has fields aimPoints never reads
+	local count: number = AntiEsp.aimPoints(from, AimTarget :: any, Ends)
+	local bodyOpen: boolean, bodyPoint: number = Reveals.bodyVisible(from, Ends, count, blocked)
+
+	local box: Tread.Box = target.standingBox
+	local hullOpen: boolean, hullPoint: number = Reveals.visible(eye, box, blocked, INSET)
+	local half: number = box.size.Y / 2 -- The box stands on the feet, its center half its height up
+
+	local velocity: Vector3 = target.velocity
+	local distance: number = (target.hullCenter - eye).Magnitude
+	local speed: number = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+
+	body.visible = bodyOpen
+	body.distance = distance
+	body.point = bodyPoint
+	body.height = Ends[bodyPoint].y - AimTarget.position.y
+	body.speed = speed
+
+	hull.visible = hullOpen
+	hull.distance = distance
+	hull.point = hullPoint
+	hull.height = half + (half - INSET) * POINTS[hullPoint].Y
+	hull.speed = speed
+	hull.hullOnly = not bodyOpen
+end
+
 -- A pair before its first tick
 function Reveals.pair(): Pair
 	return {
@@ -227,6 +311,22 @@ function Reveals.pair(): Pair
 		opening = nil,
 		lenient = nil,
 		strict = nil,
+	}
+end
+
+-- A set's sighting before its first tick, which the harness refills for every pair
+function Reveals.sighting(set: string): Sighting
+	return {
+		set = set,
+		tick = 0,
+		sent = false,
+		visible = false,
+		distance = 0,
+		point = 0,
+		height = 0,
+		speed = 0,
+		reason = "",
+		hullOnly = false,
 	}
 end
 
@@ -240,6 +340,7 @@ local function begin(
 	from: Sighting
 ): Episode
 	local episode: Episode = {
+		set = from.set,
 		reading = reading,
 		viewer = viewer,
 		target = target,
@@ -251,6 +352,7 @@ local function begin(
 		start = from.tick,
 		length = 1,
 		reason = from.reason,
+		hullOnly = from.hullOnly,
 	}
 
 	table.insert(found, episode)
@@ -395,9 +497,16 @@ local function sum(samples: { number }): number
 	return total
 end
 
--- A point's plain name: the center, or a corner by its height, then front or back along the facing, then its side
-local function nameOf(index: number): string
-	if index == CENTER then
+--[[
+    A point's plain name in its set: a body point by its configured name,
+    and of the hull the center, or a corner by its height, then front or
+    back along the facing, then its side
+--]]
+
+local function nameOf(set: string, index: number): string
+	if set == BODY_SET then
+		return BODY[index]
+	elseif index == CENTER then
 		return "center"
 	end
 
@@ -409,39 +518,62 @@ local function nameOf(index: number): string
 	return `{height} {depth} {side}`
 end
 
--- An episode's line, as each prints, ending with the point that opened it and the target's speed across the ground
+--[[
+    An episode's line, as each prints, naming its set and the point that
+    opened it, for a hull episode whether a body point was open as it began,
+    and ending with the target's speed across the ground
+--]]
+
 function Reveals.describe(episode: Episode): string
 	local who: string = `{episode.viewer} saw {episode.target}`
 	local measure: string = string.format("%.1f studs away for %d relay ticks", episode.distance, episode.length)
 	local since: string = `from tick {episode.start}, anti-ESP's reason {episode.reason}`
-	local name: string = nameOf(episode.point)
+	local name: string = nameOf(episode.set, episode.point)
 	local opened: string = string.format("opened at point %d (%s, %.2f studs up)", episode.point, name, episode.height)
 	local speed: string = string.format("horizontal speed %.1f studs/s", episode.speed)
 
-	return `G8 {episode.reading} late reveal: {who} {measure} {since}, {opened}, {speed}`
+	if episode.set == HULL_SET then
+		local body: string = episode.hullOnly and HULL_ONLY or "a body point open too"
+		opened = `{opened}, {body}`
+	end
+
+	return `G8 {episode.set} {episode.reading} late reveal: {who} {measure} {since}, {opened}, {speed}`
 end
 
 --[[
     One line of a window's late reveals by the point whose ray opened each,
-    under each reading: the center, then the four top corners and the four
-    bottom corners, each group with its total
+    each set by its own points under each reading: the body set's by name,
+    then the hull's center, its four top corners and its four bottom
+    corners, each corner group with its total
 --]]
 
 function Reveals.byPoint(episodes: { Episode }): string
-	local tallies: { [string]: { number } } = {}
+	local tallies: { [string]: { [string]: { number } } } = { [BODY_SET] = {}, [HULL_SET] = {} }
 	for _, reading: string in READINGS do
-		tallies[reading] = table.create(#POINTS, 0)
+		tallies[BODY_SET][reading] = table.create(#BODY, 0)
+		tallies[HULL_SET][reading] = table.create(#POINTS, 0)
 	end
 
 	for _, episode: Episode in episodes do
-		local tally: { number } = tallies[episode.reading]
+		local tally: { number } = tallies[episode.set][episode.reading]
 		tally[episode.point] += 1
 	end
 
-	local readings: { string } = {}
+	local lines: { string } = {}
 	for _, reading: string in READINGS do
-		local tally: { number } = tallies[reading]
-		local groups: { string } = { `{reading} center {tally[CENTER]}` }
+		local tally: { number } = tallies[BODY_SET][reading]
+		local points: { string } = {}
+
+		for index: number, name: string in BODY do
+			table.insert(points, `{name} {tally[index]}`)
+		end
+
+		table.insert(lines, `{BODY_SET} {reading} {table.concat(points, ", ")}`)
+	end
+
+	for _, reading: string in READINGS do
+		local tally: { number } = tallies[HULL_SET][reading]
+		local groups: { string } = { `{HULL_SET} {reading} center {tally[CENTER]}` }
 
 		for _, up: number in LEVELS do
 			local total: number = 0
@@ -450,7 +582,7 @@ function Reveals.byPoint(episodes: { Episode }): string
 			for index: number, share: Vector3 in POINTS do
 				if share.Y == up then
 					total += tally[index]
-					table.insert(corners, `{nameOf(index)} {tally[index]}`)
+					table.insert(corners, `{nameOf(HULL_SET, index)} {tally[index]}`)
 				end
 			end
 
@@ -458,10 +590,10 @@ function Reveals.byPoint(episodes: { Episode }): string
 			table.insert(groups, `{group} corners {total} ({table.concat(corners, ", ")})`)
 		end
 
-		table.insert(readings, table.concat(groups, ", "))
+		table.insert(lines, table.concat(groups, ", "))
 	end
 
-	return `G8 late reveals by the point that opened them: {table.concat(readings, SEPARATOR)}`
+	return `G8 late reveals by the point that opened them: {table.concat(lines, SEPARATOR)}`
 end
 
 -- Late reveals a viewer-hour, a dash with no time watched
@@ -473,13 +605,85 @@ local function rate(count: number, hours: number): string
 	return string.format("%.2f", count / hours)
 end
 
+-- Every group's count under each reading, each at zero
+local function zeroCounts(): { [string]: { [string]: number } }
+	local counts: { [string]: { [string]: number } } = {}
+	for _, group: string in GROUPS do
+		counts[group] = { lenient = 0, strict = 0 }
+	end
+
+	return counts
+end
+
+-- Counts an episode under its set, and under the hull-only group too when it is one
+local function countInto(counts: { [string]: { [string]: number } }, episode: Episode)
+	counts[episode.set][episode.reading] += 1
+
+	if episode.hullOnly then
+		counts[HULL_ONLY][episode.reading] += 1
+	end
+end
+
+--[[
+    The summary line's counts, each group's under each reading: the body
+    set's first, which G8's line reads, then the hull set's and the
+    hull-only reveals', each for every viewer, real players alone and every
+    seed so far
+
+    @ hours | the window's viewer-hours, realHours its real players' and pooledHours every seed's so far
+--]]
+
+function Reveals.counts(
+	found: { Episode },
+	pooled: { Episode },
+	hours: number,
+	realHours: number,
+	pooledHours: number
+): string
+	local window: { [string]: { [string]: number } } = zeroCounts()
+	local real: { [string]: { [string]: number } } = zeroCounts()
+	local seeds: { [string]: { [string]: number } } = zeroCounts()
+
+	for _, episode: Episode in found do
+		countInto(window, episode)
+
+		if episode.real then
+			countInto(real, episode)
+		end
+	end
+
+	for _, episode: Episode in pooled do
+		countInto(seeds, episode)
+	end
+
+	local parts: { string } = {}
+	for _, group: string in GROUPS do
+		local all: { [string]: number } = window[group]
+		local players: { [string]: number } = real[group]
+		local every: { [string]: number } = seeds[group]
+
+		local lenient: string = `lenient {all.lenient} ({rate(all.lenient, hours)} a viewer-hour)`
+		local strict: string = `strict {all.strict} ({rate(all.strict, hours)} a viewer-hour)`
+		local realLenient: string = `lenient {players.lenient} ({rate(players.lenient, realHours)})`
+		local realStrict: string = `strict {players.strict} ({rate(players.strict, realHours)})`
+		local pooledLenient: string = `lenient {rate(every.lenient, pooledHours)}`
+		local pooledStrict: string = `strict {rate(every.strict, pooledHours)}`
+
+		table.insert(parts, `{group} {lenient}, {strict}`)
+		table.insert(parts, `real players alone {group} {realLenient}, {realStrict} a viewer-hour`)
+		table.insert(parts, `every seed so far {group} {pooledLenient}, {pooledStrict} a viewer-hour`)
+	end
+
+	return table.concat(parts, SEPARATOR)
+end
+
 --[[
     The G8 load's probe: from its start every real player with a character
     and the first bots of the configured group are observed, each tick's
-    unsent enemies within relevancy tested exactly, and its stop prints
-    every episode and a line of them by the point that opened each, and
-    gives the rates, anti-ESP's frame cost and the harness's own. Totals
-    pool across the seeds it is started for
+    unsent enemies within relevancy tested on both sets, and its stop
+    prints every episode and a line of them by the point that opened each,
+    and gives each set's rates, anti-ESP's frame cost and the harness's
+    own. Totals pool across the seeds it is started for
 --]]
 
 function Reveals.probe(): Probe
@@ -492,8 +696,8 @@ function Reveals.probe(): Probe
 
 	local watches: { Watch } = {}
 	local found: { Episode } = {}
-	local seen: Sighting =
-		{ tick = 0, sent = false, visible = false, distance = 0, point = 0, height = 0, speed = 0, reason = "" }
+	local bodySeen: Sighting = Reveals.sighting(BODY_SET)
+	local hullSeen: Sighting = Reveals.sighting(HULL_SET)
 	local began: number = 0
 	local cost: number = 0 -- Seconds the sinks took
 	local ticks: number = 0 -- Relay ticks they ran on
@@ -504,7 +708,7 @@ function Reveals.probe(): Probe
 	local pooledFound: { Episode } = {}
 	local pooledHours: number = 0
 
-	-- One viewer's tick: each enemy player within relevancy it isn't sent, tested exactly from its cleared eye
+	-- One viewer's tick: each enemy player within relevancy it isn't sent, tested on both sets from its cleared eye
 	local function look(watch: Watch, tick: number)
 		local viewer: Tread.Character? = watch.character()
 		if not viewer then
@@ -532,35 +736,36 @@ function Reveals.probe(): Probe
 			local targetState: Tread.State = character:getState()
 
 			if (targetState.root - root).Magnitude > enter then
-				watch.pairs[id] = nil
+				watch.bodies[id] = nil
+				watch.hulls[id] = nil
 				continue
 			end
 
-			local pair: Pair = watch.pairs[id] or Reveals.pair()
-			watch.pairs[id] = pair
+			local body: Pair = watch.bodies[id] or Reveals.pair()
+			local hull: Pair = watch.hulls[id] or Reveals.pair()
+			watch.bodies[id] = body
+			watch.hulls[id] = hull
 
-			seen.tick = tick
-			seen.sent = watch.held[slot] == generation
-			seen.visible = false
+			local sent: boolean = watch.held[slot] == generation
+			bodySeen.tick = tick
+			bodySeen.sent = sent
+			bodySeen.visible = false
+			hullSeen.tick = tick
+			hullSeen.sent = sent
+			hullSeen.visible = false
 
-			if not seen.sent then
-				local box: Tread.Box = targetState.standingBox
-				local visible: boolean, point: number = Reveals.visible(eye, box, blocked, INSET)
-				seen.visible = visible
+			if not sent then
+				Reveals.sight(bodySeen, hullSeen, eye, targetState, blocked)
 
-				if visible then
-					local velocity: Vector3 = targetState.velocity
-					local half: number = box.size.Y / 2 -- The box stands on the feet, its center half its height up
-
-					seen.distance = (targetState.hullCenter - eye).Magnitude
-					seen.point = point
-					seen.height = half + (half - INSET) * POINTS[point].Y
-					seen.speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
-					seen.reason = AntiEsp.reason(watch.key, slot)
+				if bodySeen.visible or hullSeen.visible then
+					local reason: string = AntiEsp.reason(watch.key, slot)
+					bodySeen.reason = reason
+					hullSeen.reason = reason
 				end
 			end
 
-			Reveals.track(pair, seen, GRACE, found, watch.name, owner.Name, watch.real)
+			Reveals.track(body, bodySeen, GRACE, found, watch.name, owner.Name, watch.real)
+			Reveals.track(hull, hullSeen, GRACE, found, watch.name, owner.Name, watch.real)
 		end
 	end
 
@@ -571,7 +776,8 @@ function Reveals.probe(): Probe
 			real = real,
 			character = character,
 			held = {},
-			pairs = {},
+			bodies = {},
+			hulls = {},
 			stop = function () end,
 		}
 
@@ -642,24 +848,12 @@ function Reveals.probe(): Probe
 		local realHours: number = real * seconds / SECONDS_PER_HOUR
 		pooledHours += viewerHours
 
-		local counts: { [string]: number } = { lenient = 0, strict = 0 }
-		local realCounts: { [string]: number } = { lenient = 0, strict = 0 }
 		for _, episode: Episode in found do
 			print(Reveals.describe(episode))
 			table.insert(pooledFound, episode)
-			counts[episode.reading] += 1
-
-			if episode.real then
-				realCounts[episode.reading] += 1
-			end
 		end
 
 		print(Reveals.byPoint(found))
-
-		local pooled: { [string]: number } = { lenient = 0, strict = 0 }
-		for _, episode: Episode in pooledFound do
-			pooled[episode.reading] += 1
-		end
 
 		local p95s: { number } = samples.antiEspP95Ms or {}
 		local worst: number = percentile(p95s, WORST)
@@ -671,18 +865,10 @@ function Reveals.probe(): Probe
 
 		local watched: string =
 			string.format("%d viewers (%d real) over %.2f viewer-hours", #watches, real, viewerHours)
-		local lenient: string = `lenient {counts.lenient} ({rate(counts.lenient, viewerHours)} a viewer-hour)`
-		local strict: string = `strict {counts.strict} ({rate(counts.strict, viewerHours)} a viewer-hour)`
-		local realLenient: string = `lenient {realCounts.lenient} ({rate(realCounts.lenient, realHours)})`
-		local realStrict: string = `strict {realCounts.strict} ({rate(realCounts.strict, realHours)})`
-		local pooledLenient: string = `lenient {rate(pooled.lenient, pooledHours)}`
-		local pooledStrict: string = `strict {rate(pooled.strict, pooledHours)}`
 
 		local parts: { string } = {
 			watched,
-			`{lenient}, {strict}`,
-			`real players alone {realLenient}, {realStrict} a viewer-hour`,
-			`every seed so far {pooledLenient}, {pooledStrict} a viewer-hour`,
+			Reveals.counts(found, pooledFound, viewerHours, realHours, pooledHours),
 			frameCost,
 			failOpens,
 			harness,
@@ -741,9 +927,10 @@ end
     The doorway and window check: a target bot just inside each marker and
     a viewer bot out along its opening's axis, both idle on laid platforms,
     in batches, each viewer's sink connected as it is built. A marker fails
-    when the exact test finds its target visible at a tick of the batch's
-    hold while its viewer isn't sent it, and one never seen is unplaced. It
-    passes when it ran cleanly and judges no gate
+    when the body set finds its target visible at a tick of the batch's
+    hold while its viewer isn't sent it, those only the hull set would fail
+    count beside, and one the body set never sees is unplaced. It passes
+    when it ran cleanly and judges no gate
 --]]
 
 function Reveals.openings(limit: number?): (boolean, string)
@@ -815,6 +1002,7 @@ function Reveals.openings(limit: number?): (boolean, string)
 			stop = nil,
 			seen = false,
 			failed = false,
+			hullFailed = false,
 			failOpens = 0,
 		})
 	end
@@ -826,8 +1014,10 @@ function Reveals.openings(limit: number?): (boolean, string)
 
 	local holding: boolean = false
 	local problems: { string } = {}
+	local bodySeen: Sighting = Reveals.sighting(BODY_SET)
+	local hullSeen: Sighting = Reveals.sighting(HULL_SET)
 
-	-- One relay tick of an opening's viewer: its hold set, and while the batch holds, its target tested
+	-- One relay tick of an opening's viewer: its hold set, and while the batch holds, its target tested on both sets
 	local function sink(opening: Opening, data: buffer)
 		Reveals.apply(opening.held, Tread.decode(VERSION, "tap", data))
 
@@ -839,13 +1029,15 @@ function Reveals.openings(limit: number?): (boolean, string)
 		end
 
 		local slot: number, generation: number = lifeOf(target)
-		local box: Tread.Box = target:getState().standingBox
-		local visible: boolean, _: number = Reveals.visible(viewer:getState().eye, box, blocked, INSET)
+		local unsent: boolean = opening.held[slot] ~= generation
+		Reveals.sight(bodySeen, hullSeen, viewer:getState().eye, target:getState(), blocked)
 
-		if visible then
+		if bodySeen.visible then
 			opening.seen = true
-			opening.failed = opening.failed or opening.held[slot] ~= generation
+			opening.failed = opening.failed or unsent
 		end
+
+		opening.hullFailed = opening.hullFailed or (hullSeen.visible and unsent)
 
 		if AntiEsp.reason(key, slot) == "FailOpen" then
 			opening.failOpens += 1
@@ -935,6 +1127,7 @@ function Reveals.openings(limit: number?): (boolean, string)
 
 	local failed: { string } = {}
 	local unplaced: { string } = {}
+	local hullOnly: number = 0 -- Markers only the hull set would have failed
 	local failOpens: number = 0
 	for _, opening: Opening in openings do
 		failOpens += opening.failOpens
@@ -944,11 +1137,16 @@ function Reveals.openings(limit: number?): (boolean, string)
 		elseif not opening.seen then
 			table.insert(unplaced, opening.marker:GetFullName())
 		end
+
+		if opening.hullFailed and not opening.failed then
+			hullOnly += 1
+		end
 	end
 
 	local parts: { string } = {
 		`{#openings} of {#all} markers`,
 		`{#failed} failed {table.concat(failed, ", ")}`,
+		`{hullOnly} only the hull set would have failed`,
 		`{#unplaced} unplaced {table.concat(unplaced, ", ")}`,
 		`{failOpens} fail-open ticks`,
 	}

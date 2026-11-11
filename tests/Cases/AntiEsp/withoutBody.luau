@@ -26,8 +26,10 @@ return function (): (boolean, string | nil)
 
 	harness:slice(0)
 
-	if #harness.rays ~= 5 then
-		return false, `The bodiless viewer's test cast {#harness.rays} rays, not 5`
+	-- The leading point's ray too, since a viewer with no body has no move to lead with
+	local rays: number = #harness.server.antiEsp.aim.Stand
+	if #harness.rays ~= rays then
+		return false, `The bodiless viewer's test cast {#harness.rays} rays, not {rays}`
 	end
 
 	for index: number, ray: any in harness.rays do

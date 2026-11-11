@@ -37,7 +37,7 @@ return function (): (boolean, string | nil)
 
 	if AntiEsp.isHidden(viewer, friend) then
 		return false, "A teammate behind walls was hidden"
-	elseif harness:endingAt(vector.create(0, harness.shared.step.eyeStanding, -20)) ~= 0 then
+	elseif harness:endingAt(vector.create(0, harness.server.antiEsp.aim.Stand[1].up, -20)) ~= 0 then
 		return false, "A teammate was ray-tested"
 	elseif not AntiEsp.isHidden(viewer, enemy) or not AntiEsp.isHidden(viewer, loner) then
 		return false, "An enemy on another team or none was not hidden behind walls"

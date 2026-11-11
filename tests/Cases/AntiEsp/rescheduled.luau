@@ -21,6 +21,7 @@ return function (): (boolean, string | nil)
 
 	-- The module's own sum, so each recheck lands on its slice's time to the bit
 	local interval: number = 1 / harness.server.antiEsp.hiddenRate
+	local rays: number = #harness.server.antiEsp.aim.Stand
 	local first: number = 0 + interval
 	local after: number = MOVED + interval
 
@@ -45,7 +46,7 @@ return function (): (boolean, string | nil)
 
 		harness:slice(now)
 
-		if (#harness.rays == 5) ~= tested or (#harness.rays ~= 0 and #harness.rays ~= 5) then
+		if (#harness.rays == rays) ~= tested or (#harness.rays ~= 0 and #harness.rays ~= rays) then
 			return false, `The slice at {now} s cast {#harness.rays} rays, where a test was {tested}`
 		end
 	end

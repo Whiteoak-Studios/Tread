@@ -88,7 +88,7 @@ local CHANGE_DEPTH: number = 32 -- Relay ticks of records a client keeps a slot,
 local TAP_BLOCK_BYTES: number = 2 ^ 16 - 1 -- A tap frame's block, its every change expanded, up to its u16 length's top
 
 -- Anti-ESP's tests, whose ray tables are sized to the most rays each kind of pair casts
-local PLAYER_RAYS: number = 5 -- A player pair's: head, center, either side, and both ends moved
+local PLAYER_RAYS: number = 6 -- A player pair's: the head's top, either shoulder, the torso's center, either lower leg
 local LYING_RAYS: number = 3 -- A sleeper's or body's: its head, chest and feet
 
 -- Reliable traffic: the slot table and the death message

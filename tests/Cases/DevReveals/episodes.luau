@@ -82,7 +82,7 @@ return function (): (boolean, string | nil)
 	local held: { [number]: number } = {}
 	local pair: any = Reveals.pair()
 	local found: { any } = {}
-	local seen: any = { tick = 0, sent = false, visible = false, distance = 0, reason = "" }
+	local seen: any = Reveals.sighting("body")
 
 	for tick: number, step: Tick in SCRIPT do
 		Reveals.apply(held, frameOf(step.entry))
@@ -101,6 +101,8 @@ return function (): (boolean, string | nil)
 		return false, failure
 	elseif found[1].viewer ~= "Viewer" or found[1].target ~= "Target" or found[1].real ~= false then
 		return false, "An episode did not keep its viewer, target and whether the viewer is real"
+	elseif found[1].set ~= "body" then
+		return false, `An episode of the body set's sighting kept the set {found[1].set}`
 	end
 
 	-- A hide of another life leaves the stretch of the life held

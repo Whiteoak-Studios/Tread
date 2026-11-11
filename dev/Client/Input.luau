@@ -64,14 +64,21 @@ type Fields = {
 	_jump: InputObject?, -- The touch on the jump button
 	_ring: Frame?, -- The stick's ring and thumb, shown while it is touched
 	_thumb: Frame?,
+	_still: () -> boolean, -- Whether the look holds, so neither the mouse nor a drag turns it
 }
+
+-- The look's hold when none is given, which never holds it
+local function never(): boolean
+	return false
+end
 
 --[[
     Input at rest: no action held, the stick centered and the look level
-    along -Z
+    along -Z. The look holds while still says so, as the dev client's does
+    while the live panel frees the mouse to click it
 --]]
 
-function Input.new(): Self
+function Input.new(still: (() -> boolean)?): Self
 	local held: { [string]: boolean } = {}
 	for _, action: string in ACTIONS do
 		held[action] = false
@@ -90,6 +97,7 @@ function Input.new(): Self
 		_jump = nil :: InputObject?,
 		_ring = nil :: Frame?,
 		_thumb = nil :: Frame?,
+		_still = still or never,
 	}, Input)
 end
 
@@ -132,12 +140,17 @@ end
 
 --[[
     Turns the base look by a drag of so many pixels: right turns right, up
-    looks up, with the pitch held short of straight up or down
+    looks up, with the pitch held short of straight up or down. While the
+    look holds, it stays where it is
 
     @ rate | radians a pixel turns
 --]]
 
 function Input.turn(self: Self, dx: number, dy: number, rate: number)
+	if self._still() then
+		return
+	end
+
 	self._yaw = (self._yaw - dx * rate) % TURN
 	self._pitch = math.clamp(self._pitch - dy * rate, -PITCH_LIMIT, PITCH_LIMIT)
 end

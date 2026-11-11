@@ -43,7 +43,7 @@ return function (): (boolean, string | nil)
 	harness.states[first] = nil
 	harness:slice(0.6)
 
-	if harness:endingAt(vector.create(0, harness.shared.step.eyeStanding, -30)) ~= 0 then
+	if harness:endingAt(vector.create(0, harness.server.antiEsp.aim.Stand[1].up, -30)) ~= 0 then
 		return false, "A target gone from the states was ray-tested"
 	end
 

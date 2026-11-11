@@ -37,7 +37,7 @@ return function (): (boolean, string | nil)
 		{ path = "weights.cone", value = 0 },
 		{ path = "shotNear.seconds", value = -5 },
 		{ path = "budget.hard", value = nil },
-		{ path = "antiEsp.rays", value = 0 },
+		{ path = "antiEsp.aim", value = nil },
 		{ path = "antiEsp.slice", value = 0 },
 		{ path = "footsteps.range.crouch", value = 20 },
 		{ path = "footsteps.range.walk", value = 0 },

@@ -43,6 +43,8 @@ local beginReliable: (number) -> (number, buffer)
 local trimReliable: (number) -> ()
 local refuseReliable: (string) -> never
 
+local RUNREPORT_STATE: { "Refused" | "Running" | "Piece" | "Passed" | "Failed" } = { "Refused", "Running", "Piece", "Passed", "Failed" }
+
 local function readpress(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
 	if cursor + 1 > length then
 		error("press: truncated")
@@ -203,9 +205,60 @@ local function readplayed(player: (Player | Bot)?, packet: buffer, cursor: numbe
 	return runtime:deliver(4, player, cursor, sideCursor, time, bit32.btest(flags, 1))
 end
 
+local function readrun(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 1 > length then
+		error("run: truncated")
+	end
+
+	local nameLength: number = 1 + buffer.readu8(packet, cursor)
+
+	if nameLength > 32 then
+		error("run.name: length out of range")
+	end
+
+	cursor += 1
+
+	if cursor + nameLength > length then
+		error("run.name: truncated")
+	end
+
+	local name: string = buffer.readstring(packet, cursor, nameLength)
+	cursor += nameLength
+
+	return runtime:deliver(5, player, cursor, sideCursor, name)
+end
+
+local function writerunReport(state: "Refused" | "Running" | "Piece" | "Passed" | "Failed", text: string)
+	local offset: number, out: buffer = beginReliable(4004)
+	buffer.writeu8(out, offset, 4)
+	local flags: number = 0
+	local stateIndex: number = table.find(RUNREPORT_STATE, state) or 0
+
+	if stateIndex == 0 then
+		refuseReliable("runReport.state: expected enum { Refused, Running, Piece, Passed, Failed }")
+	end
+
+	flags += stateIndex - 1
+
+	if type(text) ~= "string" then
+		refuseReliable("runReport.text: expected string")
+	end
+
+	if #text > 4000 then
+		refuseReliable("runReport.text: length out of range")
+	end
+
+	buffer.writeu16(out, offset + 2, #text)
+	buffer.writeu8(out, offset + 1, flags)
+	offset += 4
+	buffer.writestring(out, offset, text)
+	offset += #text
+	trimReliable(offset)
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x0E43105F,
+	hash = 0x922FB784,
 	scope = "Dev",
 	side = "server",
 	idBytes = 1,
@@ -224,12 +277,14 @@ runtime = Volt.start({
 		[2] = { name = "corrected", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readcorrected },
 		[3] = { name = "shot", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readshot },
 		[4] = { name = "played", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readplayed },
+		[5] = { name = "run", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readrun },
 	},
 
 	outgoing = {
 		[1] = { name = "shoot", kind = "event", reliable = true, minBytes = 2, maxBytes = 2 },
 		[2] = { name = "report", kind = "event", reliable = true, minBytes = 8, maxBytes = 87 },
 		[3] = { name = "clip", kind = "event", reliable = true, minBytes = 6, maxBytes = 4102 },
+		[4] = { name = "runReport", kind = "event", reliable = true, minBytes = 4, maxBytes = 4004 },
 	},
 })
 
@@ -352,6 +407,40 @@ local Network = {
 		end,
 	}) :: ServerListener<(number, boolean)>,
 
+	run = table.freeze({
+		on = function (listener: (player: Player | Bot, name: string) -> ()): () -> ()
+			return runtime:on(5, listener)
+		end,
+
+		iter = function (): () -> (number, Player | Bot, string)
+			return runtime:iter(5)
+		end,
+	}) :: ServerListener<(string)>,
+
+	runReport = table.freeze({
+		fire = function (player: Player | Bot, state: "Refused" | "Running" | "Piece" | "Passed" | "Failed", text: string)
+			if (before[4] == nil or before[4](player, state, text)) and runtime:target(player) then
+				writerunReport(state, text)
+			end
+		end,
+
+		fireAll = function (state: "Refused" | "Running" | "Piece" | "Passed" | "Failed", text: string)
+			runtime:broadcast(4, nil, nil, writerunReport, state, text)
+		end,
+
+		fireList = function (players: { Player | Bot }, state: "Refused" | "Running" | "Piece" | "Passed" | "Failed", text: string)
+			runtime:broadcast(4, players, nil, writerunReport, state, text)
+		end,
+
+		fireExcept = function (player: Player | Bot, state: "Refused" | "Running" | "Piece" | "Passed" | "Failed", text: string)
+			runtime:broadcast(4, nil, player, writerunReport, state, text)
+		end,
+
+		fireSet = function (players: { [Player | Bot]: true }, state: "Refused" | "Running" | "Piece" | "Passed" | "Failed", text: string)
+			runtime:broadcast(4, players, nil, writerunReport, state, text)
+		end,
+	}) :: ServerEvent<("Refused" | "Running" | "Piece" | "Passed" | "Failed", string)>,
+
 	version = "0.1.0",
 
 	hooks = table.freeze({
@@ -404,6 +493,8 @@ Network.events = table.freeze({
 	["report"] = Network.report,
 	["clip"] = Network.clip,
 	["played"] = Network.played,
+	["run"] = Network.run,
+	["runReport"] = Network.runReport,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

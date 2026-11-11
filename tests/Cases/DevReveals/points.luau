@@ -1,7 +1,7 @@
 --[[
-    A late reveal keeps the point whose ray opened it, that point's height
-    and the target's speed from its first sighting, its line names them,
-    and a window's summary counts its episodes by the point that opened each
+    A hull late reveal keeps the point whose ray opened it, that point's
+    height, the target's speed and whether a body point was open from its
+    first sighting, its line names them, and a summary counts it by point
 --]]
 
 --!strict
@@ -22,20 +22,23 @@ local UNSENT: number = 2 -- The tick the target's unsent stretch and its run of 
 local LENIENT_POINTS: { number } = { 1, 4, 4, 9, 2 }
 local STRICT_POINTS: { number } = { 7, 7, 1 }
 
+local BODY_ZEROS: string = "head-top 0, left shoulder 0, right shoulder 0, torso 0, left lower leg 0, right lower leg 0"
+local BODY_LINE: string = `body lenient {BODY_ZEROS}; body strict {BODY_ZEROS}`
 local LENIENT_TOP: string = "top corners 3 (top front left 2, top back left 0, top front right 0, top back right 1)"
 local LENIENT_BOTTOM: string =
 	"bottom corners 1 (bottom front left 1, bottom back left 0, bottom front right 0, bottom back right 0)"
 local STRICT_TOP: string = "top corners 0 (top front left 0, top back left 0, top front right 0, top back right 0)"
 local STRICT_BOTTOM: string =
 	"bottom corners 2 (bottom front left 0, bottom back left 0, bottom front right 0, bottom back right 2)"
-local LENIENT_LINE: string = `lenient center 1, {LENIENT_TOP}, {LENIENT_BOTTOM}`
-local STRICT_LINE: string = `strict center 1, {STRICT_TOP}, {STRICT_BOTTOM}`
-local SUMMARY: string = `G8 late reveals by the point that opened them: {LENIENT_LINE}; {STRICT_LINE}`
+local LENIENT_LINE: string = `hull lenient center 1, {LENIENT_TOP}, {LENIENT_BOTTOM}`
+local STRICT_LINE: string = `hull strict center 1, {STRICT_TOP}, {STRICT_BOTTOM}`
+local SUMMARY: string = `G8 late reveals by the point that opened them: {BODY_LINE}; {LENIENT_LINE}; {STRICT_LINE}`
 local COUNT: string = " %d+" -- Each count in the summary, after its space
 
--- An episode as the summary reads it, with the rest its line needs
+-- A hull episode as the summary reads it, with the rest its line needs
 local function episodeAt(reading: string, point: number): { [string]: any }
 	return {
+		set = "hull",
 		reading = reading,
 		viewer = "Viewer",
 		target = "Target",
@@ -47,16 +50,26 @@ local function episodeAt(reading: string, point: number): { [string]: any }
 		start = 1,
 		length = 1,
 		reason = "Hidden",
+		hullOnly = false,
 	}
 end
 
--- Why an episode differs from the start, point, height and speed it should carry, or nil when it matches
-local function mismatch(episode: any, start: number, point: number, height: number, speed: number): string?
+-- Why an episode differs from the start, point, height, speed and hull-only mark it should carry, or nil
+local function mismatch(
+	episode: any,
+	start: number,
+	point: number,
+	height: number,
+	speed: number,
+	only: boolean
+): string?
 	if episode.start ~= start then
 		return `The {episode.reading} episode started at {episode.start}, not {start}`
 	elseif episode.point ~= point or episode.height ~= height or episode.speed ~= speed then
 		local carried: string = `point {episode.point}, {episode.height} studs up at {episode.speed} studs/s`
 		return `The {episode.reading} episode carried {carried}, not point {point}, {height} up at {speed}`
+	elseif episode.set ~= "hull" or episode.hullOnly ~= only then
+		return `The {episode.reading} episode was a {episode.set} one marked hull only {episode.hullOnly}, not {only}`
 	end
 
 	return nil
@@ -68,11 +81,11 @@ return function (): (boolean, string | nil)
 	local Reveals: any = loaded.require(server.Reveals)
 	local grace: number = loaded.require(server.Config.Reveals).grace
 
-	-- 1) Sent, then unsent and visible at once: at the top front left corner first, then the center until strict counts
+	-- 1) Sent, then unsent and visible at once: at the top front left corner first with no body point open, then
+	-- the center with one open until strict counts
 	local pair: any = Reveals.pair()
 	local found: { any } = {}
-	local seen: any =
-		{ tick = 0, sent = false, visible = false, distance = 0, point = 0, height = 0, speed = 0, reason = "" }
+	local seen: any = Reveals.sighting("hull")
 
 	local last: number = UNSENT + grace + 1
 	for tick: number = 1, last do
@@ -86,6 +99,7 @@ return function (): (boolean, string | nil)
 		seen.height = opening and OPENED_HEIGHT or LATER_HEIGHT
 		seen.speed = opening and OPENED_SPEED or LATER_SPEED
 		seen.reason = `R{tick}`
+		seen.hullOnly = opening
 
 		Reveals.track(pair, seen, grace, found, "Viewer", "Target", false)
 	end
@@ -104,17 +118,17 @@ return function (): (boolean, string | nil)
 	end
 
 	-- Lenient keeps its run's first sighting, strict the sighting it opened on
-	local failure: string? = mismatch(lenient, UNSENT, TOP_FRONT_LEFT, OPENED_HEIGHT, OPENED_SPEED)
-		or mismatch(strict, last, CENTER, LATER_HEIGHT, LATER_SPEED)
+	local failure: string? = mismatch(lenient, UNSENT, TOP_FRONT_LEFT, OPENED_HEIGHT, OPENED_SPEED, true)
+		or mismatch(strict, last, CENTER, LATER_HEIGHT, LATER_SPEED, false)
 
 	if failure then
 		return false, failure
 	end
 
-	-- 2) Its line names the point, its height and the speed
+	-- 2) Its line names the set, the point, its height, that it was hull only and the speed
 	local line: string = Reveals.describe(lenient)
-	local named: string = "opened at point 4 (top front left, 4.95 studs up), horizontal speed 18.0 studs/s"
-	if string.sub(line, -#named) ~= named then
+	local named: string = "opened at point 4 (top front left, 4.95 studs up), hull only, horizontal speed 18.0 studs/s"
+	if string.sub(line, -#named) ~= named or string.find(line, "G8 hull lenient late reveal: ", 1, true) ~= 1 then
 		return false, `The lenient episode printed "{line}", which does not end "{named}"`
 	end
 
@@ -122,8 +136,9 @@ return function (): (boolean, string | nil)
 	bottom.height = BOTTOM_HEIGHT
 
 	local corner: string = Reveals.describe(bottom)
-	if not string.find(corner, "opened at point 7 (bottom back right, 0.05 studs up)", 1, true) then
-		return false, `An episode opened at point 7 printed "{corner}"`
+	local cornerNamed: string = "opened at point 7 (bottom back right, 0.05 studs up), a body point open too"
+	if not string.find(corner, cornerNamed, 1, true) then
+		return false, `An episode opened at point 7 with a body point open printed "{corner}"`
 	end
 
 	local center: string = Reveals.describe(episodeAt("strict", CENTER))
@@ -131,7 +146,7 @@ return function (): (boolean, string | nil)
 		return false, `An episode opened at the center printed "{center}"`
 	end
 
-	-- 3) The summary counts a window's episodes by the point that opened each
+	-- 3) The summary counts a window's episodes by the point that opened each, each set by its own points
 	local episodes: { any } = {}
 	for _, point: number in LENIENT_POINTS do
 		table.insert(episodes, episodeAt("lenient", point))

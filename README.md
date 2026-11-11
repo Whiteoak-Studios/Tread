@@ -317,7 +317,7 @@ Tread holds no game values and ships no default for any setting. Every gameplay 
 | `weights.near`, `far`, `shooter`, `cone` | The send allocator's priority weights. `cone` weighs a character inside the view cone of `tiers.outOfView`, and with no `tiers.outOfView`, one in the half space ahead of the viewer's body. |
 | `shotNear.rate`, `shotNear.seconds` | How fast, and for how long, a shooter whose bullet passed near a viewer is sent to that viewer. |
 | `budget.soft`, `budget.hard` | The per-viewer downstream across every Volt stream, KB/s. |
-| `antiEsp.rays` | The rays per enemy pair, 1 to 5. |
+| `antiEsp.aim.Stand`, `Crouch`, `Downed` | The points an enemy pair's rays aim at, one list for each posture, with 1 to 6 points in each. A swimming body takes `Crouch`'s. Each point is `{ up, side, lead }` in studs: `up` above the target's feet, and `side` across the line from the viewer's eye to the target, positive to the viewer's right, so the points span the target's outline from wherever it is seen. A point with a `side` is pushed out further along it by how far the target moves over the look-ahead. `lead`, optional, casts that point's ray from the viewer's eye moved by its own movement over the look-ahead to the point moved by the target's. The rays go in the list's order and stop at the first open one. |
 | `antiEsp.lookAheadMin`, `lookAheadMax` | The clamp on anti-ESP's look-ahead, seconds. |
 | `antiEsp.slice` | The time anti-ESP may take a Heartbeat, seconds. |
 | `antiEsp.hiddenRate`, `visibleRate` | How often a hidden pair and a visible pair are tested again, Hz. |

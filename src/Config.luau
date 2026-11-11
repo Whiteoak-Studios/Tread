@@ -51,7 +51,6 @@ local EXPECTED: { [string]: string } = {
 	height = `a height above 0 that rounds to OwnerState's precision at most {EYE_LIMIT} studs, which its u8 holds`,
 	drop = `a number of degrees above 0 and below {STRAIGHT_DOWN}`,
 	cone = `a half-angle in degrees above 0 and at most {HALF_TURN}`,
-	playerRays = `a whole number from 1 to {PLAYER_RAYS}, the rays a player pair's test has`,
 	lyingRays = `a whole number from 1 to {LYING_RAYS}, the rays a sleeper's or body's test has`,
 	boolean = "true or false",
 	["function"] = "a function",
@@ -67,6 +66,7 @@ local EXPECTED: { [string]: string } = {
 local RATE: Specs = { perSecond = "positive", burst = "burst" }
 local SHAPE: Specs = { from = "vector", to = "vector", radius = "positive" }
 local POSTURE: Specs = { body = SHAPE, zones = { [ANY] = SHAPE }, waist = "number" }
+local AIM: Specs = { [ANY] = { up = "number", side = "number", ["lead?"] = "boolean" } } -- A list, as checkAim holds it
 
 local SHARED: Specs = {
 	rates = { simulation = "positive", relay = "positive" },
@@ -185,7 +185,7 @@ local SERVER: Specs = {
 	budget = { soft = "positive", hard = "positive" },
 
 	antiEsp = {
-		rays = "playerRays",
+		aim = { Stand = AIM, Crouch = AIM, Downed = AIM },
 		lookAheadMin = "nonNegative",
 		lookAheadMax = "nonNegative",
 		slice = "positive",
@@ -352,6 +352,17 @@ type Rate = {
 	burst: number,
 }
 
+-- A point an enemy pair's ray aims at, in studs from the target's feet
+export type AimPoint = {
+	read up: number, -- Straight up
+	read side: number, -- Across the line from the viewer's eye to the target, positive to the viewer's right
+	read lead: boolean?, -- Cast from the eye moved over the look-ahead to the point moved by the target's velocity
+}
+
+-- A posture's aim points in the order their rays are cast. Read only, as Tread only reads them, so a list a game builds
+-- in its own module fits whichever of its points lead
+export type AimPoints = { read [number]: AimPoint }
+
 -- A ragdoll joint's limits in degrees, its BallSocketConstraint's UpperAngle, TwistLowerAngle and TwistUpperAngle
 type JointLimit = {
 	tilt: number, -- The cone the joint may tilt in
@@ -413,7 +424,7 @@ export type ServerSettings = {
 	budget: { soft: number, hard: number }, -- KB/s a viewer gets across every Volt stream
 
 	antiEsp: {
-		rays: number, -- Per enemy pair
+		read aim: { read Stand: AimPoints, read Crouch: AimPoints, read Downed: AimPoints }, -- 1 to PLAYER_RAYS each
 		lookAheadMin: number, -- Seconds
 		lookAheadMax: number,
 		slice: number, -- Seconds it may take a Heartbeat
@@ -604,8 +615,6 @@ local function accepts(kind: string, value: any): boolean
 		return value > 0 and value < STRAIGHT_DOWN
 	elseif kind == "cone" then
 		return value > 0 and value <= HALF_TURN
-	elseif kind == "playerRays" then
-		return value >= 1 and value <= PLAYER_RAYS and value % 1 == 0
 	elseif kind == "lyingRays" then
 		return value >= 1 and value <= LYING_RAYS and value % 1 == 0
 	end
@@ -800,6 +809,33 @@ local function checkShared(shared: any)
 end
 
 --[[
+    Refuses a posture's aim points that are no list numbered from 1 with no
+    gap, or that hold none or more than the rays a player pair's test has,
+    naming the first place that breaks it
+--]]
+
+local function checkAim(server: any)
+	local aim: any = server.antiEsp.aim
+
+	for _, posture: string in sortedKeys(aim) do
+		local points: any = aim[posture]
+		local path: string = `{SERVER_PATH}.antiEsp.aim.{posture}`
+
+		for place: number, key: any in sortedKeys(points) do
+			if key ~= place then
+				refuse(join(path, key), "no value, since a posture's points are a list from 1 with no gap", points[key])
+			elseif place > PLAYER_RAYS then
+				refuse(join(path, key), `no value, since a player pair's test has {PLAYER_RAYS} rays`, points[key])
+			end
+		end
+
+		if points[1] == nil then
+			refuse(join(path, 1), "a point, since each posture aims at least one ray", nil)
+		end
+	end
+end
+
+--[[
     Checks the shared table and the server settings before the server does
     anything else, erroring on the first key missing or wrong, named by its
     full path with what it expected and what it got
@@ -809,6 +845,7 @@ function Config.server(shared: Shared, server: ServerSettings)
 	checkShared(shared)
 	walk(SERVER, server, SERVER_PATH)
 	checkPairs(SERVER_PAIRS, server, SERVER_PATH)
+	checkAim(server)
 end
 
 --[[

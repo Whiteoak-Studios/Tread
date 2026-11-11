@@ -1,8 +1,9 @@
 --[[
     Anti-ESP refuses what it can't take: any member before start, starting
     twice, without its tables or blocked, or with more rays than a test
-    has, a budget or clock that is no finite number, a value that is no
-    slot, a team that is no number, and leaving with no key
+    has in any posture's aim or the sleepers', a budget or clock that is no
+    finite number, a value that is no slot, a team that is no number, and
+    leaving with no key
 --]]
 
 --!strict
@@ -14,6 +15,7 @@ local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 local HARNESS: string = "tests/Fixtures/AntiEsp/Harness.luau"
 local NOT_SLOTS: { number } = { -1, 4096, 1.5 }
 local NOT_NUMBERS: { any } = { -1, 0 / 0, math.huge, "soon" }
+local POSTURES: { string } = { "Stand", "Crouch", "Downed" }
 
 local function blocked(_: vector, _: vector): boolean
 	return false
@@ -29,6 +31,7 @@ return function (): (boolean, string | nil)
 		{ "setTeam", 0, 1 },
 		{ "moved", 0 },
 		{ "leave", viewer.key },
+		{ "aimPoints", vector.zero, {} },
 	}
 
 	for _, row: { any } in early do
@@ -55,14 +58,21 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	settings.server.antiEsp.rays = 6
-	local refused: boolean, why: string =
-		Refuses("antiEsp.rays is at most the 5", AntiEsp.start, settings, world, {}, blocked)
-	if not refused then
-		return false, `AntiEsp.start with 6 rays a player pair went another way: {why}`
+	local refused: boolean, why: string
+
+	-- A seventh point in each posture's list, taken away again before the next
+	for _, posture: string in POSTURES do
+		local points: { any } = settings.server.antiEsp.aim[posture]
+		table.insert(points, { up = 2, side = 0 })
+
+		refused, why = Refuses(`antiEsp.aim.{posture} is at most the 6`, AntiEsp.start, settings, world, {}, blocked)
+		if not refused then
+			return false, `AntiEsp.start with 7 {posture} points went another way: {why}`
+		end
+
+		table.remove(points)
 	end
 
-	settings.server.antiEsp.rays = 5
 	settings.server.sleepers.rays = 4
 	refused, why = Refuses("sleepers.rays is at most the 3", AntiEsp.start, settings, world, {}, blocked)
 	if not refused then

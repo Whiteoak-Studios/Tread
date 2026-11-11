@@ -32,8 +32,9 @@ return function (): (boolean, string | nil)
 	ask()
 	harness:slice(0)
 
-	local eye: number = harness.shared.step.eyeStanding
-	local hiddenHead: vector = vector.create(0, eye, -50)
+	local top: number = harness.server.antiEsp.aim.Stand[1].up -- The head's top, a standing target's first point
+	local rays: number = #harness.server.antiEsp.aim.Stand
+	local hiddenHead: vector = vector.create(0, top, -50)
 
 	-- Before any recheck is due, a move of the hidden player makes its pair due for both viewers alone
 	ask()
@@ -42,7 +43,7 @@ return function (): (boolean, string | nil)
 
 	if harness:endingAt(hiddenHead) ~= 2 then
 		return false, `The moved player's pairs cast {harness:endingAt(hiddenHead)} head rays, not one each viewer's`
-	elseif #harness.rays ~= 10 then
+	elseif #harness.rays ~= 2 * rays then
 		return false, `Pairs other than the moved player's were tested: {#harness.rays} rays`
 	end
 
@@ -60,8 +61,8 @@ return function (): (boolean, string | nil)
 	AntiEsp.moved(ownSlot)
 	harness:slice(0.03)
 
-	local ownHead: vector = vector.create(0, eye, 0)
-	if #harness.rays ~= 5 + 3 + 5 + 5 then
+	local ownHead: vector = vector.create(0, top, 0)
+	if #harness.rays ~= rays + 3 + rays + rays then
 		return false, `The moved viewer's pairs cast {#harness.rays} rays, not its three pairs' and the other's`
 	elseif harness:endingAt(ownHead) ~= 1 then
 		return false, "The other viewer's pair with the moved viewer was not tested"

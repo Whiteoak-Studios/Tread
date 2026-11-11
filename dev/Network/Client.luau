@@ -37,6 +37,8 @@ local beginReliable: (number) -> (number, buffer)
 local trimReliable: (number) -> ()
 local refuseReliable: (string) -> never
 
+local RUNREPORT_STATE: { "Refused" | "Running" | "Piece" | "Passed" | "Failed" } = { "Refused", "Running", "Piece", "Passed", "Failed" }
+
 local function writepress(platform: number)
 	local offset: number, out: buffer = beginReliable(2)
 	buffer.writeu8(out, offset, 1)
@@ -203,9 +205,58 @@ local function writeplayed(time: number, stopped: boolean)
 	buffer.writeu8(out, offset + 1, flags)
 end
 
+local function writerun(name: string)
+	local offset: number, out: buffer = beginReliable(34)
+	buffer.writeu8(out, offset, 5)
+
+	if type(name) ~= "string" then
+		refuseReliable("run.name: expected string")
+	end
+
+	if #name < 1 or #name > 32 then
+		refuseReliable("run.name: length out of range")
+	end
+
+	buffer.writeu8(out, offset + 1, #name - 1)
+	offset += 2
+	buffer.writestring(out, offset, name)
+	offset += #name
+	trimReliable(offset)
+end
+
+local function readrunReport(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 3 > length then
+		error("runReport: truncated")
+	end
+
+	local flags: number = buffer.readu8(packet, cursor)
+	local state: ("Refused" | "Running" | "Piece" | "Passed" | "Failed")? = RUNREPORT_STATE[bit32.extract(flags, 0, 3) + 1]
+
+	if not state then
+		error("runReport.state: out of range")
+	end
+
+	local textLength: number = buffer.readu16(packet, cursor + 1)
+
+	if textLength > 4000 then
+		error("runReport.text: length out of range")
+	end
+
+	cursor += 3
+
+	if cursor + textLength > length then
+		error("runReport.text: truncated")
+	end
+
+	local text: string = buffer.readstring(packet, cursor, textLength)
+	cursor += textLength
+
+	return runtime:deliver(4, player, cursor, sideCursor, state, text)
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x0E43105F,
+	hash = 0x922FB784,
 	scope = "Dev",
 	side = "client",
 	idBytes = 1,
@@ -223,6 +274,7 @@ runtime = Volt.start({
 		[1] = { name = "shoot", kind = "event", mode = "SingleSync", queue = 64, read = readshoot },
 		[2] = { name = "report", kind = "event", mode = "SingleSync", queue = 64, read = readreport },
 		[3] = { name = "clip", kind = "event", mode = "SingleSync", queue = 64, read = readclip },
+		[4] = { name = "runReport", kind = "event", mode = "SingleSync", queue = 64, read = readrunReport },
 	},
 
 	outgoing = {
@@ -230,6 +282,7 @@ runtime = Volt.start({
 		[2] = { name = "corrected", kind = "event", reliable = true, minBytes = 6, maxBytes = 6 },
 		[3] = { name = "shot", kind = "event", reliable = true, minBytes = 4, maxBytes = 6 },
 		[4] = { name = "played", kind = "event", reliable = true, minBytes = 6, maxBytes = 6 },
+		[5] = { name = "run", kind = "event", reliable = true, minBytes = 3, maxBytes = 34 },
 	},
 })
 
@@ -302,6 +355,24 @@ local Network = {
 		end,
 	}) :: ClientEvent<(number, boolean)>,
 
+	run = table.freeze({
+		fire = function (name: string)
+			if before[5] == nil or before[5](nil, name) then
+				writerun(name)
+			end
+		end,
+	}) :: ClientEvent<(string)>,
+
+	runReport = table.freeze({
+		on = function (listener: (state: "Refused" | "Running" | "Piece" | "Passed" | "Failed", text: string) -> ()): () -> ()
+			return runtime:on(4, listener)
+		end,
+
+		iter = function (): () -> (number, "Refused" | "Running" | "Piece" | "Passed" | "Failed", string)
+			return runtime:iter(4)
+		end,
+	}) :: ClientListener<("Refused" | "Running" | "Piece" | "Passed" | "Failed", string)>,
+
 	version = "0.1.0",
 
 	hooks = table.freeze({
@@ -332,6 +403,8 @@ Network.events = table.freeze({
 	["report"] = Network.report,
 	["clip"] = Network.clip,
 	["played"] = Network.played,
+	["run"] = Network.run,
+	["runReport"] = Network.runReport,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

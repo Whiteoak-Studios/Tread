@@ -1,5 +1,5 @@
 --[[
-    One open ray keeps an enemy pair visible, whichever of the five it is,
+    One open ray keeps an enemy pair visible, whichever of the six it is,
     and the test casts no ray past the first one it finds open
 --]]
 
@@ -7,7 +7,7 @@
 local Environment = require("../../Environment")
 
 local HARNESS: string = "tests/Fixtures/AntiEsp/Harness.luau"
-local RAYS: number = 5
+local RAYS: number = 6 -- The example's standing points
 
 return function (): (boolean, string | nil)
 	for open: number = 1, RAYS do

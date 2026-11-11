@@ -1,7 +1,7 @@
 --[[
     The dev game's client values: Frontier Zero's remote smoothing, ragdoll,
     correction, draw distance and detail numbers, stand-ins where it sets
-    none, and the dev place's view, keys, prompt, shooter, replay and kit
+    none, and the dev place's view, keys, prompt, shooter, replay, kit and panel
 --]]
 
 --!strict
@@ -142,6 +142,18 @@ return {
 		ready = "Clip ready: %s plays it", -- The play key's name fills it
 		playing = "Clip %.2f / %.2f s at %gx%s", -- The time, the length, the speed and the paused text
 		paused = ", paused",
+	},
+
+	-- The live-run panel on this key: a button for each run, which asks the dev server to start it, and its report
+	live = {
+		key = Enum.KeyCode.L, -- Bound to nothing else in the dev place
+		wait = 10, -- Seconds the panel waits at boot for the player's PlayerGui
+		size = Vector2.new(760, 400), -- Pixels across and down the panel
+		list = 170, -- Pixels across the column of run buttons
+		row = 24, -- Pixels down the status line and each button
+		gap = 6, -- Pixels between the panel's parts
+		bar = 8, -- Pixels across each scroll bar
+		textSize = 14, -- The report's, at which its height is measured
 	},
 
 	-- The dev place's exploit kit: what its panel counts, what each tool does, and how the ESP draws
