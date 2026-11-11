@@ -45,6 +45,8 @@ local refuseReliable: (string) -> never
 
 local RUNREPORT_STATE: { "Refused" | "Running" | "Piece" | "Passed" | "Failed" } = { "Refused", "Running", "Piece", "Passed", "Failed" }
 
+local BOTSPAWN_BEHAVIOR: { "Idle" | "Walk" | "Sprint" } = { "Idle", "Walk", "Sprint" }
+
 local function readpress(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
 	if cursor + 1 > length then
 		error("press: truncated")
@@ -293,9 +295,102 @@ local function readclientCost(player: (Player | Bot)?, packet: buffer, cursor: n
 	return runtime:deliver(6, player, cursor, sideCursor, label, bit32.btest(flags, 1), line)
 end
 
+local function readbotSpawn(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 3 > length then
+		error("botSpawn: truncated")
+	end
+
+	local flags: number = buffer.readu8(packet, cursor)
+	local count: number = buffer.readu16(packet, cursor + 1)
+	local behavior: ("Idle" | "Walk" | "Sprint")? = BOTSPAWN_BEHAVIOR[bit32.extract(flags, 0, 2) + 1]
+
+	if not behavior then
+		error("botSpawn.behavior: out of range")
+	end
+
+	local radius: number?
+	cursor += 3
+
+	if bit32.btest(flags, 4) then
+		if cursor + 2 > length then
+			error("botSpawn.radius: truncated")
+		end
+
+		local radius_2: number = buffer.readu16(packet, cursor)
+
+		if radius_2 < 1 or radius_2 > 8192 then
+			error("botSpawn.radius: out of range")
+		end
+
+		cursor += 2
+		radius = radius_2
+	end
+
+	return runtime:deliver(7, player, cursor, sideCursor, count, behavior, radius)
+end
+
+local function readbotClear(player: (Player | Bot)?, _: buffer, cursor: number, _: { any }, sideCursor: number, _: number): (number, number)
+	return runtime:deliver(8, player, cursor, sideCursor)
+end
+
+local function readbotWatch(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 1 > length then
+		error("botWatch: truncated")
+	end
+
+	local flags: number = buffer.readu8(packet, cursor)
+	cursor += 1
+
+	return runtime:deliver(9, player, cursor, sideCursor, bit32.btest(flags, 1))
+end
+
+local function writebotRefused(reason: string)
+	local offset: number, out: buffer = beginReliable(202)
+	buffer.writeu8(out, offset, 5)
+
+	if type(reason) ~= "string" then
+		refuseReliable("botRefused.reason: expected string")
+	end
+
+	if #reason < 1 or #reason > 200 then
+		refuseReliable("botRefused.reason: length out of range")
+	end
+
+	buffer.writeu8(out, offset + 1, #reason - 1)
+	offset += 2
+	buffer.writestring(out, offset, reason)
+	offset += #reason
+	trimReliable(offset)
+end
+
+local function writebotStats(made: number, text: string)
+	local offset: number, out: buffer = beginReliable(1005)
+	buffer.writeu8(out, offset, 6)
+
+	if type(made) ~= "number" or bit32.band(made, 65535) ~= made then
+		refuseReliable("botStats.made: expected u16")
+	end
+
+	buffer.writeu16(out, offset + 1, made)
+
+	if type(text) ~= "string" then
+		refuseReliable("botStats.text: expected string")
+	end
+
+	if #text > 1000 then
+		refuseReliable("botStats.text: length out of range")
+	end
+
+	buffer.writeu16(out, offset + 3, #text)
+	offset += 5
+	buffer.writestring(out, offset, text)
+	offset += #text
+	trimReliable(offset)
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x2474E257,
+	hash = 0x0A7B4066,
 	scope = "Dev",
 	side = "server",
 	idBytes = 1,
@@ -316,6 +411,9 @@ runtime = Volt.start({
 		[4] = { name = "played", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readplayed },
 		[5] = { name = "run", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readrun },
 		[6] = { name = "clientCost", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readclientCost },
+		[7] = { name = "botSpawn", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readbotSpawn },
+		[8] = { name = "botClear", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readbotClear },
+		[9] = { name = "botWatch", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readbotWatch },
 	},
 
 	outgoing = {
@@ -323,6 +421,8 @@ runtime = Volt.start({
 		[2] = { name = "report", kind = "event", reliable = true, minBytes = 8, maxBytes = 87 },
 		[3] = { name = "clip", kind = "event", reliable = true, minBytes = 6, maxBytes = 4102 },
 		[4] = { name = "runReport", kind = "event", reliable = true, minBytes = 4, maxBytes = 4004 },
+		[5] = { name = "botRefused", kind = "event", reliable = true, minBytes = 3, maxBytes = 202 },
+		[6] = { name = "botStats", kind = "event", reliable = true, minBytes = 5, maxBytes = 1005 },
 	},
 })
 
@@ -489,6 +589,84 @@ local Network = {
 		end,
 	}) :: ServerListener<(string, boolean, string)>,
 
+	botSpawn = table.freeze({
+		on = function (listener: (player: Player | Bot, count: number, behavior: "Idle" | "Walk" | "Sprint", radius: number?) -> ()): () -> ()
+			return runtime:on(7, listener)
+		end,
+
+		iter = function (): () -> (number, Player | Bot, number, "Idle" | "Walk" | "Sprint", number?)
+			return runtime:iter(7)
+		end,
+	}) :: ServerListener<(number, "Idle" | "Walk" | "Sprint", number?)>,
+
+	botClear = table.freeze({
+		on = function (listener: (player: Player | Bot) -> ()): () -> ()
+			return runtime:on(8, listener)
+		end,
+
+		iter = function (): () -> (number, Player | Bot)
+			return runtime:iter(8)
+		end,
+	}) :: ServerListener<()>,
+
+	botWatch = table.freeze({
+		on = function (listener: (player: Player | Bot, shown: boolean) -> ()): () -> ()
+			return runtime:on(9, listener)
+		end,
+
+		iter = function (): () -> (number, Player | Bot, boolean)
+			return runtime:iter(9)
+		end,
+	}) :: ServerListener<(boolean)>,
+
+	botRefused = table.freeze({
+		fire = function (player: Player | Bot, reason: string)
+			if (before[5] == nil or before[5](player, reason)) and runtime:target(player) then
+				writebotRefused(reason)
+			end
+		end,
+
+		fireAll = function (reason: string)
+			runtime:broadcast(5, nil, nil, writebotRefused, reason)
+		end,
+
+		fireList = function (players: { Player | Bot }, reason: string)
+			runtime:broadcast(5, players, nil, writebotRefused, reason)
+		end,
+
+		fireExcept = function (player: Player | Bot, reason: string)
+			runtime:broadcast(5, nil, player, writebotRefused, reason)
+		end,
+
+		fireSet = function (players: { [Player | Bot]: true }, reason: string)
+			runtime:broadcast(5, players, nil, writebotRefused, reason)
+		end,
+	}) :: ServerEvent<(string)>,
+
+	botStats = table.freeze({
+		fire = function (player: Player | Bot, made: number, text: string)
+			if (before[6] == nil or before[6](player, made, text)) and runtime:target(player) then
+				writebotStats(made, text)
+			end
+		end,
+
+		fireAll = function (made: number, text: string)
+			runtime:broadcast(6, nil, nil, writebotStats, made, text)
+		end,
+
+		fireList = function (players: { Player | Bot }, made: number, text: string)
+			runtime:broadcast(6, players, nil, writebotStats, made, text)
+		end,
+
+		fireExcept = function (player: Player | Bot, made: number, text: string)
+			runtime:broadcast(6, nil, player, writebotStats, made, text)
+		end,
+
+		fireSet = function (players: { [Player | Bot]: true }, made: number, text: string)
+			runtime:broadcast(6, players, nil, writebotStats, made, text)
+		end,
+	}) :: ServerEvent<(number, string)>,
+
 	version = "0.1.0",
 
 	hooks = table.freeze({
@@ -544,6 +722,11 @@ Network.events = table.freeze({
 	["run"] = Network.run,
 	["runReport"] = Network.runReport,
 	["clientCost"] = Network.clientCost,
+	["botSpawn"] = Network.botSpawn,
+	["botClear"] = Network.botClear,
+	["botWatch"] = Network.botWatch,
+	["botRefused"] = Network.botRefused,
+	["botStats"] = Network.botStats,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

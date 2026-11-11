@@ -59,6 +59,7 @@ local LiveRuns = {
 		{ name = "BenchS10", minutes = 7.5 },
 		{ name = "BenchG10", minutes = 15 }, -- G10 and its rung with every NPC idle, 3 seeds each
 		{ name = "ClientCost", minutes = 7.5 },
+		{ name = "ParallelProbe", minutes = 0.2 }, -- The loop timed serially, then 50 batches at each of 5 worker counts
 		{ name = "BenchS5", minutes = 7.5 },
 		{ name = "BenchS6", minutes = 7.5 },
 		{ name = "BenchS7", minutes = 7.5 },

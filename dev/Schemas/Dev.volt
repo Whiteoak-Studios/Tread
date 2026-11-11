@@ -4,7 +4,7 @@ option runtime = "ReplicatedStorage.Packages.Volt"
 option scope = Dev
 
 -- The dev game's own traffic: the test elevator's button, the telemetry the live gates need from clients, the
--- reports the exploit kit's panel shows, and the live runs' trigger and reports
+-- reports the exploit kit's panel shows, the live runs' trigger and reports, and the bot panel's asks and numbers
 event press {
 	from: Client,
 	type: Reliable,
@@ -85,4 +85,45 @@ event clientCost {
 	type: Reliable,
 	call: SingleSync,
 	data: (label: string(1..64), measured: boolean, line: string(1..512)),
+}
+
+-- A client's ask that the server spawn the bot panel's bots: how many, how they move, and how many studs either way
+-- of the asker they spread over, at most the play bound, nil for the whole map. The server refuses a count past its cap
+event botSpawn {
+	from: Client,
+	type: Reliable,
+	call: SingleSync,
+	data: (count: u16, behavior: enum { Idle, Walk, Sprint }, radius: u16(1..8192)?),
+}
+
+-- A client's ask that the server remove every bot the bot panel made
+event botClear {
+	from: Client,
+	type: Reliable,
+	call: SingleSync,
+}
+
+-- Whether a client's bot panel shows, the server sending it the numbers only while it does
+event botWatch {
+	from: Client,
+	type: Reliable,
+	call: SingleSync,
+	data: (shown: boolean),
+}
+
+-- Why the server refused a client's bot panel ask, or what a spawn it took could not build
+event botRefused {
+	from: Server,
+	type: Reliable,
+	call: SingleSync,
+	data: (reason: string(1..200)),
+}
+
+-- The server's numbers over the last second for a client whose bot panel shows, with the panel's bots on the server.
+-- The text stays well under Volt's 8,192 B maxPacket
+event botStats {
+	from: Server,
+	type: Reliable,
+	call: SingleSync,
+	data: (made: u16, text: string(0..1000)),
 }

@@ -1,7 +1,7 @@
 --[[
     The dev client: starts Tread's client as a game does, with the dev game's
     shared table and Frontier Zero's client settings, then its kit, shooter,
-    G5 cost window, elevator, input, camera, keys, prompt, G2, replay and panel
+    G5 cost window, elevator, input, camera, keys, prompt, G2, replay and panels
 --]]
 
 --!strict
@@ -17,6 +17,7 @@ local Tread = require(packages.Tread)
 
 local Network = require(ReplicatedStorage.Shared.Network.Client)
 
+local BotPanel = require(script.BotPanel)
 local Config = require(script.Config)
 local Cost = require(script.Cost)
 local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
@@ -39,8 +40,12 @@ local RENDER_DISTANCES: { number } = Config.render.distances
 local RENDER_TEXT: string = Config.render.text
 local RENDER_WAIT: number = Config.render.wait
 
--- The look holds while the live panel shows, since the mouse is free then to click it
-local input = Input.new(Live.open)
+-- Whether either panel shows, while which the look holds and the mouse is free to click it
+local function panelOpen(): boolean
+	return Live.open() or BotPanel.open()
+end
+
+local input = Input.new(panelOpen)
 
 -- The shoulder view's cast meets the same parts the dev game's collision does
 local include: { Instance }? = Shared.collision.include
@@ -258,10 +263,10 @@ RunService.PreRender:Connect(function (dt: number)
 	local eye: Vector3, look: Vector3 = client:getEye()
 	Camera.CFrame = CFrame.lookAlong(view:frame(dt, eye, look), look)
 
-	-- Set every frame rather than once, so a lock anything else lets go of comes back, and free while the live panel
-	-- shows, so its buttons and report can be clicked
+	-- Set every frame rather than once, so a lock anything else lets go of comes back, and free while a panel shows,
+	-- so its buttons, boxes and report can be clicked
 	if UserInputService.MouseEnabled then
-		UserInputService.MouseBehavior = Live.open() and Enum.MouseBehavior.Default or Enum.MouseBehavior.LockCenter
+		UserInputService.MouseBehavior = panelOpen() and Enum.MouseBehavior.Default or Enum.MouseBehavior.LockCenter
 	end
 
 	-- Shown exactly while a jump press now would start a mantle
@@ -304,10 +309,11 @@ client:onCorrected(function (size: number, flagged: boolean)
 end)
 
 -- Last, since each waits at boot for the PlayerGui, the input on a touch screen alone. The replay is held for the
--- client session, and its destroy is what would disconnect its listener and keys. The live panel's listeners and keys
--- live for the client session
+-- client session, and its destroy is what would disconnect its listener and keys. The panels' listeners and keys live
+-- for the client session
 input:start()
 mantle = prompt()
 render = renderLabel(renderDistance)
 replay = Replay.new(client, Shared)
 Live.start()
+BotPanel.start()

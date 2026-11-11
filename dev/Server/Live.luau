@@ -15,6 +15,7 @@ local Volt = require(Packages.Volt)
 
 local Network = require(ReplicatedStorage.Shared.Network.Server)
 
+local BotPanel = require(ServerScriptService.Server.BotPanel)
 local LiveRuns = require(ReplicatedStorage.Shared.Dev.LiveRuns)
 local Runner = require(ServerScriptService.Server.Runner)
 
@@ -85,12 +86,18 @@ end
 
 --[[
     Starts the run a player asked for, unless the server refuses it, when
-    the player is told why. Whatever the run does, its Output listener is
-    disconnected, and only then may the next run start
+    the player is told why: a run going, a name not listed, or the bot
+    panel's bots on the server, which the run's own bots would meet. Whatever
+    the run does, its Output listener is disconnected, and only then may the
+    next run start
 --]]
 
 local function begin(key: Key, name: string)
 	local refusal: string? = LiveRuns.refusal(Running, name)
+	if not refusal and BotPanel.holds() then
+		refusal = "the bot panel's bots are on the server, so clear the panel's bots first"
+	end
+
 	if refusal then
 		Network.runReport.fire(key, "Refused", refusal)
 		return
@@ -130,6 +137,11 @@ function Live.start()
 	Network.run.on(function (key: Key, name: string)
 		task.spawn(begin, key, name)
 	end)
+end
+
+-- The run going, nil while none is, beside which the bot panel spawns nothing
+function Live.running(): string?
+	return Running
 end
 
 return Live

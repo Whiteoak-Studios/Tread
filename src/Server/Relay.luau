@@ -72,11 +72,6 @@ local SILENT: number = -1 -- A squared range no step falls inside, for a kind th
 
 local UNSTARTED: string = "The relay sends nothing until Relay.start hands it its settings and its four functions"
 
--- What a sent target's tier tick lists its record as
-local UNLISTED: number = 0
-local OWED: number = 1 -- At or past its floor
-local QUEUED: number = 2 -- Under its floor, waiting in the queue by its priority
-
 -- What a viewer holds for a slot, a bit each
 local RELEVANT: number = 2 ^ 0 -- Inside its relevancy for the slot's kind
 local NEAR: number = 2 ^ 1 -- Inside the near tier
@@ -171,6 +166,10 @@ type Grid = {
 	orders: buffer, -- u16 by slot: its place from 1 in this run's walk of the states
 	walk: buffer, -- u16 by place: the slot at it
 	count: number, -- The bodies this run filed
+	westmost: number, -- The lowest column holding a body this run, across while none does
+	eastmost: number, -- The highest, -1 while none does
+	southmost: number, -- And the same for the rows
+	northmost: number,
 	visits: { number }, -- A turn's slots to visit, each as its place times SLOTS plus the slot
 }
 
@@ -275,6 +274,10 @@ local Radii: { enter: number, leave: number, sleepers: number, npcs: number, gri
 		orders = buffer.create(SLOTS * 2),
 		walk = buffer.create((SLOTS + 1) * 2),
 		count = 0,
+		westmost = 0,
+		eastmost = -1,
+		southmost = 0,
+		northmost = -1,
 		visits = {},
 	},
 }
@@ -880,44 +883,6 @@ local function settle(view: View, slot: number, flags: number, wanted: boolean, 
 	return bit32.band(flags, bit32.bnot(REVEAL + VISIBILITY_CARRIED + LOOKS))
 end
 
--- A pair's relevancy and tier from its squared distance by the target's kind, a player's and a body's entering at
--- the inner radius and leaving past the outer
-local function measure(flags: number, kind: number, squared: number): number
-	local relevant: boolean
-	local near: boolean = false
-
-	if kind == NPC then
-		relevant = squared <= NpcRangeSquared
-		near = squared <= NpcNearSquared
-	elseif kind == SLEEPER then
-		relevant = squared <= SleeperSquared
-	else
-		if bit32.btest(flags, RELEVANT) then
-			relevant = squared <= LeaveSquared
-		else
-			relevant = squared <= EnterSquared
-		end
-
-		if bit32.btest(flags, NEAR) then
-			near = squared <= NearLeaveSquared
-		else
-			near = squared < NearEnterSquared
-		end
-	end
-
-	flags = bit32.band(flags, bit32.bnot(RELEVANT + NEAR))
-
-	if relevant then
-		flags = bit32.bor(flags, RELEVANT)
-
-		if near then
-			flags = bit32.bor(flags, NEAR)
-		end
-	end
-
-	return flags
-end
-
 -- Adds a slot to the ones a viewer holds anything for, starting its record timing afresh
 local function track(view: View, slot: number)
 	if buffer.readu16(view.places, slot * 2) ~= 0 then
@@ -1027,15 +992,19 @@ local function discharge(view: View, ring: number)
 		return
 	end
 
+	local log: buffer = view.log
+	local baseRuns: buffer = view.baseRuns
+	local baseFloor: number = view.baseFloor
+
 	for index: number = start, start + buffer.readu16(view.ringCounts, ring * 2) - 1 do
-		local code: number = buffer.readu16(view.log, (index % LOG) * 2)
+		local code: number = buffer.readu16(log, (index % LOG) * 2)
 		local slot: number = code // ENTRY_PARTS
-		local part: number = code % ENTRY_PARTS
+		local part: number = code - slot * ENTRY_PARTS
 
 		if part ~= RECORD_PART then
 			clear(view, slot, part, sequence)
-		elseif run >= view.baseFloor and run > buffer.readu32(view.baseRuns, slot * 4) then
-			buffer.writeu32(view.baseRuns, slot * 4, run)
+		elseif run >= baseFloor and run > buffer.readu32(baseRuns, slot * 4) then
+			buffer.writeu32(baseRuns, slot * 4, run)
 		end
 	end
 end
@@ -1369,24 +1338,30 @@ local function writeRecord(view: View, slot: number, base: number)
 
 	if Deltas.on then
 		local ring: number = (view.newest % RING) * 2
-		buffer.writeu16(view.log, (view.logHead % LOG) * 2, slot * ENTRY_PARTS + RECORD_PART)
-		buffer.writeu16(view.ringCounts, ring, buffer.readu16(view.ringCounts, ring) + 1)
-		view.logHead += 1
+		local ringCounts: buffer = view.ringCounts
+		local logHead: number = view.logHead
+		buffer.writeu16(view.log, (logHead % LOG) * 2, slot * ENTRY_PARTS + RECORD_PART)
+		buffer.writeu16(ringCounts, ring, buffer.readu16(ringCounts, ring) + 1)
+		view.logHead = logHead + 1
 	end
 
-	local last: number = buffer.readu32(view.lastRecord, slot * 4)
+	local lastRecord: buffer = view.lastRecord
+	local repeats: buffer = view.repeats
+	local last: number = buffer.readu32(lastRecord, slot * 4)
 	if buffer.readu32(Changed, slot * 4) > last then
-		buffer.writeu8(view.repeats, slot, REST_REPEATS)
+		buffer.writeu8(repeats, slot, REST_REPEATS)
 	else
-		local repeats: number = buffer.readu8(view.repeats, slot)
-		if repeats > 0 then
-			buffer.writeu8(view.repeats, slot, repeats - 1)
+		local left: number = buffer.readu8(repeats, slot)
+		if left > 0 then
+			buffer.writeu8(repeats, slot, left - 1)
 		end
 	end
 
-	buffer.writeu32(view.lastRecord, slot * 4, Run)
-	buffer.writef32(view.aim, slot * 4, math.max(buffer.readf32(view.aim, slot * 4) - 1, 0))
-	buffer.writef32(view.floor, slot * 4, math.max(buffer.readf32(view.floor, slot * 4) - 1, 0))
+	local aims: buffer = view.aim
+	local floors: buffer = view.floor
+	buffer.writeu32(lastRecord, slot * 4, Run)
+	buffer.writef32(aims, slot * 4, math.max(buffer.readf32(aims, slot * 4) - 1, 0))
+	buffer.writef32(floors, slot * 4, math.max(buffer.readf32(floors, slot * 4) - 1, 0))
 end
 
 local function addHide(view: View, slot: number)
@@ -1472,60 +1447,6 @@ local function trim<T>(list: { T }, count: number)
 end
 
 --[[
-    The base a listed record goes against as a change this run, 0 for
-    whole: its baseline is the newest record of its life every recipient of
-    the view acknowledged from the view's floor on, 1 to 31 relay ticks
-    back, and its change is encoded once a run for each slot and base, so
-    every view sharing that baseline copies the same bytes. X or Z moved
-    past what a change holds sends it whole
---]]
-
-local function prepare(view: View, slot: number): number
-	if not Deltas.on then
-		return 0
-	end
-
-	local baseRun: number = buffer.readu32(view.baseRuns, slot * 4)
-	local plane: number = baseRun % DEPTH
-	if
-		baseRun == 0
-		or baseRun < view.baseFloor
-		or Run - baseRun >= DEPTH
-		or buffer.readu32(Deltas.runs, plane * 4) ~= baseRun
-	then
-		return 0
-	end
-
-	local base: number = (TickWire - buffer.readu16(Deltas.ticks, plane * 2)) % WRAP
-	if base < 1 or base >= DEPTH then
-		return 0
-	end
-
-	local entry: number = slot * DEPTH + base
-	if buffer.readu32(Deltas.stamps, entry * 4) ~= Run then
-		local baseline: number = (plane * SLOTS + slot) * RECORD_BYTES
-		local length: number = Change.write(
-			Records,
-			slot * RECORD_BYTES,
-			Deltas.history,
-			baseline,
-			base,
-			Deltas.encoded,
-			entry * RECORD_BYTES
-		)
-
-		buffer.writeu32(Deltas.stamps, entry * 4, Run)
-		buffer.writeu8(Deltas.lengths, entry, length)
-	end
-
-	if buffer.readu8(Deltas.lengths, entry) == 0 then
-		return 0
-	end
-
-	return base
-end
-
---[[
     Places a list's records inside room, highest in the queue first when
     they can't all fit, each whole or as its change, prepared first so the
     sort knows their sizes, and stops at the first that doesn't fit. Those
@@ -1535,16 +1456,67 @@ end
 local function placeRecords(view: View, list: { number }, count: number, room: number)
 	trim(list, count)
 
+	local on: boolean = Deltas.on
+	local baseRuns: buffer = view.baseRuns
+	local baseFloor: number = view.baseFloor
+	local runs: buffer = Deltas.runs
+	local ticks: buffer = Deltas.ticks
+	local stamps: buffer = Deltas.stamps
+	local lengths: buffer = Deltas.lengths
+	local bases: buffer = Deltas.bases
 	local wholes: number, changeBytes: number = 0, 0
+
+	-- Each record's base as a change this run, 0 for whole: its baseline is the newest record of its life every
+	-- recipient of the view acknowledged from the view's floor on, 1 to 31 relay ticks back, and its change is encoded
+	-- once a run for each slot and base, so every view sharing that baseline copies the same bytes. X or Z moved past
+	-- what a change holds sends it whole
 	for index: number = 1, count do
 		local slot: number = list[index]
-		local base: number = prepare(view, slot)
-		buffer.writeu8(Deltas.bases, slot, base)
+		local base: number = 0
+		local baseRun: number = 0
+		if on then
+			baseRun = buffer.readu32(baseRuns, slot * 4)
+		end
+
+		local plane: number = baseRun % DEPTH
+		if
+			baseRun ~= 0
+			and baseRun >= baseFloor
+			and Run - baseRun < DEPTH
+			and buffer.readu32(runs, plane * 4) == baseRun
+		then
+			local back: number = (TickWire - buffer.readu16(ticks, plane * 2)) % WRAP
+			local entry: number = slot * DEPTH + back
+
+			if back >= 1 and back < DEPTH then
+				if buffer.readu32(stamps, entry * 4) ~= Run then
+					local baseline: number = (plane * SLOTS + slot) * RECORD_BYTES
+					local length: number = Change.write(
+						Records,
+						slot * RECORD_BYTES,
+						Deltas.history,
+						baseline,
+						back,
+						Deltas.encoded,
+						entry * RECORD_BYTES
+					)
+
+					buffer.writeu32(stamps, entry * 4, Run)
+					buffer.writeu8(lengths, entry, length)
+				end
+
+				if buffer.readu8(lengths, entry) ~= 0 then
+					base = back
+				end
+			end
+		end
+
+		buffer.writeu8(bases, slot, base)
 
 		if base == 0 then
 			wholes += 1
 		else
-			changeBytes += buffer.readu8(Deltas.lengths, slot * DEPTH + base)
+			changeBytes += buffer.readu8(lengths, slot * DEPTH + base)
 		end
 	end
 
@@ -1553,30 +1525,78 @@ local function placeRecords(view: View, list: { number }, count: number, room: n
 		table.sort(list, ahead)
 	end
 
+	local records: { number } = Out.records
+	local changeOffsets: { number } = Out.changeOffsets
+	local changeLengths: { number } = Out.changeLengths
+	local log: buffer = view.log
+	local ringCounts: buffer = view.ringCounts
+	local lastRecord: buffer = view.lastRecord
+	local repeats: buffer = view.repeats
+	local aims: buffer = view.aim
+	local floors: buffer = view.floor
+
 	-- Whiteoak TODO: placing stops at the first record that doesn't fit, though a smaller change later in the queue
 	-- could have; skip on to the next that fits, a pass over the rest, once G4 shows records cut beside unused room
 	for index: number = 1, count do
 		local slot: number = list[index]
-		local base: number = buffer.readu8(Deltas.bases, slot)
+		local base: number = buffer.readu8(bases, slot)
+		local entry: number = slot * DEPTH + base
 		local bytes: number = RECORD_BYTES
 		if base ~= 0 then
-			bytes = buffer.readu8(Deltas.lengths, slot * DEPTH + base)
+			bytes = buffer.readu8(lengths, entry)
 		end
 
-		if not fits(view, bytes, 0, room) then
+		-- Room in the open block is taken as fits takes it, and only a fresh block or a refusal goes through fits
+		if Open and Filled + bytes <= BLOCK_BYTES and Spent + bytes <= room then
+			Filled += bytes
+			Spent += bytes
+		elseif not fits(view, bytes, 0, room) then
 			RecordsCut += count - index + 1
 			break
 		end
 
-		writeRecord(view, slot, base)
+		-- Each goes in as writeRecord puts a reveal's in: whole or as its change, logged while records go as
+		-- changes, and its next one timed from now
+		if base == 0 then
+			local placed: number = Out.recordCount + 1
+			records[placed] = slot * RECORD_BYTES
+			Out.recordCount = placed
+		else
+			local placed: number = Out.changeCount + 1
+			changeOffsets[placed] = entry * RECORD_BYTES
+			changeLengths[placed] = bytes
+			Out.changeCount = placed
+		end
+
+		if on then
+			local ring: number = (view.newest % RING) * 2
+			local logHead: number = view.logHead
+			buffer.writeu16(log, (logHead % LOG) * 2, slot * ENTRY_PARTS + RECORD_PART)
+			buffer.writeu16(ringCounts, ring, buffer.readu16(ringCounts, ring) + 1)
+			view.logHead = logHead + 1
+		end
+
+		local last: number = buffer.readu32(lastRecord, slot * 4)
+		if buffer.readu32(Changed, slot * 4) > last then
+			buffer.writeu8(repeats, slot, REST_REPEATS)
+		else
+			local left: number = buffer.readu8(repeats, slot)
+			if left > 0 then
+				buffer.writeu8(repeats, slot, left - 1)
+			end
+		end
+
+		buffer.writeu32(lastRecord, slot * 4, Run)
+		buffer.writef32(aims, slot * 4, math.max(buffer.readf32(aims, slot * 4) - 1, 0))
+		buffer.writef32(floors, slot * 4, math.max(buffer.readf32(floors, slot * 4) - 1, 0))
 		RecordsSent += 1
 	end
 
 	for index: number = 1, count do
 		local slot: number = list[index]
-		if buffer.readu32(view.lastRecord, slot * 4) ~= Run then
-			buffer.writef32(view.aim, slot * 4, math.min(buffer.readf32(view.aim, slot * 4), 1))
-			buffer.writef32(view.floor, slot * 4, math.min(buffer.readf32(view.floor, slot * 4), 1))
+		if buffer.readu32(lastRecord, slot * 4) ~= Run then
+			buffer.writef32(aims, slot * 4, math.min(buffer.readf32(aims, slot * 4), 1))
+			buffer.writef32(floors, slot * 4, math.min(buffer.readf32(floors, slot * 4), 1))
 		end
 	end
 end
@@ -1614,11 +1634,12 @@ end
     Every other present body against the viewer that the run could change:
     those in the cells its distance spans, and each it holds anything for
     elsewhere. Any other holds nothing and is out of every radius, so it
-    stays as it is. Each gets its relevancy and tier, and one holding
-    nothing out of range is done; the rest, in the order the states were
-    walked, get whether anti-ESP hides them, which leaves them culled, and
-    the stretch that follows. Invisible bodies are wanted by no one and
-    never culled
+    stays as it is. Each gets its relevancy and tier by its kind, a player
+    and a body entering at the inner radius and leaving past the outer, and
+    one holding nothing out of range is done; the rest, in the order the
+    states were walked, get whether anti-ESP hides them, which leaves them
+    culled, and the stretch that follows. Invisible bodies are wanted by no
+    one and never culled
 --]]
 
 local function consider(view: View, viewer: Viewer, states: { [number]: State }, own: number?)
@@ -1629,7 +1650,7 @@ local function consider(view: View, viewer: Viewer, states: { [number]: State },
 	local bound: number = Constants.PLAY_BOUND
 
 	-- f32 rounding moves an offset by under a millionth of its length, so the cells reach that much past the
-	-- distance, and no body measure finds inside it lies outside them
+	-- distance, and no body found inside it lies outside them
 	local slack: number = 2 ^ -20
 	local reach: number = view.distance * (1 + slack)
 	local west: number = (origin.x - reach + bound) // size
@@ -1643,29 +1664,32 @@ local function consider(view: View, viewer: Viewer, states: { [number]: State },
 	south = south >= 0 and math.min(south, across - 1) or 0
 	north = north >= 0 and math.min(north, across - 1) or 0
 
-	-- The cells' bodies, each as its place in the walk of the states times SLOTS plus its slot, in the walk's order
-	-- within each cell
+	-- Cells that span every cell holding a body hold every body, which then go in the walk's own order
+	local walkOrder: buffer = grid.walk
+	local covered: boolean = west <= grid.westmost
+		and east >= grid.eastmost
+		and south <= grid.southmost
+		and north >= grid.northmost
 	local visits: { number } = grid.visits
-	local count: number = 0
+	local count: number = grid.count
 
-	for row: number = south, north do
-		for column: number = west, east do
-			local entry: number = buffer.readu16(grid.heads, (row * across + column) * 2)
-			while entry ~= 0 do
-				local slot: number = entry - 1
-				count += 1
-				visits[count] = buffer.readu16(grid.orders, slot * 2) * SLOTS + slot
-				entry = buffer.readu16(grid.following, slot * 2)
+	if not covered then
+		-- The cells' bodies, each as its place in the walk of the states times SLOTS plus its slot, in the walk's
+		-- order within each cell
+		count = 0
+
+		for row: number = south, north do
+			for column: number = west, east do
+				local entry: number = buffer.readu16(grid.heads, (row * across + column) * 2)
+				while entry ~= 0 do
+					local slot: number = entry - 1
+					count += 1
+					visits[count] = buffer.readu16(grid.orders, slot * 2) * SLOTS + slot
+					entry = buffer.readu16(grid.following, slot * 2)
+				end
 			end
 		end
-	end
 
-	if count == grid.count then
-		-- Every body lies in those cells, so they go in the walk's own order
-		for place: number = 1, count do
-			visits[place] = place * SLOTS + buffer.readu16(grid.walk, place * 2)
-		end
-	else
 		-- And each slot it holds anything for outside them, which lies inside no radius
 		for _, slot: number in view.tracked do
 			local column: number = buffer.readu16(grid.columns, slot * 2)
@@ -1681,21 +1705,64 @@ local function consider(view: View, viewer: Viewer, states: { [number]: State },
 		end
 	end
 
-	-- Out of range and holding nothing is all the rest would leave a pair, so only the others stay listed
+	-- Out of range and holding nothing is all the rest would leave a pair, so only the others stay listed. SLOTS is a
+	-- power of two, so a visit's slot is its low bits
+	local viewFlags: buffer = view.flags
+	local kinds: buffer = Kinds
+	local slotBits: number = SLOTS - 1
 	local listed: number = 0
 	local ordered: boolean = true
 
 	for index: number = 1, count do
-		local visit: number = visits[index]
-		local slot: number = visit % SLOTS
+		local slot: number
+		local visit: number
+		if covered then
+			slot = buffer.readu16(walkOrder, index * 2)
+			visit = index * SLOTS + slot
+		else
+			visit = visits[index]
+			slot = bit32.band(visit, slotBits)
+		end
+
 		if slot == own then
 			continue
 		end
 
 		local offset: vector = states[slot].position - origin
-		local kept: number = buffer.readu16(view.flags, slot * 2)
-		local flags: number = measure(kept, buffer.readu8(Kinds, slot), vector.dot(offset, offset))
-		flags = bit32.band(flags, bit32.bnot(CULLED))
+		local squared: number = vector.dot(offset, offset)
+		local kept: number = buffer.readu16(viewFlags, slot * 2)
+		local kind: number = buffer.readu8(kinds, slot)
+		local relevant: boolean
+		local near: boolean = false
+
+		if kind == NPC then
+			relevant = squared <= NpcRangeSquared
+			near = squared <= NpcNearSquared
+		elseif kind == SLEEPER then
+			relevant = squared <= SleeperSquared
+		else
+			if bit32.btest(kept, RELEVANT) then
+				relevant = squared <= LeaveSquared
+			else
+				relevant = squared <= EnterSquared
+			end
+
+			if bit32.btest(kept, NEAR) then
+				near = squared <= NearLeaveSquared
+			else
+				near = squared < NearEnterSquared
+			end
+		end
+
+		-- Whether anti-ESP culls it is found afresh below
+		local flags: number = bit32.band(kept, bit32.bnot(RELEVANT + NEAR + CULLED))
+		if relevant then
+			flags = bit32.bor(flags, RELEVANT)
+
+			if near then
+				flags = bit32.bor(flags, NEAR)
+			end
+		end
 
 		if flags ~= 0 then
 			if listed > 0 and visit < visits[listed] then
@@ -1704,9 +1771,9 @@ local function consider(view: View, viewer: Viewer, states: { [number]: State },
 
 			listed += 1
 			visits[listed] = visit
-			buffer.writeu16(view.flags, slot * 2, flags)
+			buffer.writeu16(viewFlags, slot * 2, flags)
 		elseif kept ~= 0 then
-			buffer.writeu16(view.flags, slot * 2, 0)
+			buffer.writeu16(viewFlags, slot * 2, 0)
 		end
 	end
 
@@ -1716,12 +1783,23 @@ local function consider(view: View, viewer: Viewer, states: { [number]: State },
 		table.sort(visits)
 	end
 
+	local viewGenerations: buffer = view.generations
+	local viewKinds: buffer = view.kinds
+	local places: buffer = view.places
+	local lookSent: buffer = view.lookSent
+	local heldSent: buffer = view.heldSent
+	local generations: buffer = Generations
+	local invisible: buffer = Invisible
+	local lookVersions: buffer = LookVersions
+	local heldVersions: buffer = HeldVersions
+	local lookLives: buffer = LookLives
+
 	for index: number = 1, listed do
-		local slot: number = visits[index] % SLOTS
-		local flags: number = buffer.readu16(view.flags, slot * 2)
-		local generation: number = buffer.readu8(Generations, slot)
+		local slot: number = bit32.band(visits[index], slotBits)
+		local flags: number = buffer.readu16(viewFlags, slot * 2)
+		local generation: number = buffer.readu8(generations, slot)
 		local wanted: boolean = false
-		if bit32.btest(flags, RELEVANT) and buffer.readu8(Invisible, slot) ~= generation + 1 then
+		if bit32.btest(flags, RELEVANT) and buffer.readu8(invisible, slot) ~= generation + 1 then
 			if IsHidden(viewer, slot) then
 				flags = bit32.bor(flags, CULLED)
 			else
@@ -1730,150 +1808,238 @@ local function consider(view: View, viewer: Viewer, states: { [number]: State },
 		end
 
 		-- A new life ends whatever the viewer held of the slot's last one, and its reveal replaces any hide
-		if bit32.btest(flags, SENT + REVEAL + HIDE) and buffer.readu8(view.generations, slot) ~= generation then
+		if bit32.btest(flags, SENT + REVEAL + HIDE) and buffer.readu8(viewGenerations, slot) ~= generation then
 			flags = bit32.band(flags, bit32.bnot(STRETCH))
 		end
 
-		flags = settle(view, slot, flags, wanted, generation)
+		-- Settle's two steady stretches run here, one still sent with its look's changes as restyle finds them and
+		-- one still not sent, and every other goes through settle
+		if
+			wanted
+			and not bit32.btest(flags, HIDE)
+			and bit32.btest(flags, SENT + REVEAL)
+			and buffer.readu8(viewKinds, slot) == buffer.readu8(kinds, slot)
+		then
+			buffer.writeu8(viewGenerations, slot, generation)
 
-		if bit32.btest(flags, KEEP) then
+			local version: number = buffer.readu16(lookVersions, slot * 2)
+			if version ~= buffer.readu16(lookSent, slot * 2) then
+				buffer.writeu16(lookSent, slot * 2, version)
+
+				if buffer.readu8(lookLives, slot) == generation + 1 then
+					flags = bit32.bor(bit32.band(flags, bit32.bnot(LOOK_CARRIED)), LOOK)
+				end
+			end
+
+			version = buffer.readu16(heldVersions, slot * 2)
+			if version ~= buffer.readu16(heldSent, slot * 2) then
+				buffer.writeu16(heldSent, slot * 2, version)
+				flags = bit32.bor(bit32.band(flags, bit32.bnot(HELD_CARRIED)), HELD)
+			end
+		elseif not wanted and not bit32.btest(flags, HIDE + SENT) then
+			flags = bit32.band(flags, bit32.bnot(REVEAL + VISIBILITY_CARRIED + LOOKS))
+		else
+			flags = settle(view, slot, flags, wanted, generation)
+		end
+
+		if bit32.btest(flags, KEEP) and buffer.readu16(places, slot * 2) == 0 then
 			track(view, slot)
 		end
 
-		buffer.writeu16(view.flags, slot * 2, flags)
+		buffer.writeu16(viewFlags, slot * 2, flags)
 	end
 end
 
 --[[
-    Whether an offset from the viewer lies inside the out-of-view cone
-    around its look, a unit vector, measured on the ground alone with no
-    square root: one straight above or below is inside
---]]
-
-local function within(offset: vector, look: vector, cone: OutOfView): boolean
-	local along: number = offset.x * look.x + offset.z * look.z
-	local reach: number = (offset.x * offset.x + offset.z * offset.z) * cone.cosineSquared
-
-	if cone.wide then
-		return along >= 0 or along * along <= reach
-	end
-
-	return along >= 0 and along * along >= reach
-end
-
---[[
-    Lists a sent player's or NPC's record when its tier tick comes and it
-    has something to send: a change, a rest repeat or the still repeat. At
-    or past its floor it is owed; under it, it waits in the queue by its
-    weight times the runs since its last record. A player outside the
-    viewer's cone past the out-of-view radius, and no recent shooter, is
-    held to the out-of-view rate, and is owed a record the run it no
-    longer is
+    Lists what each slot the viewer holds anything for has pending, last
+    tracked first: one no longer handed in ends, one holding nothing is let
+    go, and the rest list their hide, reveal or look entry. A sent player's
+    or NPC's record is listed when its tier tick comes and it has something
+    to send: a change, a rest repeat or the still repeat. At or past its
+    floor it is owed; under it, it waits in the queue by its weight times
+    the runs since its last record. A player outside the viewer's cone past
+    the out-of-view radius, and no recent shooter, is held to the
+    out-of-view rate, and is owed a record the run it no longer is. Returns
+    how many hides, reveals, look entries, owed and queued records it listed
 
     @ looking | the viewer's look, or with no out-of-view rate its body's
     facing, nil for a viewer with no body
 --]]
 
-local function schedule(view: View, slot: number, flags: number, offset: vector, looking: vector?): number
-	local kind: number = buffer.readu8(Kinds, slot)
-	if kind ~= PLAYER and kind ~= NPC then
-		return UNLISTED
-	end
+local function schedule(
+	view: View,
+	states: { [number]: State },
+	own: number?,
+	origin: vector,
+	looking: vector?
+): (number, number, number, number, number)
+	local hides: number, reveals: number, restyles: number, floors: number, fills: number = 0, 0, 0, 0, 0
+	local tracked: { number } = view.tracked
+	local viewFlags: buffer = view.flags
+	local shotUntil: buffer = view.shotUntil
+	local aimCredits: buffer = view.aim
+	local floorCredits: buffer = view.floor
+	local lastRecord: buffer = view.lastRecord
+	local repeats: buffer = view.repeats
 
-	local near: boolean = bit32.btest(flags, NEAR)
-	local aimRate: number
-	local floorRate: number
-	local weight: number = WeightFar
-
-	if near then
-		weight = WeightNear
-	end
-
-	if kind == NPC then
-		aimRate = NpcFarRate
-		if near then
-			aimRate = RelayRate
-		end
-
-		floorRate = aimRate
-	elseif near then
-		aimRate = NearAim
-		floorRate = NearFloor
-	else
-		aimRate = FarAim
-		floorRate = FarFloor
-	end
-
-	local shooter: boolean = buffer.readu32(view.shotUntil, slot * 4) >= Run
-	if shooter then
-		aimRate = math.max(aimRate, ShotRate)
-		floorRate = math.max(floorRate, ShotRate)
-		weight *= WeightShooter
-	end
-
-	-- The cone weighs where the out-of-view rate looks, and without one, the half space ahead of the body
 	local cone: OutOfView? = OutOfViewRate
-	local inside: boolean = false
-	if looking then
-		if cone then
-			inside = within(offset, looking, cone)
+	local cosineSquared: number, radiusSquared: number, coneRate: number = 0, 0, 0
+	local wide: boolean = false
+	if cone then
+		cosineSquared = cone.cosineSquared
+		radiusSquared = cone.radiusSquared
+		coneRate = cone.rate
+		wide = cone.wide
+	end
+
+	for index: number = #tracked, 1, -1 do
+		local slot: number = tracked[index]
+		local flags: number = buffer.readu16(viewFlags, slot * 2)
+		local present: boolean = buffer.readu32(Present, slot * 4) == Run
+
+		if not present and slot ~= own then
+			-- A body no longer handed in is relevant to no one, and whatever the viewer was sent of it ends
+			flags = bit32.band(flags, bit32.bnot(RELEVANT + NEAR + CULLED))
+			flags = settle(view, slot, flags, false, buffer.readu8(view.generations, slot))
+			buffer.writeu16(viewFlags, slot * 2, flags)
+		end
+
+		if not bit32.btest(flags, KEEP) then
+			untrack(view, slot)
+			continue
+		end
+
+		if bit32.btest(flags, HIDE) then
+			hides += 1
+			Hides[hides] = slot
+		elseif not present then
+			continue
+		elseif bit32.btest(flags, REVEAL) then
+			reveals += 1
+			Reveals[reveals] = slot
+		elseif bit32.btest(flags, LOOK + HELD) and bit32.btest(flags, SENT + OWN) then
+			restyles += 1
+			Restyles[restyles] = slot
+		end
+
+		if not present or not bit32.btest(flags, SENT) or bit32.btest(flags, REVEAL + HIDE) then
+			continue
+		end
+
+		local state: State? = states[slot]
+		local kind: number = buffer.readu8(Kinds, slot)
+		if not state or (kind ~= PLAYER and kind ~= NPC) then
+			continue
+		end
+
+		local offset: vector = state.position - origin
+		local near: boolean = bit32.btest(flags, NEAR)
+		local aimRate: number
+		local floorRate: number
+		local weight: number = WeightFar
+
+		if near then
+			weight = WeightNear
+		end
+
+		if kind == NPC then
+			aimRate = NpcFarRate
+			if near then
+				aimRate = RelayRate
+			end
+
+			floorRate = aimRate
+		elseif near then
+			aimRate = NearAim
+			floorRate = NearFloor
 		else
-			inside = vector.dot(offset, looking) > 0
+			aimRate = FarAim
+			floorRate = FarFloor
 		end
-	end
 
-	if inside then
-		weight *= WeightCone
-	end
+		local shooter: boolean = buffer.readu32(shotUntil, slot * 4) >= Run
+		if shooter then
+			aimRate = math.max(aimRate, ShotRate)
+			floorRate = math.max(floorRate, ShotRate)
+			weight *= WeightShooter
+		end
 
-	local outside: boolean = false
-	if cone and looking and not inside and kind == PLAYER and not shooter then
-		outside = vector.dot(offset, offset) > cone.radiusSquared
+		-- The cone weighs where the out-of-view rate looks, and without one, the half space ahead of the body. The
+		-- out-of-view cone around the look, a unit vector, is measured on the ground alone with no square root, so
+		-- one straight above or below is inside
+		local inside: boolean = false
+		if looking then
+			if cone then
+				local along: number = offset.x * looking.x + offset.z * looking.z
+				local reach: number = (offset.x * offset.x + offset.z * offset.z) * cosineSquared
+
+				if wide then
+					inside = along >= 0 or along * along <= reach
+				else
+					inside = along >= 0 and along * along >= reach
+				end
+			else
+				inside = vector.dot(offset, looking) > 0
+			end
+		end
+
+		if inside then
+			weight *= WeightCone
+		end
+
+		local outside: boolean = false
+		if cone and looking and not inside and kind == PLAYER and not shooter then
+			outside = vector.dot(offset, offset) > radiusSquared
+			if outside then
+				aimRate = math.min(aimRate, coneRate)
+				floorRate = math.min(floorRate, coneRate)
+			end
+		end
+
+		local aim: number = buffer.readf32(aimCredits, slot * 4) + math.min(aimRate / RelayRate, 1)
+		local floor: number = buffer.readf32(floorCredits, slot * 4) + math.min(floorRate / RelayRate, 1)
+
 		if outside then
-			aimRate = math.min(aimRate, cone.rate)
-			floorRate = math.min(floorRate, cone.rate)
+			buffer.writeu16(viewFlags, slot * 2, bit32.bor(flags, OUTSIDE))
+		elseif bit32.btest(flags, OUTSIDE) then
+			-- Back from the out-of-view rate, so it is owed a record this run, in the hard room
+			buffer.writeu16(viewFlags, slot * 2, bit32.band(flags, bit32.bnot(OUTSIDE)))
+			aim = math.max(aim, 1)
+			floor = math.max(floor, 1)
+		end
+
+		if aim < 1 then
+			buffer.writef32(aimCredits, slot * 4, aim)
+			buffer.writef32(floorCredits, slot * 4, floor)
+
+			continue
+		end
+
+		local last: number = buffer.readu32(lastRecord, slot * 4)
+		local still: boolean = buffer.readu32(Changed, slot * 4) <= last and buffer.readu8(repeats, slot) == 0
+
+		-- Its tier tick passes with nothing to send while it stays still
+		if still and Run - last < StillRuns then
+			buffer.writef32(aimCredits, slot * 4, aim - 1)
+			buffer.writef32(floorCredits, slot * 4, math.max(floor - 1, 0))
+
+			continue
+		end
+
+		buffer.writef32(aimCredits, slot * 4, aim)
+		buffer.writef32(floorCredits, slot * 4, floor)
+		buffer.writef64(Priorities, slot * 8, weight * (Run - last))
+
+		if floor >= 1 then
+			floors += 1
+			Floors[floors] = slot
+		else
+			fills += 1
+			Fills[fills] = slot
 		end
 	end
 
-	local aim: number = buffer.readf32(view.aim, slot * 4) + math.min(aimRate / RelayRate, 1)
-	local floor: number = buffer.readf32(view.floor, slot * 4) + math.min(floorRate / RelayRate, 1)
-
-	if outside then
-		buffer.writeu16(view.flags, slot * 2, bit32.bor(flags, OUTSIDE))
-	elseif bit32.btest(flags, OUTSIDE) then
-		-- Back from the out-of-view rate, so it is owed a record this run, in the hard room
-		buffer.writeu16(view.flags, slot * 2, bit32.band(flags, bit32.bnot(OUTSIDE)))
-		aim = math.max(aim, 1)
-		floor = math.max(floor, 1)
-	end
-
-	if aim < 1 then
-		buffer.writef32(view.aim, slot * 4, aim)
-		buffer.writef32(view.floor, slot * 4, floor)
-
-		return UNLISTED
-	end
-
-	local last: number = buffer.readu32(view.lastRecord, slot * 4)
-	local still: boolean = buffer.readu32(Changed, slot * 4) <= last and buffer.readu8(view.repeats, slot) == 0
-
-	-- Its tier tick passes with nothing to send while it stays still
-	if still and Run - last < StillRuns then
-		buffer.writef32(view.aim, slot * 4, aim - 1)
-		buffer.writef32(view.floor, slot * 4, math.max(floor - 1, 0))
-
-		return UNLISTED
-	end
-
-	buffer.writef32(view.aim, slot * 4, aim)
-	buffer.writef32(view.floor, slot * 4, floor)
-	buffer.writef64(Priorities, slot * 8, weight * (Run - last))
-
-	if floor >= 1 then
-		return OWED
-	end
-
-	return QUEUED
+	return hides, reveals, restyles, floors, fills
 end
 
 -- Sends the open withheld block to the watchers alone
@@ -2312,53 +2478,8 @@ local function turn(viewer: Viewer, states: { [number]: State })
 		end
 	end
 
-	local hides: number, reveals: number, restyles: number, floors: number, fills: number = 0, 0, 0, 0, 0
-	local tracked: { number } = view.tracked
-
-	for index: number = #tracked, 1, -1 do
-		local slot: number = tracked[index]
-		local flags: number = buffer.readu16(view.flags, slot * 2)
-		local present: boolean = buffer.readu32(Present, slot * 4) == Run
-
-		if not present and slot ~= own then
-			-- A body no longer handed in is relevant to no one, and whatever the viewer was sent of it ends
-			flags = bit32.band(flags, bit32.bnot(RELEVANT + NEAR + CULLED))
-			flags = settle(view, slot, flags, false, buffer.readu8(view.generations, slot))
-			buffer.writeu16(view.flags, slot * 2, flags)
-		end
-
-		if not bit32.btest(flags, KEEP) then
-			untrack(view, slot)
-			continue
-		end
-
-		if bit32.btest(flags, HIDE) then
-			hides += 1
-			Hides[hides] = slot
-		elseif not present then
-			continue
-		elseif bit32.btest(flags, REVEAL) then
-			reveals += 1
-			Reveals[reveals] = slot
-		elseif bit32.btest(flags, LOOK + HELD) and bit32.btest(flags, SENT + OWN) then
-			restyles += 1
-			Restyles[restyles] = slot
-		end
-
-		if present and bit32.btest(flags, SENT) and not bit32.btest(flags, REVEAL + HIDE) then
-			local state: State? = states[slot]
-			if state then
-				local listed: number = schedule(view, slot, flags, state.position - origin, looking)
-				if listed == OWED then
-					floors += 1
-					Floors[floors] = slot
-				elseif listed == QUEUED then
-					fills += 1
-					Fills[fills] = slot
-				end
-			end
-		end
-	end
+	local hides: number, reveals: number, restyles: number, floors: number, fills: number =
+		schedule(view, states, own, origin, looking)
 
 	local used: number = Traffic(key)
 	HardRoom = math.min(Hard / RelayRate, Hard - used)
@@ -2378,9 +2499,10 @@ local function turn(viewer: Viewer, states: { [number]: State })
 	end
 
 	-- A culled enemy's steps go once, to each viewer it is culled from inside the step's range
+	local viewFlags: buffer = view.flags
 	for index: number = 0, StepCount - 1 do
 		local slot: number = buffer.readu16(StepSlots, index * 2)
-		local flags: number = buffer.readu16(view.flags, slot * 2)
+		local flags: number = buffer.readu16(viewFlags, slot * 2)
 
 		if bit32.btest(flags, CULLED) and not bit32.btest(flags, SENT) then
 			local offset: vector = StepPlaces[index + 1] - origin
@@ -2438,6 +2560,7 @@ function Relay.run(
 	local across: number = grid.across
 	local bound: number = Constants.PLAY_BOUND
 	local order: number = 0
+	local westmost: number, eastmost: number, southmost: number, northmost: number = across, -1, across, -1
 	buffer.fill(grid.heads, 0, 0)
 
 	for slot: number, state: State in states do
@@ -2459,7 +2582,7 @@ function Relay.run(
 			walk(slot, state, generation)
 		end
 
-		-- Held to the grid's edges, and a NaN place to its first cell, since measure finds that inside no radius
+		-- Held to the grid's edges, and a NaN place to its first cell, since a turn finds that inside no radius
 		local position: vector = state.position
 		local column: number = (position.x + bound) // size
 		local row: number = (position.z + bound) // size
@@ -2480,9 +2603,18 @@ function Relay.run(
 		buffer.writeu16(grid.rows, slot * 2, row)
 		buffer.writeu16(grid.orders, slot * 2, order)
 		buffer.writeu16(grid.walk, order * 2, slot)
+
+		westmost = math.min(westmost, column)
+		eastmost = math.max(eastmost, column)
+		southmost = math.min(southmost, row)
+		northmost = math.max(northmost, row)
 	end
 
 	grid.count = order
+	grid.westmost = westmost
+	grid.eastmost = eastmost
+	grid.southmost = southmost
+	grid.northmost = northmost
 
 	-- Every viewer's view, and which of them run their own this run
 	for _, viewer: Viewer in viewers do

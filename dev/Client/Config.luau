@@ -1,7 +1,7 @@
 --[[
     Dev client values: Frontier Zero's remote smoothing, ragdoll, correction,
     draw distance and detail numbers, stand-ins where it sets none, and the dev
-    place's view, keys, prompt, shooter, replay, kit, panel and G5 cost window
+    place's view, keys, prompt, shooter, replay, kit, panels and G5 cost window
 --]]
 
 --!strict
@@ -154,6 +154,16 @@ return {
 		gap = 6, -- Pixels between the panel's parts
 		bar = 8, -- Pixels across each scroll bar
 		textSize = 14, -- The report's, at which its height is measured
+	},
+
+	-- The bot panel on this key: a spawn of bots by count, behavior and area, a clear, and the server's numbers
+	botPanel = {
+		key = Enum.KeyCode.B, -- Bound to nothing else in the dev place
+		wait = 10, -- Seconds the panel waits at boot for the player's PlayerGui
+		width = 320, -- Pixels across the panel, at the screen's left edge, beside the live panel in its middle
+		margin = 16, -- Pixels between the panel and the screen's left edge
+		count = 10, -- The count the panel starts at
+		radii = { 25, 100, 500 }, -- Studs either way of the player the area cycles through, before the whole map
 	},
 
 	-- G5's client cost: the window the dev server's ClientCost scenario opens, and what each client's line reads

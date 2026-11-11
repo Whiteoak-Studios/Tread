@@ -1,12 +1,13 @@
 --[[
     The dev place's server bootstrap: starts the dev game, and Tread's
-    server with it, G7's shot telemetry, the clips' played reports and the
-    live panel's runs, then runs each scenario a test or a check asks for
+    server with it, G7's shot telemetry, the clips' played reports, the live
+    panel's runs and the bot panel, then runs each scenario asked for
 --]]
 
 --!strict
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local BotPanel = require(ServerScriptService.Server.BotPanel)
 local Clips = require(ServerScriptService.Server.Clips)
 local Game = require(ServerScriptService.Server.Game)
 local Hits = require(ServerScriptService.Server.Hits)
@@ -21,6 +22,7 @@ Game.start()
 Hits.start()
 Clips.start()
 Live.start()
+BotPanel.start(Live.running)
 
 -- Each call is guarded, since a game script may be refused StudioTestService's calls, a live server may lack the
 -- service, and outside a test GetTestArgs may refuse
