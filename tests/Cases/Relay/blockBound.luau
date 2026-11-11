@@ -17,7 +17,11 @@ local ONE_BLOCK: number = 900 -- Room for one block of 55 records and its framin
 
 return function (): (boolean, string | nil)
 	local Harness: any = Environment.load(HARNESS)
-	local harness: any = Harness.new()
+
+	-- Whole records, since the blocks this case fills are counted in 16 B records
+	local harness: any = Harness.new(false, function (_: any, server: any)
+		server.relay.changes = false
+	end)
 	local client: any = harness:viewer("Viewer")
 
 	local slots: { number } = {}

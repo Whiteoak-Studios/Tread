@@ -392,6 +392,11 @@ local function leanOf(data: buffer, offset: number): number
 	return buffer.readi8(data, offset + LEAN_AT) * LeanLimit / LEAN_STEPS
 end
 
+-- The aim pitch a sample holds, radians, up positive
+local function pitchOf(data: buffer, offset: number): number
+	return buffer.readi16(data, offset + PITCH_AT) / PITCH_SCALE
+end
+
 -- A slot's Sample and its placed shapes for each posture, made on its first read and reused from then on
 local function sampleFor(slot: number): Sample
 	local sample: Sample? = Samples[slot]
@@ -434,6 +439,7 @@ end
     lying sample
 
     @ yawSteps | the yaw in the u16's steps of the turn
+    @ pitch | the aim pitch, radians, up positive
 --]]
 
 local function fill(
@@ -443,6 +449,7 @@ local function fill(
 	yawSteps: number,
 	word: number,
 	lean: number,
+	pitch: number,
 	epoch: number,
 	lying: boolean
 ): Sample
@@ -453,7 +460,7 @@ local function fill(
 	local placed: Placed = PlacedShapes[slot][posture]
 	local yaw: number = (yawSteps % ANGLE_STEPS) / YAW_SCALE
 
-	Shapes.place(Postures[posture], placed, position, yaw, lean)
+	Shapes.place(Postures[posture], placed, position, yaw, lean, pitch)
 
 	sample.epoch = epoch
 	sample.position = position
@@ -482,6 +489,7 @@ local function answer(slot: number, data: buffer, tick: number): Sample?
 		buffer.readu16(data, offset + YAW_AT),
 		buffer.readu16(data, offset + WORD_AT),
 		leanOf(data, offset),
+		pitchOf(data, offset),
 		buffer.readu8(data, offset + EPOCH_AT),
 		bit32.btest(buffer.readu8(data, offset + FLAGS_AT), LYING)
 	)
@@ -489,7 +497,7 @@ end
 
 --[[
     A slot's Sample between the samples at a tick and the next, nil when
-    either was spent in Noclip or Parked. Position and lean go through
+    either was spent in Noclip or Parked. Position, lean and pitch go through
     Math.lerp, yaw on the shortest arc, and the earlier sample's posture
     holds until the next one's tick. An epoch change or a platform boarded
     or left between them takes effect at the next tick, so until then the
@@ -525,9 +533,10 @@ local function between(slot: number, data: buffer, tick: number, fraction: numbe
 	local yawTo: number = buffer.readu16(data, second + YAW_AT)
 	local yaw: number = Math.lerp(yawFrom, yawFrom + Sequence.difference(yawTo, yawFrom), fraction)
 	local lean: number = Math.lerp(leanOf(data, first), leanOf(data, second), fraction)
+	local pitch: number = Math.lerp(pitchOf(data, first), pitchOf(data, second), fraction)
 	local lying: boolean = bit32.btest(buffer.readu8(data, first + FLAGS_AT), LYING)
 
-	return fill(slot, position, platform, yaw, buffer.readu16(data, first + WORD_AT), lean, epoch, lying)
+	return fill(slot, position, platform, yaw, buffer.readu16(data, first + WORD_AT), lean, pitch, epoch, lying)
 end
 
 --[[
@@ -597,9 +606,10 @@ function History.lying(slot: number, position: vector, yaw: number, epoch: numbe
 
 	local world: number = 0 -- The platform id of world coordinates, which a lying body is placed in
 	local level: number = 0 -- The lean, which a lying body never has
+	local unpitched: number = 0 -- The aim pitch, which a lying body never has either
 	checkWidths(world, epoch)
 
-	return fill(slot, position, world, yaw * YAW_SCALE, lyingWord(epoch), level, epoch, true)
+	return fill(slot, position, world, yaw * YAW_SCALE, lyingWord(epoch), level, unpitched, epoch, true)
 end
 
 --[[

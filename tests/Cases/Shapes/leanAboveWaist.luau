@@ -14,6 +14,7 @@ local WAIST: number = 2
 local LEAN: number = 30 -- Degrees, to the right
 local FEET: vector = vector.create(10, 5, -20)
 local NEAR: number = 1e-5 -- A vector holds float32, so a placed point sits within its rounding of the oracle's
+local LEVEL: number = 0 -- The aim pitch, radians, so only the lean tilts
 
 local SIDE: number = 0.3 -- Studs right of the body's line, where a point on the waist would show a tilt
 
@@ -40,8 +41,8 @@ return function (): (boolean, string | nil)
 	local leaning: any = Shapes.cross(given)
 
 	-- Facing -Z with no turn, so own space's +X, the body's right, is the world's +X
-	Shapes.place(shapes, upright, FEET, 0, 0)
-	Shapes.place(shapes, leaning, FEET, 0, LEAN)
+	Shapes.place(shapes, upright, FEET, 0, 0, LEVEL)
+	Shapes.place(shapes, leaning, FEET, 0, LEAN, LEVEL)
 
 	-- 1) Upright, every point is its own-space point moved to the feet
 	if

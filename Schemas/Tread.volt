@@ -80,6 +80,13 @@ event Platform {
 	data: (platform: u8(1..127), tick: u32),
 }
 
+event Gravity {
+	from: Server,
+	type: Reliable,
+	call: SingleSync,
+	data: (gravity: f64, tick: u32),
+}
+
 event Spectate {
 	from: Server,
 	type: Reliable,

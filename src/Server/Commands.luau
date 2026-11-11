@@ -1,7 +1,7 @@
 --[[
     The server's intake of each connection's Moves: each command filed by the
     tick it belongs to, the command or stand-in each tick runs with its
-    presses, and the acknowledgments of the relay the client sends back
+    presses, the newest look, and the relay's acknowledgments sent back
 --]]
 
 --!strict
@@ -12,6 +12,7 @@ local Connections = require(script.Parent.Connections)
 local Constants = require(script.Parent.Parent.Constants)
 local Fields = require(script.Parent.Parent.Codec.Fields)
 local Move = require(script.Parent.Parent.Codec.Move)
+local Public = require(script.Parent.Parent.Step.Public)
 local Reports = require(script.Parent.Reports)
 local Sequence = require(script.Parent.Parent.Codec.Sequence)
 local State = require(script.Parent.Parent.Step.State)
@@ -38,7 +39,7 @@ type Status = "queued" | "ran" | "late" | "spent" | "dropped"
 type Slot = {
 	full: number, -- The tick, counted on past the u16 wrap
 	status: Status,
-	arrived: number, -- The newest tick stepped when its first copy arrived
+	arrived: number, -- The clock when Volt delivered its first copy
 	command: Command, -- That first copy, decoded
 	moveX: number, -- Its wire fields, which every later copy is compared with
 	moveZ: number,
@@ -59,6 +60,7 @@ type Intake = {
 	received: number, -- The 16 sequences before it, bit 0 for the one just before
 	delay: number, -- The interpolation delay in milliseconds its newest Move gave
 	newest: number?, -- The newest command number filed or reported late
+	look: vector?, -- That command's look on the ground, a unit vector
 	taken: number?, -- The newest tick a command was taken for
 	real: number?, -- The tick of the newest real command it ran
 	levels: Pressed, -- That command's button levels, which a press reads when the ring holds no earlier command
@@ -69,6 +71,9 @@ type Intake = {
 local Intakes: { [Connection]: Intake } = {}
 local Incoming: Move.Incoming = Move.incoming() -- Each Move decodes here first, so a refused one changes nothing
 local Now: number? = nil -- The newest tick stepped, counted on past the u16 wrap, nil before the first
+
+local Clock: () -> number = os.clock -- Seconds, which a command's arrival and the tick that takes it are timed on
+local TookAt: number = 0 -- The clock at the newest tick's first take, which each command that tick takes waited until
 
 -- From the shared table and the compiled layout at start
 local Compiled: Layout? = nil
@@ -120,6 +125,28 @@ function Commands.start(shared: Config.Shared, layout: Layout)
 	Compiled = layout
 end
 
+--[[
+    Hands Commands the clock in seconds it times each command's queue
+    wait on, in place of os.clock, so a case can set the time by hand
+--]]
+
+function Commands.setClock(clock: () -> number)
+	if type(clock) ~= "function" then
+		error(`Commands.setClock takes a function giving seconds, not a {typeof(clock)}`, 2)
+	end
+
+	Clock = clock
+end
+
+--[[
+    The time on the clock Commands times queue waits on, which the server
+    stamps each Move with as Volt delivers it
+--]]
+
+function Commands.now(): number
+	return Clock()
+end
+
 -- One slot of a ring, holding no tick yet
 local function slot(): Slot
 	return {
@@ -160,6 +187,7 @@ local function intakeOf(connection: Connection): Intake
 		received = 0,
 		delay = 0,
 		newest = nil,
+		look = nil,
 		taken = nil,
 		real = nil,
 		levels = { jump = false, crouch = false, sprint = false, aim = false },
@@ -334,6 +362,24 @@ local function discard(connection: Connection, command: Command, late: number)
 end
 
 --[[
+    Keeps a command numbered past every one filed or reported late as the
+    newest, with its look on the ground: its base yaw turned by its head
+    offset, held to the head cone, its pitch left out. False for any other
+--]]
+
+local function advance(intake: Intake, command: Command): boolean
+	local newest: number? = intake.newest
+	if newest ~= nil and Sequence.difference(command.number, newest) <= 0 then
+		return false
+	end
+
+	intake.newest = command.number
+	intake.look = Public.look(command.yaw, 0, command.headYaw, 0, Limits.headCone)
+
+	return true
+end
+
+--[[
     Files each command of a Move as Volt's Move listener delivers it by the
     tick it belongs to: a first copy up to ticks.ahead past the newest tick
     stepped waits for its tick, one further ahead is dropped, and one whose
@@ -341,6 +387,8 @@ end
     fields kept for the next real command. A later copy that differs from
     the first is ignored and reported. A Move whose game fields fail their
     declarations is refused whole, its acknowledgments included
+
+    @ arrived | the clock when Volt delivered the Move, Commands.now() when left out
 --]]
 
 function Commands.receive(
@@ -349,7 +397,8 @@ function Commands.receive(
 	acknowledged: number,
 	received: number,
 	delay: number,
-	wires: { Wire }
+	wires: { Wire },
+	arrived: number?
 )
 	local layout: Layout? = Compiled
 	if not layout then
@@ -384,6 +433,7 @@ function Commands.receive(
 		return
 	end
 
+	local at: number = arrived or Clock()
 	local furthest: number = 0
 	for position: number = 1, Incoming.count do
 		local decoded: Command = Incoming.commands[position]
@@ -394,9 +444,7 @@ function Commands.receive(
 			furthest = math.max(furthest, lead)
 		elseif lead <= -Behind then
 			-- Older than the ring holds, so only a number newer than every one filed can be a first copy
-			local newest: number? = intake.newest
-			if newest == nil or Sequence.difference(number, newest) > 0 then
-				intake.newest = number
+			if advance(intake, decoded) then
 				discard(connection, decoded, 1 - lead)
 			end
 		else
@@ -409,15 +457,12 @@ function Commands.receive(
 					Reports.fire(connection.player, "moveTamper", number)
 				end
 			else
-				local newest: number? = intake.newest
-				if newest == nil or Sequence.difference(number, newest) > 0 then
-					intake.newest = number
-				end
+				advance(intake, decoded)
 
 				if lead > 0 then
-					keep(held, full, "queued", now, wire, position)
+					keep(held, full, "queued", at, wire, position)
 				else
-					keep(held, full, "late", now, wire, position)
+					keep(held, full, "late", at, wire, position)
 					discard(connection, held.command, 1 - lead)
 				end
 
@@ -529,7 +574,7 @@ local function takeReal(connection: Connection, intake: Intake, held: Slot, full
 		intake.standIns = 0
 	end
 
-	return command, false, math.min(full - held.arrived - 1, QueueWait)
+	return command, false, math.min((TookAt - held.arrived) * Rate, QueueWait)
 end
 
 --[[
@@ -622,9 +667,10 @@ end
 
 --[[
     The command a connection's body steps on a tick, whether it is a
-    stand-in, and how many whole ticks it waited in the queue before its
-    own, at most ticks.queueWait. The command is the queue's own table,
-    good until the connection's next take
+    stand-in, and how long it waited in the queue, in simulation ticks with
+    their fraction from its arrival to the tick's first take, at most
+    ticks.queueWait and 0 for a stand-in. The command is the queue's own
+    table, good until the connection's next take
 --]]
 
 function Commands.take(connection: Connection, tick: number): (Command, boolean, number)
@@ -640,6 +686,7 @@ function Commands.take(connection: Connection, tick: number): (Command, boolean,
 	local full: number = now + Sequence.difference(tick, now)
 	if Now == nil or full > now then
 		Now = full
+		TookAt = Clock()
 	end
 
 	local taken: number? = intake.taken
@@ -683,6 +730,21 @@ function Commands.delay(connection: Connection): number
 	end
 
 	return intake.delay
+end
+
+--[[
+    The look of the newest command the client sent, on the ground: its base
+    yaw turned by its head offset, held to the head cone, as a unit vector,
+    which the relay's view cone reads. Nil until a command is filed
+--]]
+
+function Commands.look(connection: Connection): vector?
+	local intake: Intake? = Intakes[connection]
+	if not intake then
+		return nil
+	end
+
+	return intake.look
 end
 
 --[[

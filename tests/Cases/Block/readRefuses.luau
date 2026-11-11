@@ -13,9 +13,9 @@ local BLOCK: string = "src/Codec/Block.luau"
 
 type Row = { name: string, bytes: { number }, text: string }
 
--- A header with the sequence and tick at 0 and the four counts given
-local function header(reveals: number, hides: number, looks: number, footsteps: number): { number }
-	return { 0, 0, 0, 0, reveals, hides, looks, footsteps }
+-- A header with the sequence and tick at 0 and the counts given, records 0 unless given
+local function header(reveals: number, hides: number, looks: number, footsteps: number, records: number?): { number }
+	return { 0, 0, 0, 0, reveals, hides, looks, footsteps, records or 0 }
 end
 
 local function join(...: { number }): { number }
@@ -28,7 +28,7 @@ local function join(...: { number }): { number }
 end
 
 local ROWS: { Row } = {
-	{ name = "7 B", bytes = { 0, 0, 0, 0, 0, 0, 0 }, text = "8 to 896 B, not 7" },
+	{ name = "8 B", bytes = { 0, 0, 0, 0, 0, 0, 0, 0 }, text = "9 to 896 B, not 8" },
 	{ name = "a reveal past the end", bytes = join(header(1, 0, 0, 0), { 1, 0 }), text = "ends inside" },
 	{ name = "a reveal of kind 4", bytes = join(header(1, 0, 0, 0), { 1, 0, 4 }), text = "kind code 4" },
 	{ name = "a hide past the end", bytes = join(header(0, 1, 0, 0), { 1 }), text = "ends inside" },
@@ -37,7 +37,7 @@ local ROWS: { Row } = {
 	{ name = "a held item of 17 B", bytes = join(header(0, 0, 1, 0), { 1, 0, 2, 17 }), text = "part of 17 B" },
 	{ name = "a look past the end", bytes = join(header(0, 0, 1, 0), { 1, 0, 1, 4, 0 }), text = "ends inside" },
 	{ name = "a footstep past the end", bytes = join(header(0, 0, 0, 1), table.create(9, 0)), text = "ends inside" },
-	{ name = "a record cut short", bytes = join(header(0, 0, 0, 0), table.create(17, 0)), text = "1 B into a record" },
+	{ name = "a record cut short", bytes = join(header(0, 0, 0, 0, 1), table.create(15, 0)), text = "ends inside" },
 }
 
 return function (): (boolean, string | nil)

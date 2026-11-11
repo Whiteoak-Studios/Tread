@@ -17,7 +17,7 @@ return function (): (boolean, string | nil)
 	local data: buffer = buffer.create(1024)
 	local pool: buffer = buffer.create(56 * 16)
 
-	-- 55 records: the header and 888 B
+	-- 55 records: the header and 889 B
 	local records: { number } = {}
 	for index: number = 1, 56 do
 		buffer.writeu16(pool, (index - 1) * 16, index)
@@ -26,12 +26,12 @@ return function (): (boolean, string | nil)
 
 	local block: any = Block.new()
 	block.recordData, block.records, block.recordCount = pool, records, 55
-	if Block.write(block, data) ~= 888 then
-		return false, "55 records didn't fill the block's 888 B"
+	if Block.write(block, data) ~= 889 then
+		return false, "55 records didn't fill the block's 889 B"
 	end
 
-	local exact: buffer = buffer.create(888)
-	buffer.copy(exact, 0, data, 0, 888)
+	local exact: buffer = buffer.create(889)
+	buffer.copy(exact, 0, data, 0, 889)
 	local read: any = Block.new()
 	Block.read(exact, read)
 	if read.recordCount ~= 55 or buffer.readu16(exact, read.records[55]) ~= 55 then
@@ -44,7 +44,7 @@ return function (): (boolean, string | nil)
 		return false, `A 56th record was written: {why}`
 	end
 
-	-- 8 reveals, each with a look entry of both parts at their largest and a record: 8 + 8 * 104 B
+	-- 8 reveals, each with a look entry of both parts at their largest and a record: 9 + 8 * 104 B
 	local parts: buffer = buffer.create(LOOK + HELD)
 	local function largest(count: number): any
 		local made: any = Block.new()
@@ -72,8 +72,8 @@ return function (): (boolean, string | nil)
 		return made
 	end
 
-	if Block.write(largest(8), data) ~= 8 + 8 * 104 then
-		return false, "8 reveals with their largest looks and records didn't fill 8 + 8 * 104 B"
+	if Block.write(largest(8), data) ~= 9 + 8 * 104 then
+		return false, "8 reveals with their largest looks and records didn't fill 9 + 8 * 104 B"
 	end
 
 	refused, why = Refuses("passes its 896 B", Block.write, largest(9), data)
@@ -102,8 +102,8 @@ return function (): (boolean, string | nil)
 	end
 
 	hides.hideCount = 255
-	if Block.write(hides, data) ~= 8 + 255 * 2 then
-		return false, "255 hides didn't fill 8 + 510 B"
+	if Block.write(hides, data) ~= 9 + 255 * 2 then
+		return false, "255 hides didn't fill 9 + 510 B"
 	end
 
 	hides.hideCount = 256

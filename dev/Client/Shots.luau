@@ -42,7 +42,8 @@ local SEQUENCES: number = 2 ^ 6 -- The values a shot's 6-bit sequence holds, as 
 local COUNTER_WRAP: number = 2 ^ 16 -- The run's counter is a u16
 local STOP: number = 0 -- The slot shoot names to stop firing
 local CLASS: number = 0 -- The keyboard-and-mouse input class, which no fixture reads
-local NO_OFFSET: number = 0 -- A shot leaves along its own look, with no head offset to turn or hold to a cone
+local NO_OFFSET: number = 0 -- A shot's look, and a firing command's, has no head offset to turn or hold to a cone
+local NO_PITCH: number = 0 -- The aim pitch pick gives beside no target
 
 type GameShapes = index<index<Tread.Shared, "hitShapes">, "Stand"> -- One posture's, as the shared table gives them
 type Placed = Shapes.Placed
@@ -91,6 +92,9 @@ local Counter: number = 0 -- The run's u16 counter, from 0 at each shoot
 local Since: number = 0 -- Samples since the last shot
 local Last: number = -1 -- The slot the last shot was aimed at, which the next pick goes round from
 local Aim: Random = Random.new(SEED) -- What each shot's throw is drawn from, seeded again at each shoot
+local Looking: boolean = false -- Whether this run has fired, so its commands carry the last shot's look
+local LookYaw: number = 0 -- The last shot's base look, radians
+local LookPitch: number = 0
 local Flights: { Flight } = {}
 local Frame: RBXScriptConnection? = nil -- Connected only while a bullet flies or firing is on
 
@@ -105,12 +109,18 @@ local function cross(shape: Shapes.Shape, into: Tread.Shape)
 	into.radius = shape.radius
 end
 
--- Places a target's posed state's shapes, its feet moved back to a segment's time, and gives them crossed
-local function placed(slot: Slot, feet: vector): Crossed
+--[[
+    Places a target's posed state's shapes, its feet moved back to a
+    segment's time, at the aim pitch it is drawn with, and gives them crossed
+
+    @ pitch | the aim pitch Interpolate.pose gave with Pose, radians, up positive
+--]]
+
+local function placed(slot: Slot, feet: vector, pitch: number): Crossed
 	local posture: Posture = Shapes.posture(Pose.posture, Pose.mode, slot.kind == "Sleeper")
 	local placing: Placed = Placings[posture]
 	local crossing: Crossed = Crossings[posture]
-	Shapes.place(Postures[posture], placing, feet, Pose.facing, Pose.lean)
+	Shapes.place(Postures[posture], placing, feet, Pose.facing, Pose.lean, pitch)
 
 	cross(placing.body, crossing.body)
 	for name: string, shape: Shapes.Shape in placing.zones do
@@ -144,7 +154,12 @@ function Shots.strike(from: Vector3, to: Vector3, posedAt: number, due: number):
 	local nearestDistance: number = math.huge
 
 	for id: number, slot: Slot in Spawned do
-		if slot.player == Player or slot.kind == "Body" or not Interpolate.pose(id, Pose) then
+		if slot.player == Player or slot.kind == "Body" then
+			continue
+		end
+
+		local shown: boolean, pitch: number = Interpolate.pose(id, Pose)
+		if not shown then
 			continue
 		end
 
@@ -154,9 +169,10 @@ function Shots.strike(from: Vector3, to: Vector3, posedAt: number, due: number):
 			continue
 		end
 
-		-- Whiteoak TODO: only the feet move back along the drawn velocity, and the facing and lean stay as drawn at
-		-- posedAt; easing both back between the two records drawn between closes it if G7 shows turning targets miss
-		local crossing: Crossed = placed(slot, Pose.position - Pose.velocity * back)
+		-- Whiteoak TODO: only the feet move back along the drawn velocity, and the facing, lean and aim pitch stay as
+		-- drawn at posedAt; easing them back between the two records drawn between closes it if G7 shows turning
+		-- targets miss
+		local crossing: Crossed = placed(slot, Pose.position - Pose.velocity * back, pitch)
 		local zone: string?, distance: number = Ballistics.zone(from, unit, length, crossing.body, crossing.zones)
 
 		if zone and distance < nearestDistance then
@@ -254,6 +270,7 @@ local function shoot(slot: number)
 		Since = EVERY - 1 -- So the run's first sample fires
 		Last = -1
 		Aim = Random.new(SEED)
+		Looking = false
 	end
 
 	hold()
@@ -261,11 +278,11 @@ end
 
 --[[
     The next drawn slot after the last one aimed at, in id order and round
-    again from the lowest, posed into Pose, or nil while none is drawn. The
-    shooter's own slot is never one
+    again from the lowest, posed into Pose, with its aim pitch, or nil and 0
+    while none is drawn. The shooter's own slot is never one
 --]]
 
-local function pick(): number?
+local function pick(): (number?, number)
 	table.clear(Order)
 	for id: number, slot: Slot in Spawned do
 		if slot.player ~= Player then
@@ -285,14 +302,15 @@ local function pick(): number?
 
 	for offset: number = 0, #Order - 1 do
 		local id: number = Order[(start - 1 + offset) % #Order + 1]
-		if Interpolate.pose(id, Pose) then
+		local shown: boolean, pitch: number = Interpolate.pose(id, Pose)
+		if shown then
 			Last = id
 
-			return id
+			return id, pitch
 		end
 	end
 
-	return nil
+	return nil, NO_PITCH
 end
 
 -- A throw of the aim inside a cube of SPREAD either way
@@ -307,17 +325,20 @@ end
 --[[
     Fires one shot into a command's shot list from the eye: aimed at the
     middle of the picked target's drawn body capsule, thrown and led, its
-    look packed as the server unpacks it, and claiming the render time on
-    screen. Its first segment is tested here, the rest on later frames
+    look packed as the server unpacks it and kept as the run's look, and
+    claiming the render time on screen. Its first segment is tested here,
+    the rest on later frames
+
+    @ targetPitch | the picked target's drawn aim pitch, radians, as pick gave it
 --]]
 
-local function fire(client: Tread.Client, shots: { Shot }, id: number)
+local function fire(client: Tread.Client, shots: { Shot }, id: number, targetPitch: number)
 	local slot: Slot = Spawned[id]
 	local weapon: Weapon? = WEAPONS[Firing]
 	local now: number = client:getRenderTime()
 	local eye: Vector3, _: Vector3 = client:getEye()
 
-	local body: Tread.Shape = placed(slot, Pose.position).body
+	local body: Tread.Shape = placed(slot, Pose.position, targetPitch).body
 	local aim: Vector3 = (body.from + body.to) / 2 + thrown()
 	if LEAD and weapon then
 		local flight: number = (aim - eye).Magnitude / weapon.speed
@@ -327,7 +348,11 @@ local function fire(client: Tread.Client, shots: { Shot }, id: number)
 	local direction: Vector3 = (aim - eye).Unit
 	local yaw: number = math.round(math.atan2(-direction.X, -direction.Z) / TURN * ANGLE_STEPS) % ANGLE_STEPS
 	local pitch: number = math.round(math.asin(direction.Y) / TURN * ANGLE_STEPS)
-	local look: vector = Public.look(yaw * RADIANS_PER_STEP, pitch * RADIANS_PER_STEP, NO_OFFSET, NO_OFFSET, NO_OFFSET)
+	LookYaw = yaw * RADIANS_PER_STEP
+	LookPitch = pitch * RADIANS_PER_STEP
+	Looking = true
+
+	local look: vector = Public.look(LookYaw, LookPitch, NO_OFFSET, NO_OFFSET, NO_OFFSET)
 
 	local whole: number = math.floor(now)
 	local fraction: number = math.floor((now - whole) * FRACTION_STEPS)
@@ -404,8 +429,9 @@ end
 --[[
     The dev game's sample after its input's: the command's shot list
     emptied, since the input reuses it, and while firing the movement held
-    at rest, so the eye a shot leaves from is the server's, the held slot
-    set, and a shot every EVERY ticks at the next drawn target
+    at rest and the head level, so the eye a shot leaves from is the
+    server's, the held slot set, a shot every EVERY ticks at the next drawn
+    target, and the base look held on the last shot's aim
 --]]
 
 function Shots.sample(command: Tread.Command)
@@ -426,24 +452,30 @@ function Shots.sample(command: Tread.Command)
 	command.crouch = false
 	command.sprint = false
 	command.lean = 0
+	command.headYaw = NO_OFFSET
+	command.headPitch = NO_OFFSET
 	fields.slot = Firing
 
 	Since += 1
-	if Since < EVERY then
-		return
+	local id: number?, pitch: number = nil, NO_PITCH
+	if Since >= EVERY then
+		id, pitch = pick()
 	end
 
-	local id: number? = pick()
-	if id == nil then
-		return
+	if id ~= nil then
+		local list: { Shot } = shots or {}
+		fields.shots = list
+		Since = 0
+
+		fire(client, list, id, pitch)
+		hold()
 	end
 
-	local list: { Shot } = shots or {}
-	fields.shots = list
-	Since = 0
-
-	fire(client, list, id)
-	hold()
+	-- The server sends a target outside the cone around the newest look it received less often, so it faces its aim
+	if Looking then
+		command.yaw = LookYaw
+		command.pitch = LookPitch
+	end
 end
 
 return Shots

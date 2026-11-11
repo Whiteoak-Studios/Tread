@@ -1,15 +1,20 @@
 --[[
     The relay block, server to viewer, at most 896 B: its header, reveal and
-    kind entries, hide entries, look entries, footstep entries and records,
-    and the 10 B footstep entry a culled enemy's step rides in
+    kind entries, hide, look and footstep entries, whole records and change
+    records, and the 10 B footstep entry a culled enemy's step rides in
 --]]
 
 --!strict
 --!native
+local Change = require(script.Parent.Change)
 local Constants = require(script.Parent.Parent.Constants)
 local Record = require(script.Parent.Record)
 
 local U8_TOP: number = 2 ^ 8 - 1 -- The most entries a section's u8 count holds
+
+-- A change record's base and mask, after its slot and generation
+local BASE_AT: number = 2
+local MASK_AT: number = 3
 
 -- Each value's place in its list, from 0, is its code
 local KINDS: { Kind } = { "Player", "Npc", "Body", "Sleeper" }
@@ -61,8 +66,9 @@ export type Footstep = {
 	material: Enum.Material,
 }
 
--- One relay block's contents, each list holding at least its count. Footstep entries and records are already
--- encoded, each at an offset of its data, so a target's record is encoded once a tick and copied to every viewer
+-- One relay block's contents, each list holding at least its count. Footstep entries, records and change records
+-- are already encoded, each at an offset of its data, so a target's record is encoded once a tick and copied to
+-- every viewer
 export type Block = {
 	sequence: number, -- The viewer's own message sequence, which its Move acknowledges
 	tick: number, -- The relay tick its records sample
@@ -75,9 +81,13 @@ export type Block = {
 	footstepCount: number,
 	footsteps: { number },
 	footstepData: buffer,
-	recordCount: number,
+	recordCount: number, -- Whole records
 	records: { number },
 	recordData: buffer,
+	changeCount: number, -- Change records, each sized by its own mask
+	changeData: buffer,
+	changeOffsets: { number },
+	changeLengths: { number },
 }
 
 -- Each material by its Enum value, which a footstep entry carries
@@ -113,6 +123,10 @@ function Block.new(): Block
 		recordCount = 0,
 		records = {} :: { number },
 		recordData = empty,
+		changeCount = 0,
+		changeData = empty,
+		changeOffsets = {} :: { number },
+		changeLengths = {} :: { number },
 	}
 end
 
@@ -149,16 +163,19 @@ end
 --[[
     Writes a block into data from its first byte and gives the bytes it
     filled, its sections in order whatever order they were filled in. It
-    errors on a block past 896 B or past data, and on a section past the 255
-    its count holds
+    errors on a block past bound, 896 B unless a tap block's is given, or
+    past data, on a section past the 255 its count holds, and on a change
+    record whose length isn't the one its mask names
 --]]
 
-function Block.write(block: Block, data: buffer): number
+function Block.write(block: Block, data: buffer, bound: number?): number
 	local revealCount: number = block.revealCount
 	local hideCount: number = block.hideCount
 	local lookCount: number = block.lookCount
 	local footstepCount: number = block.footstepCount
 	local recordCount: number = block.recordCount
+	local changeCount: number = block.changeCount or 0
+	local most: number = bound or Constants.MAX_RELAY_BYTES
 
 	local bytes: number = Constants.RELAY_HEADER_BYTES
 		+ revealCount * Constants.REVEAL_BYTES
@@ -170,9 +187,19 @@ function Block.write(block: Block, data: buffer): number
 		bytes += lookBytes(block.looks[index])
 	end
 
-	if not (bytes <= Constants.MAX_RELAY_BYTES and bytes <= buffer.len(data)) then
-		error(`A relay block of {bytes} B passes its {Constants.MAX_RELAY_BYTES} B or its {buffer.len(data)} B buffer`)
-	elseif math.max(revealCount, hideCount, lookCount, footstepCount) > U8_TOP then
+	for index: number = 1, changeCount do
+		local length: number = block.changeLengths[index]
+		local mask: number = buffer.readu8(block.changeData, block.changeOffsets[index] + MASK_AT)
+		if Change.length(mask) ~= length then
+			error(`A change record of {length} B doesn't fill the {Change.length(mask)} B its mask {mask} names`)
+		end
+
+		bytes += length
+	end
+
+	if not (bytes <= most and bytes <= buffer.len(data)) then
+		error(`A relay block of {bytes} B passes its {most} B or its {buffer.len(data)} B buffer`)
+	elseif math.max(revealCount, hideCount, lookCount, footstepCount, recordCount) > U8_TOP then
 		error(`A relay block's sections hold at most {U8_TOP} entries each`)
 	end
 
@@ -182,6 +209,7 @@ function Block.write(block: Block, data: buffer): number
 	buffer.writeu8(data, 5, hideCount)
 	buffer.writeu8(data, 6, lookCount)
 	buffer.writeu8(data, 7, footstepCount)
+	buffer.writeu8(data, 8, recordCount)
 
 	local offset: number = Constants.RELAY_HEADER_BYTES
 
@@ -239,6 +267,13 @@ function Block.write(block: Block, data: buffer): number
 		offset += Constants.RECORD_BYTES
 	end
 
+	for index: number = 1, changeCount do
+		local length: number = block.changeLengths[index]
+
+		buffer.copy(data, offset, block.changeData, block.changeOffsets[index], length)
+		offset += length
+	end
+
 	return offset
 end
 
@@ -264,23 +299,27 @@ local function readPart(data: buffer, offset: number, length: number, bound: num
 end
 
 --[[
-    Reads a block into into, reusing its entry tables. Records, footstep
-    entries and look parts are left in data, at the offsets into names, so
-    a reader decodes each where it lies. It errors on a block that isn't
-    one: past 896 B, a section past its end, records that aren't whole, or
-    a kind or flag no value is given
+    Reads a block into into, reusing its entry tables. Records, change
+    records, footstep entries and look parts are left in data, at the
+    offsets into names, so a reader decodes each where it lies, a change
+    against the client's store. It errors on a block that isn't one: past
+    bound, 896 B unless a tap block's is given, a section past its end, a
+    kind or flag no value is given, or a change record whose base is
+    outside 1 to 31 or whose mask holds Y both ways
 --]]
 
-function Block.read(data: buffer, into: Block)
+function Block.read(data: buffer, into: Block, bound: number?)
 	local length: number = buffer.len(data)
-	if not (length >= Constants.RELAY_HEADER_BYTES and length <= Constants.MAX_RELAY_BYTES) then
-		error(`A relay block is {Constants.RELAY_HEADER_BYTES} to {Constants.MAX_RELAY_BYTES} B, not {length}`)
+	local most: number = bound or Constants.MAX_RELAY_BYTES
+	if not (length >= Constants.RELAY_HEADER_BYTES and length <= most) then
+		error(`A relay block is {Constants.RELAY_HEADER_BYTES} to {most} B, not {length}`)
 	end
 
 	local revealCount: number = buffer.readu8(data, 4)
 	local hideCount: number = buffer.readu8(data, 5)
 	local lookCount: number = buffer.readu8(data, 6)
 	local footstepCount: number = buffer.readu8(data, 7)
+	local recordCount: number = buffer.readu8(data, 8)
 	local offset: number = Constants.RELAY_HEADER_BYTES
 
 	into.sequence = buffer.readu16(data, 0)
@@ -370,15 +409,34 @@ function Block.read(data: buffer, into: Block)
 		offset += Constants.FOOTSTEP_BYTES
 	end
 
-	-- Records fill the rest, whole
-	local rest: number = length - offset
-	if rest % Constants.RECORD_BYTES ~= 0 then
-		error(`A relay block's records end {rest % Constants.RECORD_BYTES} B into a record`)
-	end
+	within(offset, recordCount * Constants.RECORD_BYTES, length)
 
-	for index: number = 1, rest // Constants.RECORD_BYTES do
+	for index: number = 1, recordCount do
 		into.records[index] = offset
 		offset += Constants.RECORD_BYTES
+	end
+
+	-- Change records fill the rest, each as long as its mask names
+	local changeCount: number = 0
+	while offset < length do
+		within(offset, Constants.CHANGE_HEADER_BYTES, length)
+
+		local base: number = buffer.readu8(data, offset + BASE_AT)
+		local mask: number = buffer.readu8(data, offset + MASK_AT)
+		local bytes: number = Change.length(mask)
+
+		if base < 1 or base >= Constants.CHANGE_DEPTH then
+			error(`A change record's base is 1 to {Constants.CHANGE_DEPTH - 1} relay ticks back, not {base}`)
+		elseif bytes == 0 then
+			error(`A change record's mask {mask} holds Y both as a step and whole`)
+		end
+
+		within(offset, bytes, length)
+
+		changeCount += 1
+		into.changeOffsets[changeCount] = offset
+		into.changeLengths[changeCount] = bytes
+		offset += bytes
 	end
 
 	into.revealCount = revealCount
@@ -386,8 +444,10 @@ function Block.read(data: buffer, into: Block)
 	into.lookCount = lookCount
 	into.footstepCount = footstepCount
 	into.footstepData = data
-	into.recordCount = rest // Constants.RECORD_BYTES
+	into.recordCount = recordCount
 	into.recordData = data
+	into.changeCount = changeCount
+	into.changeData = data
 end
 
 --[[

@@ -546,6 +546,7 @@ function Bot._hearRelay(self: Self, data: buffer)
 	local block: Block.Block = self._block
 	Block.read(data, block)
 
+	-- A bot draws nothing, so it acknowledges each block that arrives and never decodes its change records
 	local sequence: number = block.sequence
 	if not self._receiving then
 		self._receiving = true

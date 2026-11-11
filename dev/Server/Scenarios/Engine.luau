@@ -132,8 +132,21 @@ local function gameFunctions(casts: Collision): GameCollision
 	}
 end
 
+-- How many overlap probe cameras Workspace holds, the running world's own among them
+local function probes(): number
+	local count: number = 0
+	for _, child: Instance in Workspace:GetChildren() do
+		if child.Name == "TreadProbe" then
+			count += 1
+		end
+	end
+
+	return count
+end
+
 return function (): (boolean, string | nil)
 	local problems: { string } = {}
+	local before: number = probes()
 	crossing(problems)
 
 	local root: Instance? = Workspace:FindFirstChild("SpikeFixtures")
@@ -175,8 +188,10 @@ return function (): (boolean, string | nil)
 		root:Destroy()
 	end
 
-	if Workspace:FindFirstChild("TreadProbe") then
-		table.insert(problems, "an overlap probe's camera was left in Workspace")
+	-- The running world keeps a probe of its own for the server's life, so only a rise over the trials is a leak
+	local after: number = probes()
+	if after > before then
+		table.insert(problems, `overlap probe cameras in Workspace went from {before} to {after} over the trials`)
 	end
 
 	if #problems > 0 then

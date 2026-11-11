@@ -300,6 +300,9 @@ export type World = {
 	bodies: { State }, -- The live players and NPCs this tick, each body's state where it stands now
 	platforms: { [number]: PlatformEntry }, -- By id
 	clock: number, -- An unwrapped simulation tick within 32,767 of every tick the step runs until it is next set
+	gravity: number, -- Studs/s², the latest change's, the settings' own before any
+	gravityAt: number?, -- The unwrapped tick the latest change applies from, nil before any
+	gravityBefore: number, -- The gravity the ticks before gravityAt step under
 }
 
 local State = {}

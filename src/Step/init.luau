@@ -55,6 +55,7 @@ local deep: boolean = false -- Whether the tick starts with the feet deeper in w
 local slidable: boolean = false -- Whether Tread's own physics lets a crouch slide start this tick, before the rules
 local began: boolean = false -- Whether a crouch slide started this tick
 local airborne: boolean = false -- Whether a slide ended this tick by leaving the ground with no jump
+local gravity: number = 0 -- Studs/s², what the world gives the tick being stepped, set before anything reads it
 
 -- What the rules function reads and what it permits, filled each tick so a step makes no table
 local RuleInput: RuleStep = {} :: RuleStep
@@ -258,7 +259,7 @@ local function land(state: State, world: World, falling: number)
 	end
 
 	-- A jump on level ground lands under its own speed plus the one tick of gravity its last tick adds
-	local fastestJump: number = settings.jump + settings.gravity * world.delta
+	local fastestJump: number = settings.jump + gravity * world.delta
 
 	state.lands = (state.lands + 1) % COUNTERS
 	state.heavy = falling >= fastestJump
@@ -330,7 +331,7 @@ local function air(state: State, _: Command, world: World)
 		vy = settings.jump
 		state.jumps = (state.jumps + 1) % COUNTERS
 	else
-		vy = math.max(velocity.y - settings.gravity * delta, -settings.terminal)
+		vy = math.max(velocity.y - gravity * delta, -settings.terminal)
 	end
 
 	local from: number = state.position.y
@@ -380,7 +381,7 @@ local function slide(state: State, command: Command, world: World)
 
 	local steerX: number = moveRight * cosine - moveForward * sine
 	local steerZ: number = -(moveRight * sine + moveForward * cosine)
-	local below: State? = Slide.run(state, world, steerX, steerZ)
+	local below: State? = Slide.run(state, world, steerX, steerZ, gravity)
 
 	slideOff(state, world, below)
 	airborne = not state.grounded
@@ -726,12 +727,13 @@ local function quantize(state: State, settings: Settings)
 end
 
 --[[
-    Moves a body one tick in place from its command and the world, the
-    same on every realm, allocating nothing: a tick off the slide's
-    cooldown, its look, then its move mode's move, the eye eased, the water
-    level, and the whole state rounded to OwnerState's precisions. The
-    command's head offset is clamped to the game's cone in place, and a move
-    mode other than walking ends a mantle, a slide and a ride.
+    Moves a body one tick in place from its command and the world, under
+    the gravity the world gives its tick, the same on every realm,
+    allocating nothing: a tick off the slide's cooldown, its look, then its
+    move mode's move, the eye eased, the water level, and the whole state
+    rounded to OwnerState's precisions. The command's head offset is clamped
+    to the game's cone in place, and a move mode other than walking ends a
+    mantle, a slide and a ride.
     Gives back the speed the body landed at, 0 for no landing that counted,
     and how far it sank when depenetration found no clear spot, nil when it
     is clear
@@ -747,6 +749,14 @@ function Step.advance(state: State, command: Command, world: World): (number, nu
 	state.command = command.number
 	state.tick = world.tick
 	landed = 0
+
+	-- A tick before the latest change, as a replay steps, keeps the gravity before it
+	local changedAt: number? = world.gravityAt
+	if changedAt ~= nil and Platforms.tick(world) < changedAt then
+		gravity = world.gravityBefore
+	else
+		gravity = world.gravity
+	end
 
 	-- The cooldown runs down in every move mode, so a staff mode's ticks count toward it
 	if state.slideCooldown > 0 then

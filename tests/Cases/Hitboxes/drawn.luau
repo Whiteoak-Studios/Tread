@@ -2,7 +2,7 @@
     Switched on, the hitboxes draw the owner's body and every other drawn
     character at the state Tread draws it in: its hull standing or crouched,
     the lying box only while downed or lying, and the hit shapes of the
-    posture it is hit through, placed at its feet, facing and lean
+    posture it is hit through, placed at its feet, facing, lean and aim pitch
 --]]
 
 --!strict
@@ -27,6 +27,9 @@ local FEET: vector = vector.create(0, 50, 0)
 local AT: vector = vector.create(12, 3, -40)
 local YAW: number = 1.25 -- Radians
 local LEAN: number = 12 -- Degrees, to the right
+local PITCH: number = 0.5 -- Radians the crouched NPC aims up by
+local PITCH_STEP: number = (math.pi / 2) / 127 -- Radians a record's i8 pitch steps by, 127 to 90°
+local LEVEL: number = 0 -- The aim pitch the level placement the crouched NPC's head moves back from takes
 local CLOSE: number = 1e-3
 
 -- Why an adornment sits off where it was due, or nil when it sits there
@@ -113,11 +116,13 @@ return function (): (boolean, string | nil)
 			end
 
 			local lean: number = slot == CROUCHED and LEAN or 0
+			local pitch: number = slot == CROUCHED and PITCH or 0
 			table.insert(records, {
 				slot = slot,
 				generation = GENERATION,
 				position = AT + vector.create(slot, 0, 0),
 				yaw = YAW,
+				pitch = pitch,
 				lean = lean,
 				word = words[slot],
 			})
@@ -159,8 +164,10 @@ return function (): (boolean, string | nil)
 
 	-- 2) Each remote's hull stands on the feet Tread drew it at, crouched for the downed and the crouched
 	local poses: { [number]: vector } = {}
+	local pitches: { [number]: number } = {}
 	for _, call: any in rig.pool.of("pose") do
 		poses[call.slot] = call.position
+		pitches[call.slot] = call.pitch
 	end
 
 	local heights: { [number]: number } = { [CROUCHED] = step.crouched, [DOWNED] = step.crouched }
@@ -198,15 +205,23 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- 4) Every capsule of the posture each is hit through, at its feet, facing and lean, a sleeper's Downed
+	-- 4) Every capsule of the posture each is hit through, at its feet, facing, lean and the aim pitch its rig was
+	-- posed with, a sleeper's Downed
 	local postures: { [string]: string } =
 		{ [OWNER] = "Stand", [`{CROUCHED}`] = "Crouch", [`{DOWNED}`] = "Downed", [`{SLEEPER}`] = "Downed" }
+	local slots: { [string]: number } =
+		{ [OWNER] = OWN, [`{CROUCHED}`] = CROUCHED, [`{DOWNED}`] = DOWNED, [`{SLEEPER}`] = SLEEPER }
 
 	for key: string, posture: string in postures do
 		local state: any = states[key]
+		local pitch: number? = pitches[slots[key]]
+		if pitch == nil then
+			return false, `{key}'s rig was never posed, so its aim pitch is unknown`
+		end
+
 		local shapes: any = Shapes.cross(rig.shared.hitShapes[posture])
 		local into: any = Shapes.cross(rig.shared.hitShapes[posture])
-		Shapes.place(shapes, into, state.position, state.facing, state.lean)
+		Shapes.place(shapes, into, state.position, state.facing, state.lean, pitch)
 
 		local anchor: any = drawn:FindFirstChild(key)
 		local failure: string? = onShape(anchor, "Body", into.body)
@@ -225,6 +240,21 @@ return function (): (boolean, string | nil)
 	local legs: any = crouched.legsFrom.CFrame.Position
 	if states[`{CROUCHED}`].lean == 0 or math.abs(head.X - legs.X) + math.abs(head.Z - legs.Z) < CLOSE then
 		return false, "The leaning NPC's head was drawn straight over its legs"
+	end
+
+	-- Its aim pitch reached them too: the head sits back along its facing from where it would sit level
+	local npc: any = states[`{CROUCHED}`]
+	local aimed: number? = pitches[CROUCHED]
+	local level: any = Shapes.cross(rig.shared.hitShapes.Crouch)
+	Shapes.place(Shapes.cross(rig.shared.hitShapes.Crouch), level, npc.position, npc.facing, npc.lean, LEVEL)
+
+	local levelHead: vector = (level.zones.head.from + level.zones.head.to) / 2
+	local backX: number, backZ: number = math.sin(npc.facing), math.cos(npc.facing)
+	local moved: number = (head.X - levelHead.x) * backX + (head.Z - levelHead.z) * backZ
+	if aimed == nil or math.abs(aimed - PITCH) > PITCH_STEP then
+		return false, `The crouched NPC's rig was posed at a pitch of {aimed}, not its record's {PITCH}`
+	elseif moved < CLOSE then
+		return false, `Aiming up, the crouched NPC's head was drawn {moved} studs back along its facing, not behind it`
 	end
 
 	switch(false)

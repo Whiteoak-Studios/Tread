@@ -1,7 +1,8 @@
 --[[
     A viewer's client for the interpolation cases: Interpolate started in a
-    fresh game with Frontier Zero's settings, logs of what its signals tell,
-    and the server's part, announcing slots and sending relay blocks
+    fresh game with Frontier Zero's settings on a client world, logs of what
+    its signals tell, and the server's part, announcing slots and sending
+    relay blocks
 --]]
 
 --!strict
@@ -11,12 +12,16 @@ local Game = require("../Codec/Game")
 local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
 local WIRE: number = 2 ^ 16 -- The values a block's u16 sequence and tick hold
 
--- Frontier Zero's interpolation block, rates and gravity, from game-integration
+-- Frontier Zero's interpolation block and rates, from game-integration
 local SETTINGS: { [string]: number } = { delay = 0.15, delayMax = 0.25, scaleMin = 0.95, scaleMax = 1.05 }
 local RATES: { [string]: number } = { simulation = 20, relay = 20 }
-local GRAVITY: number = 68.1 -- Studs/s², the shared table's step.gravity
 
 export type Viewer = { [string]: any }
+
+-- A rules function that refuses nothing, which the client world holds and the interpolation never runs
+local function rules(_: any, _: any): number
+	return math.huge
+end
 
 -- A copy all the way down, since Interpolate refills its own tables
 local function copy(value: any): any
@@ -52,7 +57,14 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 	local Sequence: any = globals.require(tread.Codec.Sequence)
 	local State: any = globals.require(tread.Step.State)
 	local StateWord: any = globals.require(tread.Codec.StateWord)
+	local World: any = globals.require(tread.Step.World)
+	local fixtures: any = globals.game:GetService("ServerScriptService").Fixtures
+	local Scene: any = globals.require(fixtures.Step.Scene)
+	local Casts: any = globals.require(fixtures.Step.Collision)
 	local layout: any = Fields.compile(Game.fields)
+
+	-- The client's world as Client.start builds it, whose clock and gravity a case sets as the handle would
+	local world: any = World.new(Scene.settings, RATES.simulation, Casts({}), nil, rules, false)
 
 	local viewer: Viewer = {
 		Interpolate = Interpolate,
@@ -61,9 +73,11 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 		Sequence = Sequence,
 		State = State,
 		StateWord = StateWord,
+		World = World,
+		world = world,
 		settings = SETTINGS,
 		rates = RATES,
-		gravity = GRAVITY,
+		gravity = Scene.settings.gravity,
 		limits = Game.limits,
 		reveals = {},
 		hides = {},
@@ -73,7 +87,7 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 		sequence = 0,
 	}
 
-	Interpolate.start(SETTINGS, RATES, Game.limits, layout, GRAVITY)
+	Interpolate.start(SETTINGS, RATES, Game.limits, layout, world)
 
 	Interpolate.onReveal(function (slot: number, kind: string, player: any, outfit: any, held: any)
 		table.insert(

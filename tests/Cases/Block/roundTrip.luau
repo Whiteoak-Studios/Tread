@@ -86,7 +86,7 @@ return function (): (boolean, string | nil)
 
 	local data: buffer = buffer.create(896)
 	local bytes: number = Block.write(block, data)
-	local size: number = 8
+	local size: number = 9
 		+ 4 * 3
 		+ 2 * 2
 		+ (5 + lookLength + heldLength)
@@ -99,8 +99,8 @@ return function (): (boolean, string | nil)
 		return false, `The block filled {bytes} B, where its sections fill {size}`
 	end
 
-	-- The header: the sequence, the tick, then the four counts
-	local header: { number } = { 0xFF, 0xFF, TICK % 256, TICK // 256, 4, 2, 4, 2 }
+	-- The header: the sequence, the tick, then the five counts
+	local header: { number } = { 0xFF, 0xFF, TICK % 256, TICK // 256, 4, 2, 4, 2, 3 }
 	for index: number, byte: number in header do
 		if buffer.readu8(data, index - 1) ~= byte then
 			return false, `Header byte {index - 1} is {buffer.readu8(data, index - 1)}, where it is {byte}`

@@ -1,12 +1,13 @@
 --[[
     The relay: which characters each viewer is sent and how often inside its
-    budget, its blocks of records, footsteps and pending entries, copied to
-    each moderator watching it, and the withheld block those moderators get
+    budget, its blocks of records, whole or as changes, footsteps and pending
+    entries, copied to each moderator watching it, and their withheld block
 --]]
 
 --!strict
 --!native
 local Block = require(script.Parent.Parent.Codec.Block)
+local Change = require(script.Parent.Parent.Codec.Change)
 local Config = require(script.Parent.Parent.Config)
 local Constants = require(script.Parent.Parent.Constants)
 local Command = require(script.Parent.Parent.Codec.Command)
@@ -26,13 +27,10 @@ local BLOCK_BYTES: number = Constants.MAX_RELAY_BYTES
 local HEADER_BYTES: number = Constants.RELAY_HEADER_BYTES
 local REVEAL_BYTES: number = Constants.REVEAL_BYTES
 local HIDE_BYTES: number = Constants.HIDE_BYTES
-local LOOK_ENTRY_BYTES: number = Constants.LOOK_ENTRY_BYTES
 local FOOTSTEP_BYTES: number = Constants.FOOTSTEP_BYTES
-local PREFIX_BYTES: number = Constants.PREFIX_BYTES
 local MAX_LOOK: number = Constants.MAX_LOOK
 local MAX_HELD: number = Constants.MAX_HELD
-local MAX_RECORDS: number = Constants.MAX_RELAY_RECORDS
-local MASK_BITS: number = Constants.ACK_MASK_BITS
+local DEPTH: number = Constants.CHANGE_DEPTH -- Relay runs of records the history keeps, so a baseline is 1 to 31 back
 local COUNTERS: number = 2 ^ Constants.COUNTER_BITS -- The values a state word's jump or land counter wraps through
 local WRAP: number = 2 ^ 16 -- The values a u16 wire number wraps through
 local SEQUENCES: number = WRAP - Constants.FIRST_SEQUENCE -- A viewer's sequences run 1 to 65,535, so 0 still means none
@@ -50,16 +48,17 @@ local TURN_CHANGE: number = 0.5 -- Degrees a yaw or pitch moves by before the mo
 local YAW_CHANGE: number = Constants.ANGLE_STEPS * TURN_CHANGE / TURN -- That move in a record's yaw steps
 local PITCH_CHANGE: number = Constants.RECORD_PITCH_STEPS * TURN_CHANGE / QUARTER_TURN -- And in its pitch steps
 
--- What a viewer's acknowledgment can clear: the blocks it can still name and the pending entries they carried, each
--- logged as its slot times ENTRY_PARTS plus its part
+-- What a viewer's acknowledgment can clear: the blocks it can still name and the pending entries and records they
+-- carried, each logged as its slot times ENTRY_PARTS plus its part
 local RING: number = 64
-local LOG: number = 4096
-local ENTRY_PARTS: number = 5
+local LOG: number = 8192
+local ENTRY_PARTS: number = 6
 local VISIBILITY: number = 0 -- A reveal or a hide
 local LOOK_PART: number = 1
 local HELD_PART: number = 2
 local WITHHELD_LOOK_PART: number = 3 -- A withheld character's look, which rides the withheld block beside the copy
 local WITHHELD_HELD_PART: number = 4
+local RECORD_PART: number = 5 -- A record, logged while records go as changes, a baseline once acknowledged
 
 -- Each block keeps the recipients still to acknowledge it as a mask, a bit each: SELF its own viewer, and each
 -- moderator watching that viewer the bit it was given, 1 to MAX_WATCHERS
@@ -91,6 +90,7 @@ local LOOK_CARRIED: number = 2 ^ 8
 local HELD: number = 2 ^ 9 -- The held item pending
 local HELD_CARRIED: number = 2 ^ 10
 local OWN: number = 2 ^ 11 -- The viewer's own character, whose looks it is given and which it is never sent
+local OUTSIDE: number = 2 ^ 12 -- Held to the out-of-view rate on its last run, so it is owed a record once it isn't
 local LOOKS: number = LOOK + LOOK_CARRIED + HELD + HELD_CARRIED
 local STRETCH: number = SENT + REVEAL + HIDE + VISIBILITY_CARRIED + LOOKS -- All a stretch of being sent holds
 local KEEP: number = RELEVANT + SENT + REVEAL + HIDE + LOOK + HELD + OWN -- Any of these keeps a slot tracked
@@ -146,6 +146,16 @@ export type Viewer = {
 	acknowledged: number, -- The newest relay sequence its client received, 0 for none
 	received: number, -- The mask of the 16 sequences before that one, bit 0 the one just before
 	target: Key?, -- The viewer it spectates, whose blocks it gets copies of in place of its own; nil for none
+	look: vector?, -- The newest look its client sent, a unit vector on the ground; nil before any
+}
+
+-- The out-of-view rate as the relay reads it: the rate, the radius squared, and the cone's half-angle as its cosine
+-- squared, with whether it is wider than a quarter turn
+type OutOfView = {
+	rate: number,
+	radiusSquared: number,
+	cosineSquared: number,
+	wide: boolean,
 }
 
 -- What a watched target's withheld block keeps for each slot, by slot in buffers
@@ -185,7 +195,10 @@ type View = {
 	shotUntil: buffer, -- u32: the last run a shot near it raises that shooter's rate
 	aim: buffer, -- f32: the tier ticks it is owed at the target's aim rate
 	floor: buffer, -- f32: and at its floor rate
+	baseRuns: buffer, -- u32: the newest run whose record every recipient acknowledged, 0 for none; empty unless changes
+	baseFloor: number, -- The first run whose blocks may give a baseline, so one acknowledged before it is never used
 	ringSequences: buffer, -- u32: each remembered block's sequence plus 1, 0 for none
+	ringRuns: buffer, -- u32: the run it went in
 	ringStarts: buffer, -- f64: where its entries start in the log
 	ringCounts: buffer, -- u16: how many it carried
 	ringOwed: buffer, -- u32: the mask of its recipients still to acknowledge it
@@ -219,8 +232,11 @@ local IsHidden: (viewer: Viewer, slot: number) -> boolean = function (_: Viewer,
 end
 
 local Layout: Layout = Fields.compile({ command = {}, rules = {}, server = {}, slot = {}, held = {} })
-local DeclarationsHash: number = 0
 local Limits: Limits = { lean = 0, headCone = 0 }
+
+-- What the keyframes take from start: the declarations' hash, and the shared table's gravity, which a keyframe given
+-- none carries. One table, since Luau caps a chunk's locals
+local Keyed: { hash: number, gravity: number } = { hash = 0, gravity = 0 }
 
 -- The game's settings as the relay reads them, each distance squared and each budget in bytes a second, but the
 -- radii each viewer's own render distance caps, in studs, which share one table since Luau caps a chunk's locals
@@ -247,6 +263,7 @@ local NpcFarRate: number = 0
 local StrideWalk: number = 0
 local StrideSprint: number = 0
 local Heard: { number } = { SILENT, SILENT, SILENT, SILENT } -- Each footstep kind's squared range
+local OutOfViewRate: OutOfView? = nil -- Nil while the game gives none, so no player is held to it
 
 -- The radii of the viewer whose turn it is, squared, from its render distance, found once a turn
 local EnterSquared: number = 0
@@ -266,6 +283,34 @@ local Kinds: buffer = buffer.create(SLOTS)
 local Records: buffer = buffer.create(SLOTS * RECORD_BYTES)
 local References: buffer = buffer.create(SLOTS * RECORD_BYTES) -- The record each change is measured from
 local Changed: buffer = buffer.create(SLOTS * 4) -- u32: the run its record last changed
+
+-- Records as changes, on while the game's relay.changes is: every present slot's record over the last DEPTH runs, a
+-- plane a run at the run's place in DEPTH with the run and wire tick it holds, and this run's changes, each encoded
+-- once by slot and base for every view sharing that baseline, their buffers made at start while it is on. Beside
+-- them, the base each record listed this turn goes against, 0 for whole, and the block the taps are handed with every
+-- change expanded. One table, since Luau caps a chunk's locals
+local Deltas: {
+	on: boolean,
+	history: buffer,
+	runs: buffer, -- u32
+	ticks: buffer, -- u16
+	encoded: buffer, -- A record's bytes for each, by slot then base
+	stamps: buffer, -- u32: the run each was encoded on, 0 for none
+	lengths: buffer, -- u8: its bytes, 0 when its record must go whole
+	bases: buffer, -- u8: by slot
+	tapped: Block.Block,
+} =
+	{
+		on = false,
+		history = buffer.create(0),
+		runs = buffer.create(DEPTH * 4),
+		ticks = buffer.create(DEPTH * 2),
+		encoded = buffer.create(0),
+		stamps = buffer.create(0),
+		lengths = buffer.create(0),
+		bases = buffer.create(SLOTS),
+		tapped = Block.new(),
+	}
 
 -- Each slot's look and held item, packed, with a version that moves on each change
 local Looks: buffer = buffer.create(SLOTS * MAX_LOOK)
@@ -305,8 +350,8 @@ local HardRoom: number = 0 -- The bytes it may take this tick for what is owed, 
 local SoftRoom: number = 0
 
 -- Whiteoak TODO: Volt sends a buffer field whole, so each block goes in a buffer of its exact length, kept here
--- once per length and reused, at most 889 buffers and Volt's copy of each block; a buffer field that takes a length
--- would remove both, a Volt task if G3 shows the cost
+-- once per length and reused, at most 889 buffers and Volt's copy of each block, and more for the taps' expanded
+-- blocks while a sink observes; a buffer field that takes a length would remove both, a Volt task if G3 shows the cost
 local Outgoing: { [number]: buffer } = {}
 
 -- Who the open block goes to: the viewer whose turn it is, then each moderator watching it, with their views and
@@ -389,7 +434,8 @@ function Relay.start(
 	Traffic = traffic
 	IsHidden = isHidden
 	Layout = settings.layout
-	DeclarationsHash = Fields.hash(settings.layout)
+	Keyed.hash = Fields.hash(settings.layout)
+	Keyed.gravity = shared.step.gravity
 	Limits = { lean = shared.step.lean, headCone = shared.step.headCone }
 
 	RelayRate = shared.rates.relay
@@ -406,6 +452,18 @@ function Relay.start(
 	NearFloor = server.tiers.nearFloor
 	FarAim = server.tiers.farAim
 	FarFloor = server.tiers.farFloor
+
+	local outOfView: { rate: number, cone: number, radius: number }? = server.tiers.outOfView
+	if outOfView then
+		local cosine: number = math.cos(math.rad(outOfView.cone))
+		OutOfViewRate = {
+			rate = outOfView.rate,
+			radiusSquared = outOfView.radius ^ 2,
+			cosineSquared = cosine * cosine,
+			wide = outOfView.cone > QUARTER_TURN,
+		}
+	end
+
 	WeightNear = server.weights.near
 	WeightFar = server.weights.far
 	WeightShooter = server.weights.shooter
@@ -421,6 +479,16 @@ function Relay.start(
 
 	for code: number, step: Block.Step in STEPS do
 		Heard[code] = heard(server.footsteps.range[string.lower(step)])
+	end
+
+	-- The history and the changes' cache, about 4.6 MiB made once, only while records go as changes
+	local relay: { read changes: boolean? }? = server.relay
+	if relay and relay.changes then
+		Deltas.on = true
+		Deltas.history = buffer.create(DEPTH * SLOTS * RECORD_BYTES)
+		Deltas.encoded = buffer.create(SLOTS * DEPTH * RECORD_BYTES)
+		Deltas.stamps = buffer.create(SLOTS * DEPTH * 4)
+		Deltas.lengths = buffer.create(SLOTS * DEPTH)
 	end
 end
 
@@ -448,7 +516,8 @@ end
     and its state word from the state, and its pitch and head offset from
     the command it last stepped, which the step has already held to the cone.
     A rider's place is in its platform's space while platforms holds where
-    that platform stands this tick, and in world coordinates otherwise
+    that platform stands this tick, and in world coordinates otherwise. While
+    records go as changes, the history's plane for the run keeps it too
 --]]
 
 local function encode(slot: number, state: State, command: Command?, generation: number, platforms: Platforms?)
@@ -482,6 +551,10 @@ local function encode(slot: number, state: State, command: Command?, generation:
 
 	local at: number = slot * RECORD_BYTES
 	Record.write(record, Records, at, Limits)
+
+	if Deltas.on then
+		buffer.copy(Deltas.history, ((Run % DEPTH) * SLOTS + slot) * RECORD_BYTES, Records, at, RECORD_BYTES)
+	end
 
 	if changed(at) then
 		buffer.copy(References, at, Records, at, RECORD_BYTES)
@@ -711,7 +784,10 @@ end
 local function revealAgain(view: View, slot: number, flags: number): number
 	buffer.writeu8(view.kinds, slot, buffer.readu8(Kinds, slot))
 
-	return lookAgain(view, slot, bit32.bor(bit32.band(flags, bit32.bnot(HIDE + VISIBILITY_CARRIED)), REVEAL))
+	-- Its record rides with the reveal, so nothing is owed for a stretch held to the out-of-view rate before it
+	local revealed: number = bit32.bor(bit32.band(flags, bit32.bnot(HIDE + VISIBILITY_CARRIED + OUTSIDE)), REVEAL)
+
+	return lookAgain(view, slot, revealed)
 end
 
 --[[
@@ -888,9 +964,15 @@ local function clear(view: View, slot: number, part: number, sequence: number)
 	buffer.writeu16(view.flags, slot * 2, flags)
 end
 
--- Clears what one remembered block carried, once every recipient it went to has acknowledged it
+--[[
+    Clears what one remembered block carried, once every recipient it went
+    to has acknowledged it, and makes each record it carried from the view's
+    floor on its slot's baseline, when newer than the one before
+--]]
+
 local function discharge(view: View, ring: number)
 	local sequence: number = buffer.readu32(view.ringSequences, ring * 4) - 1
+	local run: number = buffer.readu32(view.ringRuns, ring * 4)
 	buffer.writeu32(view.ringSequences, ring * 4, 0)
 
 	-- Entries the log has since written over ride on until a later block's acknowledgment clears them
@@ -901,7 +983,14 @@ local function discharge(view: View, ring: number)
 
 	for index: number = start, start + buffer.readu16(view.ringCounts, ring * 2) - 1 do
 		local code: number = buffer.readu16(view.log, (index % LOG) * 2)
-		clear(view, code // ENTRY_PARTS, code % ENTRY_PARTS, sequence)
+		local slot: number = code // ENTRY_PARTS
+		local part: number = code % ENTRY_PARTS
+
+		if part ~= RECORD_PART then
+			clear(view, slot, part, sequence)
+		elseif run >= view.baseFloor and run > buffer.readu32(view.baseRuns, slot * 4) then
+			buffer.writeu32(view.baseRuns, slot * 4, run)
+		end
 	end
 end
 
@@ -932,7 +1021,7 @@ local function acknowledge(view: View, newest: number, mask: number, bit: number
 		receipt(view, newest, bit)
 	end
 
-	for back: number = 1, MASK_BITS do
+	for back: number = 1, Constants.ACK_MASK_BITS do
 		if bit32.btest(mask, 2 ^ (back - 1)) then
 			receipt(view, (newest - back) % WRAP, bit)
 		end
@@ -963,10 +1052,13 @@ local function open(view: View)
 	Out.lookCount = 0
 	Out.footstepCount = 0
 	Out.recordCount = 0
+	Out.changeCount = 0
 	Out.footstepData = StepData
 	Out.recordData = Records
+	Out.changeData = Deltas.encoded
 
 	buffer.writeu32(view.ringSequences, ring * 4, sequence + 1)
+	buffer.writeu32(view.ringRuns, ring * 4, Run)
 	buffer.writef64(view.ringStarts, ring * 8, view.logHead)
 	buffer.writeu16(view.ringCounts, ring * 2, 0)
 	buffer.writeu32(view.ringOwed, ring * 4, RecipientMask)
@@ -989,7 +1081,14 @@ local function exact(length: number): buffer
 	return made
 end
 
--- Writes the open block into the buffer of its exact length and sends it to its viewer and every watcher at once
+--[[
+    Writes the open block into the buffer of its exact length and sends it
+    to its viewer and every watcher at once. The taps are handed it with
+    each change expanded to the whole record it decodes to, its slot's
+    record this run, so a clip never needs a baseline and its block may
+    pass 896 B
+--]]
+
 local function flush()
 	if not Open then
 		return
@@ -1004,8 +1103,43 @@ local function flush()
 
 	Send(Recipients, data)
 
-	if Taps.observing then
+	if Taps.observing and Out.changeCount == 0 then
 		Taps.relayed(Recipients, RecipientCount, Out, data)
+	elseif Taps.observing then
+		local tapped: Block.Block = Deltas.tapped
+		local records: { number } = tapped.records
+		local count: number = Out.recordCount
+		local length: number = Filled
+
+		table.move(Out.records, 1, count, 1, records)
+
+		for index: number = 1, Out.changeCount do
+			count += 1
+			records[count] = (buffer.readu16(Out.changeData, Out.changeOffsets[index]) % SLOTS) * RECORD_BYTES
+			length += RECORD_BYTES - Out.changeLengths[index]
+		end
+
+		tapped.sequence = Out.sequence
+		tapped.tick = Out.tick
+		tapped.revealCount = Out.revealCount
+		tapped.reveals = Out.reveals
+		tapped.hideCount = Out.hideCount
+		tapped.hides = Out.hides
+		tapped.lookCount = Out.lookCount
+		tapped.looks = Out.looks
+		tapped.footstepCount = Out.footstepCount
+		tapped.footsteps = Out.footsteps
+		tapped.footstepData = Out.footstepData
+		tapped.recordCount = count
+		tapped.recordData = Records
+
+		-- The sent block's buffer may be this one, which Volt has already copied
+		local expanded: buffer = exact(length)
+		if Block.write(tapped, expanded, Constants.TAP_BLOCK_BYTES) ~= length then
+			error("A tap block wrote other than the bytes the relay counted for it")
+		end
+
+		Taps.relayed(Recipients, RecipientCount, tapped, expanded)
 	end
 
 	for index: number = 1, RecipientCount do
@@ -1065,14 +1199,14 @@ end
 
 -- The bytes a look entry takes with the parts named present
 local function entryBytes(slot: number, look: boolean, held: boolean): number
-	local bytes: number = LOOK_ENTRY_BYTES
+	local bytes: number = Constants.LOOK_ENTRY_BYTES
 
 	if look then
-		bytes += PREFIX_BYTES + buffer.readu8(LookLengths, slot)
+		bytes += Constants.PREFIX_BYTES + buffer.readu8(LookLengths, slot)
 	end
 
 	if held then
-		bytes += PREFIX_BYTES + buffer.readu8(HeldLengths, slot)
+		bytes += Constants.PREFIX_BYTES + buffer.readu8(HeldLengths, slot)
 	end
 
 	return bytes
@@ -1166,11 +1300,32 @@ local function writeLook(view: View, slot: number, flags: number): number
 	return flags
 end
 
--- Puts a slot's record into the open block, which has room for it, and times its next one from now
-local function writeRecord(view: View, slot: number)
-	local count: number = Out.recordCount + 1
-	Out.records[count] = slot * RECORD_BYTES
-	Out.recordCount = count
+--[[
+    Puts a slot's record into the open block, which has room for it, whole
+    for a base of 0 and otherwise as its change against that base, encoded
+    this run, and times its next one from now. While records go as changes
+    it is logged, so the block's acknowledgment makes it a baseline
+--]]
+
+local function writeRecord(view: View, slot: number, base: number)
+	if base == 0 then
+		local count: number = Out.recordCount + 1
+		Out.records[count] = slot * RECORD_BYTES
+		Out.recordCount = count
+	else
+		local entry: number = slot * DEPTH + base
+		local count: number = Out.changeCount + 1
+		Out.changeOffsets[count] = entry * RECORD_BYTES
+		Out.changeLengths[count] = buffer.readu8(Deltas.lengths, entry)
+		Out.changeCount = count
+	end
+
+	if Deltas.on then
+		local ring: number = (view.newest % RING) * 2
+		buffer.writeu16(view.log, (view.logHead % LOG) * 2, slot * ENTRY_PARTS + RECORD_PART)
+		buffer.writeu16(view.ringCounts, ring, buffer.readu16(view.ringCounts, ring) + 1)
+		view.logHead += 1
+	end
 
 	local last: number = buffer.readu32(view.lastRecord, slot * 4)
 	if buffer.readu32(Changed, slot * 4) > last then
@@ -1205,7 +1360,7 @@ local function addHide(view: View, slot: number)
 	buffer.writeu16(view.flags, slot * 2, bit32.band(flags, bit32.bnot(SENT)))
 end
 
--- A reveal, its look entry and its record, all in one block or not at all
+-- A reveal, its look entry and its whole record, all in one block or not at all
 local function addReveal(view: View, slot: number)
 	local flags: number = buffer.readu16(view.flags, slot * 2)
 	local dressing: boolean = bit32.btest(flags, LOOK + HELD)
@@ -1231,7 +1386,7 @@ local function addReveal(view: View, slot: number)
 		flags = writeLook(view, slot, flags)
 	end
 
-	writeRecord(view, slot)
+	writeRecord(view, slot, 0)
 
 	-- The viewer is sent the character from the tick its reveal is first carried
 	flags = carry(view, slot, VISIBILITY, flags, VISIBILITY_CARRIED, view.visibilityFrom)
@@ -1270,27 +1425,103 @@ local function trim<T>(list: { T }, count: number)
 end
 
 --[[
+    The base a listed record goes against as a change this run, 0 for
+    whole: its baseline is the newest record of its life every recipient of
+    the view acknowledged from the view's floor on, 1 to 31 relay ticks
+    back, and its change is encoded once a run for each slot and base, so
+    every view sharing that baseline copies the same bytes. X or Z moved
+    past what a change holds sends it whole
+--]]
+
+local function prepare(view: View, slot: number): number
+	if not Deltas.on then
+		return 0
+	end
+
+	local baseRun: number = buffer.readu32(view.baseRuns, slot * 4)
+	local plane: number = baseRun % DEPTH
+	if
+		baseRun == 0
+		or baseRun < view.baseFloor
+		or Run - baseRun >= DEPTH
+		or buffer.readu32(Deltas.runs, plane * 4) ~= baseRun
+	then
+		return 0
+	end
+
+	local base: number = (TickWire - buffer.readu16(Deltas.ticks, plane * 2)) % WRAP
+	if base < 1 or base >= DEPTH then
+		return 0
+	end
+
+	local entry: number = slot * DEPTH + base
+	if buffer.readu32(Deltas.stamps, entry * 4) ~= Run then
+		local baseline: number = (plane * SLOTS + slot) * RECORD_BYTES
+		local length: number = Change.write(
+			Records,
+			slot * RECORD_BYTES,
+			Deltas.history,
+			baseline,
+			base,
+			Deltas.encoded,
+			entry * RECORD_BYTES
+		)
+
+		buffer.writeu32(Deltas.stamps, entry * 4, Run)
+		buffer.writeu8(Deltas.lengths, entry, length)
+	end
+
+	if buffer.readu8(Deltas.lengths, entry) == 0 then
+		return 0
+	end
+
+	return base
+end
+
+--[[
     Places a list's records inside room, highest in the queue first when
-    they can't all fit, and stops at the first that doesn't, since every
-    record is the same size. Those left keep at most one tier tick owed
+    they can't all fit, each whole or as its change, prepared first so the
+    sort knows their sizes, and stops at the first that doesn't fit. Those
+    left keep at most one tier tick owed
 --]]
 
 local function placeRecords(view: View, list: { number }, count: number, room: number)
 	trim(list, count)
 
-	local blocks: number = count // MAX_RECORDS + 1
-	if Spent + count * RECORD_BYTES + blocks * (HEADER_BYTES + FRAME_BYTES) > room then
+	local wholes: number, changeBytes: number = 0, 0
+	for index: number = 1, count do
+		local slot: number = list[index]
+		local base: number = prepare(view, slot)
+		buffer.writeu8(Deltas.bases, slot, base)
+
+		if base == 0 then
+			wholes += 1
+		else
+			changeBytes += buffer.readu8(Deltas.lengths, slot * DEPTH + base)
+		end
+	end
+
+	local blocks: number = wholes // Constants.MAX_RELAY_RECORDS + changeBytes // (BLOCK_BYTES - HEADER_BYTES) + 1
+	if Spent + wholes * RECORD_BYTES + changeBytes + blocks * (HEADER_BYTES + FRAME_BYTES) > room then
 		table.sort(list, ahead)
 	end
 
+	-- Whiteoak TODO: placing stops at the first record that doesn't fit, though a smaller change later in the queue
+	-- could have; skip on to the next that fits, a pass over the rest, once G4 shows records cut beside unused room
 	for index: number = 1, count do
 		local slot: number = list[index]
-		if not fits(view, RECORD_BYTES, 0, room) then
+		local base: number = buffer.readu8(Deltas.bases, slot)
+		local bytes: number = RECORD_BYTES
+		if base ~= 0 then
+			bytes = buffer.readu8(Deltas.lengths, slot * DEPTH + base)
+		end
+
+		if not fits(view, bytes, 0, room) then
 			RecordsCut += count - index + 1
 			break
 		end
 
-		writeRecord(view, slot)
+		writeRecord(view, slot, base)
 		RecordsSent += 1
 	end
 
@@ -1378,13 +1609,36 @@ local function consider(view: View, viewer: Viewer, states: { [number]: State },
 end
 
 --[[
+    Whether an offset from the viewer lies inside the out-of-view cone
+    around its look, a unit vector, measured on the ground alone with no
+    square root: one straight above or below is inside
+--]]
+
+local function within(offset: vector, look: vector, cone: OutOfView): boolean
+	local along: number = offset.x * look.x + offset.z * look.z
+	local reach: number = (offset.x * offset.x + offset.z * offset.z) * cone.cosineSquared
+
+	if cone.wide then
+		return along >= 0 or along * along <= reach
+	end
+
+	return along >= 0 and along * along >= reach
+end
+
+--[[
     Lists a sent player's or NPC's record when its tier tick comes and it
     has something to send: a change, a rest repeat or the still repeat. At
     or past its floor it is owed; under it, it waits in the queue by its
-    weight times the runs since its last record
+    weight times the runs since its last record. A player outside the
+    viewer's cone past the out-of-view radius, and no recent shooter, is
+    held to the out-of-view rate, and is owed a record the run it no
+    longer is
+
+    @ looking | the viewer's look, or with no out-of-view rate its body's
+    facing, nil for a viewer with no body
 --]]
 
-local function schedule(view: View, slot: number, flags: number, offset: vector, facing: vector?): number
+local function schedule(view: View, slot: number, flags: number, offset: vector, looking: vector?): number
 	local kind: number = buffer.readu8(Kinds, slot)
 	if kind ~= PLAYER and kind ~= NPC then
 		return UNLISTED
@@ -1414,18 +1668,48 @@ local function schedule(view: View, slot: number, flags: number, offset: vector,
 		floorRate = FarFloor
 	end
 
-	if buffer.readu32(view.shotUntil, slot * 4) >= Run then
+	local shooter: boolean = buffer.readu32(view.shotUntil, slot * 4) >= Run
+	if shooter then
 		aimRate = math.max(aimRate, ShotRate)
 		floorRate = math.max(floorRate, ShotRate)
 		weight *= WeightShooter
 	end
 
-	if facing and vector.dot(offset, facing) > 0 then
+	-- The cone weighs where the out-of-view rate looks, and without one, the half space ahead of the body
+	local cone: OutOfView? = OutOfViewRate
+	local inside: boolean = false
+	if looking then
+		if cone then
+			inside = within(offset, looking, cone)
+		else
+			inside = vector.dot(offset, looking) > 0
+		end
+	end
+
+	if inside then
 		weight *= WeightCone
+	end
+
+	local outside: boolean = false
+	if cone and looking and not inside and kind == PLAYER and not shooter then
+		outside = vector.dot(offset, offset) > cone.radiusSquared
+		if outside then
+			aimRate = math.min(aimRate, cone.rate)
+			floorRate = math.min(floorRate, cone.rate)
+		end
 	end
 
 	local aim: number = buffer.readf32(view.aim, slot * 4) + math.min(aimRate / RelayRate, 1)
 	local floor: number = buffer.readf32(view.floor, slot * 4) + math.min(floorRate / RelayRate, 1)
+
+	if outside then
+		buffer.writeu16(view.flags, slot * 2, bit32.bor(flags, OUTSIDE))
+	elseif bit32.btest(flags, OUTSIDE) then
+		-- Back from the out-of-view rate, so it is owed a record this run, in the hard room
+		buffer.writeu16(view.flags, slot * 2, bit32.band(flags, bit32.bnot(OUTSIDE)))
+		aim = math.max(aim, 1)
+		floor = math.max(floor, 1)
+	end
 
 	if aim < 1 then
 		buffer.writef32(view.aim, slot * 4, aim)
@@ -1651,7 +1935,10 @@ local function viewOf(key: Key): View
 		shotUntil = buffer.create(SLOTS * 4),
 		aim = buffer.create(SLOTS * 4),
 		floor = buffer.create(SLOTS * 4),
+		baseRuns = buffer.create(Deltas.on and SLOTS * 4 or 0),
+		baseFloor = 0,
 		ringSequences = buffer.create(RING * 4),
+		ringRuns = buffer.create(RING * 4),
 		ringStarts = buffer.create(RING * 8),
 		ringCounts = buffer.create(RING * 2),
 		ringOwed = buffer.create(RING * 4),
@@ -1693,7 +1980,9 @@ end
 
 --[[
     Gives a target's new watcher the target's lowest free bit, or nil past
-    MAX_WATCHERS, and sends every withheld character's look again for it
+    MAX_WATCHERS, and sends every withheld character's look again for it.
+    Its client holds none of the target's records, so they go whole until
+    it acknowledges a block from this run on
 --]]
 
 local function enlist(targetView: View, key: Key, view: View): number?
@@ -1703,6 +1992,7 @@ local function enlist(targetView: View, key: Key, view: View): number?
 			targetView.watcherViews[bit] = view
 			targetView.bits[key] = bit
 			targetView.watcherCount += 1
+			targetView.baseFloor = Run
 
 			if targetView.watcherCount == 1 then
 				table.insert(Watched, targetView)
@@ -1852,10 +2142,12 @@ local function turn(viewer: Viewer, states: { [number]: State })
 	SleeperSquared = math.min(Radii.sleepers, distance) ^ 2
 	NpcRangeSquared = math.min(Radii.npcs, distance) ^ 2
 
-	-- Back from a spectate, its client may acknowledge the target's blocks a while yet, so its own go on past them
+	-- Back from a spectate, its client may acknowledge the target's blocks a while yet, so its own go on past them,
+	-- and its records go whole until it acknowledges one of them
 	if view.watching ~= nil then
 		renumber(view, view.heard)
 		view.watching = nil
+		view.baseFloor = Run
 	end
 
 	acknowledge(view, viewer.acknowledged, viewer.received, SELF)
@@ -1870,13 +2162,17 @@ local function turn(viewer: Viewer, states: { [number]: State })
 	claim(view, own)
 	consider(view, viewer, states, own)
 
-	-- The viewer's facing, for the view cone, while it has a body
+	-- Where the view cone looks while the viewer has a body: its newest look with the out-of-view rate, until its
+	-- first one its body's facing, and without the rate always its facing
 	local origin: vector = viewer.position
-	local facing: vector? = nil
+	local looking: vector? = nil
 	if own ~= nil and buffer.readu32(Present, own * 4) == Run then
 		local body: State? = states[own]
-		if body then
-			facing = vector.create(-Math.sin(body.facing), 0, -Math.cos(body.facing))
+		local look: vector? = viewer.look
+		if body and OutOfViewRate and look then
+			looking = look
+		elseif body then
+			looking = vector.create(-Math.sin(body.facing), 0, -Math.cos(body.facing))
 		end
 	end
 
@@ -1916,7 +2212,7 @@ local function turn(viewer: Viewer, states: { [number]: State })
 		if present and bit32.btest(flags, SENT) and not bit32.btest(flags, REVEAL + HIDE) then
 			local state: State? = states[slot]
 			if state then
-				local listed: number = schedule(view, slot, flags, state.position - origin, facing)
+				local listed: number = schedule(view, slot, flags, state.position - origin, looking)
 				if listed == OWED then
 					floors += 1
 					Floors[floors] = slot
@@ -1991,6 +2287,13 @@ function Relay.run(
 	Run += 1
 	TickWire = tick % WRAP
 	StepCount = 0
+
+	-- The history's plane this run's records go in, which names the run and its tick for every change against them
+	if Deltas.on then
+		local plane: number = Run % DEPTH
+		buffer.writeu32(Deltas.runs, plane * 4, Run)
+		buffer.writeu16(Deltas.ticks, plane * 2, TickWire)
+	end
 
 	for slot: number, state: State in states do
 		local generation: number, entry: Slots.Entry? = Slots.get(slot)
@@ -2163,7 +2466,8 @@ end
     Makes every character a viewer is currently sent a pending reveal again,
     with its look and held item in the same block, and its own character's
     look entry too, as a spectate's start and switch need of the target's
-    view and its end of the moderator's own
+    view and its end of the moderator's own. Its records go whole until a
+    block from the next run on is acknowledged
 --]]
 
 function Relay.revealAll(key: Key)
@@ -2171,6 +2475,8 @@ function Relay.revealAll(key: Key)
 	if not view then
 		return
 	end
+
+	view.baseFloor = Run + 1
 
 	for _, slot: number in view.tracked do
 		local flags: number = buffer.readu16(view.flags, slot * 2)
@@ -2260,14 +2566,15 @@ end
 --[[
     A viewer's current view as one buffer a clip ring starts from: each
     character its client is sent with its kind, newest record, look and
-    held item, the called platforms the server handle passes in, and its
-    own character with its look and held item. A moderator watching a
-    target is sent the target's view, so its keyframe holds the target's
-    characters, its own character and, marked withheld, those withheld
-    from the target, with their looks
+    held item, the called platforms the server handle passes in, the
+    gravity in force, the shared table's when none is given, and its own
+    character with its look and held item. A moderator watching a target is
+    sent the target's view, so its keyframe holds the target's characters,
+    its own character and, marked withheld, those withheld from the target,
+    with their looks
 --]]
 
-function Relay.keyframe(key: Key, platforms: { Keyframe.Platform }?): buffer
+function Relay.keyframe(key: Key, platforms: { Keyframe.Platform }?, gravity: number?): buffer
 	local characters: { Keyframe.Character } = {}
 	local view: View? = Views[key]
 	local sequence: number = 0
@@ -2307,11 +2614,12 @@ function Relay.keyframe(key: Key, platforms: { Keyframe.Platform }?): buffer
 	end
 
 	return Keyframe.write({
-		hash = DeclarationsHash,
+		hash = Keyed.hash,
 		tick = TickWire,
 		sequence = sequence,
 		characters = characters,
 		platforms = platforms or {},
+		gravity = gravity or Keyed.gravity,
 		own = own,
 	})
 end

@@ -48,8 +48,12 @@ local SEED: number = 1 -- An idle bot draws nothing, so its seed never matters
 local FOLDER: string = "Openings" -- The folder the check lays its platforms in
 local OPENINGS_GROUP: string = "openings" -- What the fleet's entries call the check's bots
 local SEPARATOR: string = "; " -- Between the parts of one line
+local CENTER: number = 1 -- The hull's center, the first of its points
+local READINGS: { string } = { "lenient", "strict" } -- Each reading, in the order the summary prints them
+local LEVELS: { number } = { 1, -1 } -- The corners' shares up the hull, the top four first, as the summary groups them
 
--- The hull's center, then its eight corners, as shares of its half size along its own axes
+-- The hull's center, then its eight corners, as shares of its half size along its own axes, its -Z the way it faces
+-- and its +X its right
 local POINTS: { Vector3 } = {
 	Vector3.zero,
 	Vector3.new(-1, -1, -1),
@@ -80,6 +84,9 @@ export type Episode = {
 	target: string,
 	real: boolean, -- Whether the viewer is a real player
 	distance: number, -- Studs from the viewer's eye to the target's hull center at its start
+	point: number, -- The index in POINTS of the point whose ray opened at its start
+	height: number, -- That point's height over the target's feet, in studs
+	speed: number, -- The target's speed across the ground at its start, in studs a second
 	start: number, -- The relay tick it began on
 	length: number, -- Relay ticks it lasted
 	reason: string, -- Anti-ESP's reason for the pair at its start
@@ -90,16 +97,17 @@ export type Sighting = {
 	tick: number,
 	sent: boolean,
 	visible: boolean, -- Read only while unsent
-	distance: number, -- Read only while visible and unsent
+	distance: number, -- Read only while visible and unsent, as is each field after it
+	point: number, -- The index in POINTS of the first point whose ray was open
+	height: number, -- That point's height over the target's feet, in studs
+	speed: number, -- The target's speed across the ground, in studs a second
 	reason: string,
 }
 
 -- What one viewer and one target's life keep from tick to tick
 export type Pair = {
 	unsentSince: number?, -- The tick its unsent stretch began, nil while sent
-	visibleSince: number?, -- The tick its run of visible and unsent ticks began, nil outside one
-	runDistance: number, -- The distance and reason at that run's start
-	runReason: string,
+	opening: Sighting?, -- A copy of its run of visible and unsent ticks' first sighting, nil outside one
 	lenient: Episode?, -- The lenient episode its run counted, nil before the run passes the grace
 	strict: Episode?, -- The strict episode under way
 }
@@ -194,7 +202,8 @@ end
 --[[
     The exact test: rays from the eye to the hull's center and then its
     eight corners, each pulled inset studs inside, and whether one was open,
-    with the rays cast, the test stopping at the first open one
+    with the rays cast, the test stopping at the first open one, so a
+    visible hull's count is its open point's index in POINTS
 --]]
 
 function Reveals.visible(eye: Vector3, box: Tread.Box, blocked: Blocked, inset: number): (boolean, number)
@@ -215,33 +224,33 @@ end
 function Reveals.pair(): Pair
 	return {
 		unsentSince = nil,
-		visibleSince = nil,
-		runDistance = 0,
-		runReason = "",
+		opening = nil,
 		lenient = nil,
 		strict = nil,
 	}
 end
 
+-- An episode found under a reading, starting at the sighting given
 local function begin(
 	found: { Episode },
 	reading: string,
 	viewer: string,
 	target: string,
 	real: boolean,
-	distance: number,
-	start: number,
-	reason: string
+	from: Sighting
 ): Episode
 	local episode: Episode = {
 		reading = reading,
 		viewer = viewer,
 		target = target,
 		real = real,
-		distance = distance,
-		start = start,
+		distance = from.distance,
+		point = from.point,
+		height = from.height,
+		speed = from.speed,
+		start = from.tick,
 		length = 1,
-		reason = reason,
+		reason = from.reason,
 	}
 
 	table.insert(found, episode)
@@ -270,7 +279,7 @@ function Reveals.track(
 	local tick: number = seen.tick
 	if seen.sent then
 		pair.unsentSince = nil
-		pair.visibleSince = nil
+		pair.opening = nil
 		pair.lenient = nil
 		pair.strict = nil
 
@@ -281,28 +290,23 @@ function Reveals.track(
 	pair.unsentSince = unsentSince
 
 	if not seen.visible then
-		pair.visibleSince = nil
+		pair.opening = nil
 		pair.lenient = nil
 		pair.strict = nil
 
 		return
 	end
 
-	local visibleSince: number? = pair.visibleSince
-	if visibleSince == nil then
-		visibleSince = tick
-		pair.visibleSince = tick
-		pair.runDistance = seen.distance
-		pair.runReason = seen.reason
-	end
+	-- A copy, since the harness refills one sighting for every pair
+	local opening: Sighting = pair.opening or table.clone(seen)
+	pair.opening = opening
 
-	local run: number = tick - (visibleSince :: number) + 1
+	local run: number = tick - opening.tick + 1
 	local lenient: Episode? = pair.lenient
 	if lenient then
 		lenient.length = run
 	elseif run > grace then
-		local opened: Episode =
-			begin(found, "lenient", viewer, target, real, pair.runDistance, visibleSince :: number, pair.runReason)
+		local opened: Episode = begin(found, "lenient", viewer, target, real, opening)
 		opened.length = run
 		pair.lenient = opened
 	end
@@ -313,7 +317,7 @@ function Reveals.track(
 	elseif strict then
 		strict.length += 1
 	else
-		pair.strict = begin(found, "strict", viewer, target, real, seen.distance, tick, seen.reason)
+		pair.strict = begin(found, "strict", viewer, target, real, seen)
 	end
 end
 
@@ -391,13 +395,73 @@ local function sum(samples: { number }): number
 	return total
 end
 
--- An episode's line, as each prints
-local function described(episode: Episode): string
+-- A point's plain name: the center, or a corner by its height, then front or back along the facing, then its side
+local function nameOf(index: number): string
+	if index == CENTER then
+		return "center"
+	end
+
+	local share: Vector3 = POINTS[index]
+	local height: string = share.Y > 0 and "top" or "bottom"
+	local depth: string = share.Z < 0 and "front" or "back"
+	local side: string = share.X < 0 and "left" or "right"
+
+	return `{height} {depth} {side}`
+end
+
+-- An episode's line, as each prints, ending with the point that opened it and the target's speed across the ground
+function Reveals.describe(episode: Episode): string
 	local who: string = `{episode.viewer} saw {episode.target}`
 	local measure: string = string.format("%.1f studs away for %d relay ticks", episode.distance, episode.length)
 	local since: string = `from tick {episode.start}, anti-ESP's reason {episode.reason}`
+	local name: string = nameOf(episode.point)
+	local opened: string = string.format("opened at point %d (%s, %.2f studs up)", episode.point, name, episode.height)
+	local speed: string = string.format("horizontal speed %.1f studs/s", episode.speed)
 
-	return `G8 {episode.reading} late reveal: {who} {measure} {since}`
+	return `G8 {episode.reading} late reveal: {who} {measure} {since}, {opened}, {speed}`
+end
+
+--[[
+    One line of a window's late reveals by the point whose ray opened each,
+    under each reading: the center, then the four top corners and the four
+    bottom corners, each group with its total
+--]]
+
+function Reveals.byPoint(episodes: { Episode }): string
+	local tallies: { [string]: { number } } = {}
+	for _, reading: string in READINGS do
+		tallies[reading] = table.create(#POINTS, 0)
+	end
+
+	for _, episode: Episode in episodes do
+		local tally: { number } = tallies[episode.reading]
+		tally[episode.point] += 1
+	end
+
+	local readings: { string } = {}
+	for _, reading: string in READINGS do
+		local tally: { number } = tallies[reading]
+		local groups: { string } = { `{reading} center {tally[CENTER]}` }
+
+		for _, up: number in LEVELS do
+			local total: number = 0
+			local corners: { string } = {}
+
+			for index: number, share: Vector3 in POINTS do
+				if share.Y == up then
+					total += tally[index]
+					table.insert(corners, `{nameOf(index)} {tally[index]}`)
+				end
+			end
+
+			local group: string = up > 0 and "top" or "bottom"
+			table.insert(groups, `{group} corners {total} ({table.concat(corners, ", ")})`)
+		end
+
+		table.insert(readings, table.concat(groups, ", "))
+	end
+
+	return `G8 late reveals by the point that opened them: {table.concat(readings, SEPARATOR)}`
 end
 
 -- Late reveals a viewer-hour, a dash with no time watched
@@ -413,8 +477,9 @@ end
     The G8 load's probe: from its start every real player with a character
     and the first bots of the configured group are observed, each tick's
     unsent enemies within relevancy tested exactly, and its stop prints
-    every episode and gives the rates, anti-ESP's frame cost and the
-    harness's own. Totals pool across the seeds it is started for
+    every episode and a line of them by the point that opened each, and
+    gives the rates, anti-ESP's frame cost and the harness's own. Totals
+    pool across the seeds it is started for
 --]]
 
 function Reveals.probe(): Probe
@@ -427,7 +492,8 @@ function Reveals.probe(): Probe
 
 	local watches: { Watch } = {}
 	local found: { Episode } = {}
-	local seen: Sighting = { tick = 0, sent = false, visible = false, distance = 0, reason = "" }
+	local seen: Sighting =
+		{ tick = 0, sent = false, visible = false, distance = 0, point = 0, height = 0, speed = 0, reason = "" }
 	local began: number = 0
 	local cost: number = 0 -- Seconds the sinks took
 	local ticks: number = 0 -- Relay ticks they ran on
@@ -478,11 +544,18 @@ function Reveals.probe(): Probe
 			seen.visible = false
 
 			if not seen.sent then
-				local visible: boolean, _: number = Reveals.visible(eye, targetState.standingBox, blocked, INSET)
+				local box: Tread.Box = targetState.standingBox
+				local visible: boolean, point: number = Reveals.visible(eye, box, blocked, INSET)
 				seen.visible = visible
 
 				if visible then
+					local velocity: Vector3 = targetState.velocity
+					local half: number = box.size.Y / 2 -- The box stands on the feet, its center half its height up
+
 					seen.distance = (targetState.hullCenter - eye).Magnitude
+					seen.point = point
+					seen.height = half + (half - INSET) * POINTS[point].Y
+					seen.speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
 					seen.reason = AntiEsp.reason(watch.key, slot)
 				end
 			end
@@ -572,7 +645,7 @@ function Reveals.probe(): Probe
 		local counts: { [string]: number } = { lenient = 0, strict = 0 }
 		local realCounts: { [string]: number } = { lenient = 0, strict = 0 }
 		for _, episode: Episode in found do
-			print(described(episode))
+			print(Reveals.describe(episode))
 			table.insert(pooledFound, episode)
 			counts[episode.reading] += 1
 
@@ -580,6 +653,8 @@ function Reveals.probe(): Probe
 				realCounts[episode.reading] += 1
 			end
 		end
+
+		print(Reveals.byPoint(found))
 
 		local pooled: { [string]: number } = { lenient = 0, strict = 0 }
 		for _, episode: Episode in pooledFound do

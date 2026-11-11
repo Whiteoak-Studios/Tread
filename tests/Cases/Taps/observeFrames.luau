@@ -22,7 +22,10 @@ return function (): (boolean, string | nil)
 	local Block: any = Environment.load(BLOCK)
 	local Record: any = Environment.load(RECORD)
 
-	local harness: any = Harness.new()
+	-- Whole records, so each frame's block is the block the viewer was sent byte for byte
+	local harness: any = Harness.new(false, function (_: any, server: any)
+		server.relay.changes = false
+	end)
 	local Taps: any = Harness.Taps
 	local client: any = harness:viewer("Viewer")
 	local stranger: any = harness:viewer("Stranger")

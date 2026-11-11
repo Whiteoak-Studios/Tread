@@ -1,12 +1,13 @@
 --[[
     Remote characters drawn at one render time behind the relay: each slot's
-    8-record ring, the adaptive delay, reveals, hides and looks held against
-    the slot table, sleepers' falls, footsteps and spectate's withheld block
+    8-record ring and the baselines its changes are rebuilt against, the
+    delay, reveals, hides and looks, falls, footsteps and withheld blocks
 --]]
 
 --!strict
 --!native
 local Block = require(script.Parent.Parent.Codec.Block)
+local Change = require(script.Parent.Parent.Codec.Change)
 local Command = require(script.Parent.Parent.Codec.Command)
 local Constants = require(script.Parent.Parent.Constants)
 local Fields = require(script.Parent.Parent.Codec.Fields)
@@ -16,6 +17,7 @@ local Reliable = require(script.Parent.Parent.Codec.Reliable)
 local Sequence = require(script.Parent.Parent.Codec.Sequence)
 local State = require(script.Parent.Parent.Step.State)
 local StateWord = require(script.Parent.Parent.Codec.StateWord)
+local World = require(script.Parent.Parent.Step.World)
 
 local SLOTS: number = Constants.SLOTS
 local RECORD_BYTES: number = Constants.RECORD_BYTES
@@ -28,6 +30,11 @@ local HALF_GENERATIONS: number = GENERATIONS / 2
 local YAW_STEPS: number = Constants.ANGLE_STEPS / (2 * math.pi) -- Steps a radian of yaw, the units Sequence wraps
 local REACH: number = 2 -- The last two samples' fraction one interval past the newer, where extrapolation stops
 local WITHHELD_INTERVALS: number = 4 -- Relay intervals a withheld character goes unrefreshed before it is dropped
+local DEPTH: number = Constants.CHANGE_DEPTH -- Relay ticks of records the baselines keep a slot
+local BASE_AT: number = 2 -- A change record's base, after its slot and generation
+
+-- The most change records a block holds, each at least its header, which one block's rebuilt records take room for
+local CHANGES: number = (Constants.MAX_RELAY_BYTES - Constants.RELAY_HEADER_BYTES) // Constants.CHANGE_HEADER_BYTES
 
 -- A slot's look entry parts, the look then the held item, each at most its declarations' bound
 local LOOK_REGION: number = 0
@@ -45,6 +52,7 @@ type Record = Record.Record
 type State = State.State
 type Values = State.Values
 type Word = StateWord.Word
+type World = State.World
 
 -- What an entry naming a slot and generation meets in the slot table: it applies, it waits for the table's entry,
 -- or its life is over
@@ -76,9 +84,10 @@ local DelayMax: number = 0
 local ScaleMin: number = 0
 local ScaleMax: number = 0
 local Rate: number = 0 -- Relay ticks a second
+local SimulationRate: number = 0 -- Simulation ticks a second, which the world's clock and gravity changes count
 local LookLimits: Limits = { lean = 0, headCone = 0 } -- The lean and head cone a record's last byte steps to
 local Declared: Layout? = nil -- The game's compiled declarations, which a look entry's parts unpack against
-local Gravity: number = 0 -- The shared table's step.gravity, which a moved sleeper falls under
+local ClientWorld: World? = nil -- The client's own world, whose gravity by tick every fall is drawn under
 local Started: boolean = false
 
 -- The render clock: the render time and the newest tick both count relay ticks, unwrapped from the first block's
@@ -143,6 +152,10 @@ local HoldHeldLengths: { [number]: number } = {}
 local HoldRecords: buffer = buffer.create(0)
 local HoldParts: buffer = buffer.create(0)
 
+-- The records of the last 32 relay ticks each change record is rebuilt against, and one block's changes rebuilt
+local Baselines: Change.Store = Change.store()
+local Rebuilt: buffer = buffer.create(0)
+
 -- What the reads reuse, so a block and a pose make no table
 local Read: Block.Block = Block.new()
 local Older: Record = Record.new()
@@ -177,22 +190,23 @@ local Interpolate = {}
     last byte steps to and the compiled declarations a look entry's parts
     unpack against. It runs once
 
-    @ gravity | the shared table's step.gravity, above 0, which a moved sleeper falls under
+    @ world | the client's own, whose clock and gravity by tick a moved sleeper's fall is drawn under
 --]]
 
-function Interpolate.start(settings: Settings, rates: Rates, limits: Limits, layout: Layout, gravity: number)
+function Interpolate.start(settings: Settings, rates: Rates, limits: Limits, layout: Layout, world: World)
 	if Started then
 		error("Interpolate.start runs once, and it has already run", 2)
-	elseif not (gravity > 0 and gravity < math.huge) then
-		error(`Interpolate.start takes a gravity above 0, not {gravity}`, 2)
+	elseif type(world) ~= "table" then
+		error(`Interpolate.start takes the client's World, not a {typeof(world)}`, 2)
 	end
 
-	Gravity = gravity
+	ClientWorld = world
 	DelayBase = settings.delay
 	DelayMax = settings.delayMax
 	ScaleMin = settings.scaleMin
 	ScaleMax = settings.scaleMax
 	Rate = rates.relay
+	SimulationRate = rates.simulation
 	LookLimits = limits
 	Declared = layout
 	Delay = settings.delay
@@ -204,6 +218,7 @@ function Interpolate.start(settings: Settings, rates: Rates, limits: Limits, lay
 	Parts = buffer.create(SLOTS * PART_BYTES)
 	HoldRecords = buffer.create(SLOTS * RECORD_BYTES)
 	HoldParts = buffer.create(SLOTS * PART_BYTES)
+	Rebuilt = buffer.create(CHANGES * RECORD_BYTES)
 
 	Started = true
 end
@@ -615,23 +630,46 @@ local function publishHide(slot: number)
 end
 
 --[[
+    The gravity the client's world gives a relay tick of the render clock.
+    The tick is placed by its u16 wrap against the world's clock, the
+    server's simulation tick unwrapped, which stays far inside half a wrap
+    of every tick a fall is drawn at, then counted in simulation ticks
+--]]
+
+local function gravityAt(tick: number): number
+	local world: World? = ClientWorld
+	if not world then
+		error("Interpolate drew a fall before Interpolate.start")
+	end
+
+	local clock: number = world.clock * Rate / SimulationRate
+	local relay: number = clock + Sequence.difference(tick, clock)
+
+	return World.gravityFor(world, relay * SimulationRate / Rate)
+end
+
+--[[
     Where a moved sleeper's fall puts it at a tick, with its yaw, turned the
-    shortest way from where it lay by the share of the fall done. Before
-    the move's tick it lies where it was, since a move that isn't downward
-    is done at once
+    shortest way from where it lay by the share of the fall done, under the
+    gravity in force at that tick. Before the move's tick it lies where it
+    was, since a move that isn't downward is done at once
 --]]
 
 local function falling(slot: number, tick: number): (vector, number)
-	return Interpolate.fall(FallFrom[slot], FallFromYaws[slot], FallTo[slot], FallToYaws[slot], FallTicks[slot], tick)
+	local start: number = FallTicks[slot]
+	local gravity: number = gravityAt(tick)
+
+	return Interpolate.fall(FallFrom[slot], FallFromYaws[slot], FallTo[slot], FallToYaws[slot], start, tick, gravity)
 end
 
 --[[
     Where a sleeper's fall from where it lay to where it moved puts it at a
     relay tick, with its yaw in radians, turned the shortest way by the
-    share of the fall done, under the shared table's gravity. Before the
-    fall's own tick it lies where it was
+    share of the fall done, under the gravity given. Before the fall's own
+    tick it lies where it was
 
     @ start | the relay tick the fall starts at, its move's
+    @ gravity | studs/s², above 0, the gravity to draw it under at that tick
 --]]
 
 function Interpolate.fall(
@@ -640,14 +678,15 @@ function Interpolate.fall(
 	to: vector,
 	toYaw: number,
 	start: number,
-	tick: number
+	tick: number,
+	gravity: number
 ): (vector, number)
 	local elapsed: number = (tick - start) / Rate
 	if elapsed < 0 then
 		return from, fromYaw
 	end
 
-	local at: vector, fraction: number = Math.fall(from, to, Gravity, elapsed)
+	local at: vector, fraction: number = Math.fall(from, to, gravity, elapsed)
 	local fromSteps: number = fromYaw * YAW_STEPS
 	local toSteps: number = fromSteps + Sequence.difference(toYaw * YAW_STEPS, fromSteps)
 
@@ -678,6 +717,10 @@ local function move(slot: number, tick: number, data: buffer, offset: number)
 
 	local from: vector = place
 	local fromYaw: number = PlaceYaws[slot]
+
+	-- Whiteoak TODO: a move during a fall starts from where that fall has it under the gravity heard by the time its
+	-- block lands, so a change to its tick or earlier heard after that block leaves the new fall starting where the
+	-- old value put it; placing the start again when such a change lands gives the server's
 	if FallTicks[slot] ~= nil then
 		from, fromYaw = falling(slot, tick)
 	end
@@ -777,14 +820,73 @@ local function applyLooks(tick: number)
 	end
 end
 
+-- Applies one record of a block, holding one for a generation the slot table hasn't announced
+local function applyRecord(tick: number, data: buffer, offset: number)
+	local slot: number, generation: number = Record.split(buffer.readu16(data, offset))
+	local verdict: Verdict = judge(slot, generation)
+
+	if verdict == "Apply" then
+		push(slot, tick, data, offset)
+	elseif verdict == "Hold" and hold(slot, generation) then
+		holdRecord(slot, tick, data, offset)
+	end
+end
+
 --[[
-    Reads one relay block: acknowledges its sequence, moves the newest tick
-    and the delay, then applies its hides, looks, reveals, records and
-    footstep entries in that order, so a reveal carries the look its block
-    brought. An entry for a generation the slot table hasn't announced
-    waits for it, and one for an older generation is dropped, as is a block
-    older than the newest spectate start or end. It errors on a block that
-    isn't one
+    Files a block's whole records at its tick as baselines, then rebuilds
+    each change record into Rebuilt against the baseline its base names,
+    filed at the tick too. A change is dropped when its baseline isn't kept
+    or is older than the newest spectate start or end, so it is never
+    rebuilt against the view before's. Gives how many it rebuilt and
+    whether it dropped none
+--]]
+
+local function rebuild(tick: number): (number, boolean)
+	-- A block a store's depth older than the newest would write over newer baselines, so it files none
+	local filing: boolean = Newest - tick < DEPTH
+	local since: number = Since or -math.huge
+
+	if filing then
+		for index: number = 1, Read.recordCount do
+			Change.keep(Baselines, tick, Read.recordData, Read.records[index])
+		end
+	end
+
+	local data: buffer = Read.changeData
+	local count: number = 0
+	local complete: boolean = true
+
+	for index: number = 1, Read.changeCount do
+		local at: number = Read.changeOffsets[index]
+		local from: number = tick - buffer.readu8(data, at + BASE_AT)
+		local baseline: buffer?, baselineAt: number = Change.find(Baselines, buffer.readu16(data, at), from)
+
+		if baseline == nil or from < since then
+			complete = false
+			continue
+		end
+
+		local into: number = count * RECORD_BYTES
+		Change.read(data, at, baseline, baselineAt, Rebuilt, into)
+		count += 1
+
+		if filing then
+			Change.keep(Baselines, tick, Rebuilt, into)
+		end
+	end
+
+	return count, complete
+end
+
+--[[
+    Reads one relay block: moves the newest tick and the delay, rebuilds
+    its change records as whole records, acknowledges its sequence unless
+    one of them couldn't be, then applies its hides, looks, reveals,
+    records and footstep entries in that order, so a reveal carries the
+    look its block brought. An entry for a generation the slot table
+    hasn't announced waits for it, and one for an older generation is
+    dropped, as is a block older than the newest spectate start or end. It
+    errors on a block that isn't one
 --]]
 
 function Interpolate.receive(data: buffer)
@@ -794,9 +896,13 @@ function Interpolate.receive(data: buffer)
 		return
 	end
 
-	acknowledge(Read.sequence)
-
 	local tick: number = arrive(Read.tick)
+	local rebuilt: number, complete: boolean = rebuild(tick)
+
+	-- A block holding a change it couldn't rebuild goes unacknowledged, so the server falls back to an older baseline
+	if complete then
+		acknowledge(Read.sequence)
+	end
 
 	for index: number = 1, Read.hideCount do
 		local hide: Hide = Read.hides[index]
@@ -824,15 +930,12 @@ function Interpolate.receive(data: buffer)
 
 	local records: buffer = Read.recordData
 	for index: number = 1, Read.recordCount do
-		local offset: number = Read.records[index]
-		local slot: number, generation: number = Record.split(buffer.readu16(records, offset))
-		local verdict: Verdict = judge(slot, generation)
+		applyRecord(tick, records, Read.records[index])
+	end
 
-		if verdict == "Apply" then
-			push(slot, tick, records, offset)
-		elseif verdict == "Hold" and hold(slot, generation) then
-			holdRecord(slot, tick, records, offset)
-		end
+	-- Each rebuilt change as a whole record of the block
+	for index: number = 0, rebuilt - 1 do
+		applyRecord(tick, Rebuilt, index * RECORD_BYTES)
 	end
 
 	-- A footstep entry names no player, so every one goes on as it comes
@@ -851,6 +954,7 @@ end
     a live player anti-ESP withheld from the target, which opens that slot
     with no reveal and keeps it withheld while its records keep coming. It
     never moves the acknowledgment, and errors on a block that isn't one
+    or holds a change record, since a withheld block's records go whole
 --]]
 
 function Interpolate.withheld(data: buffer)
@@ -858,6 +962,8 @@ function Interpolate.withheld(data: buffer)
 	Block.read(data, Read)
 	if Read.revealCount ~= 0 or Read.hideCount ~= 0 or Read.footstepCount ~= 0 then
 		error("A withheld block carries no reveal, hide or footstep entries", 2)
+	elseif Read.changeCount ~= 0 then
+		error("A withheld block carries its records whole, never as change records", 2)
 	elseif stale(Read.tick) then
 		return
 	end
@@ -1180,8 +1286,9 @@ end
     Begins a spectate's view, or the moderator's own once it ends, at the
     relay tick the Spectate message names: each slot whose newest record is
     older closes, told to every hide callback, a block older than the tick
-    is dropped from then on, and the acknowledgment starts again from the
-    next block, acknowledging none until it comes
+    is dropped from then on, as is a change record naming a baseline older
+    than it, and the acknowledgment starts again from the next block,
+    acknowledging none until it comes
 
     @ tick | the u16 relay tick the view starts at
 --]]

@@ -1,7 +1,7 @@
 --[[
     The relay cases' harness: the relay and its taps started on the example's
     tables, bodies in the slot table, and viewers whose clients read every
-    block and withheld block they are sent, the first over Volt.mock
+    block and withheld block they are sent, each change against what they kept
 --]]
 
 --!strict
@@ -14,6 +14,7 @@ local Packages = ReplicatedStorage.Packages
 
 local Tread = Packages.Tread
 local Block = require(Tread.Codec.Block)
+local Change = require(Tread.Codec.Change)
 local Constants = require(Tread.Constants)
 local Example = require(ServerScriptService.Fixtures.Config.Example)
 local Fields = require(Tread.Codec.Fields)
@@ -27,6 +28,9 @@ local Taps = require(Tread.Server.Taps)
 local MASK_BITS: number = 16 -- The sequences before the newest a client's acknowledgment covers
 local WRAP: number = 2 ^ 16
 local STEPS: number = 3 -- Mock steps that carry a flush across, as manualFlush.luau finds
+local RECORD_BYTES: number = Constants.RECORD_BYTES
+local SLOTS: number = Constants.SLOTS
+local BASE_AT: number = 2 -- A change record's base, after its slot and generation
 
 type Kind = Slots.Kind
 type State = State.State
@@ -50,6 +54,13 @@ export type Withheld = {
 	records: { Record.Record },
 }
 
+-- A change record as a client read it: whose it is, its base and its bytes as sent
+export type Delta = {
+	slot: number,
+	base: number,
+	bytes: string,
+}
+
 -- What one client read in one run
 export type Seen = {
 	sizes: { number }, -- Each block's bytes, a lost one included
@@ -59,7 +70,9 @@ export type Seen = {
 	hides: { Block.Hide },
 	looks: { Look },
 	footsteps: { Block.Footstep },
-	records: { Record.Record },
+	records: { Record.Record }, -- Whole records, then each block's changes as the records they decode to
+	raws: { string }, -- Each of those records' 16 B
+	changes: { Delta }, -- The change records among them
 	blocks: { { reveals: { number }, looks: { number }, records: { number } } }, -- The slots in each block read
 	withheld: { Withheld }, -- Each withheld block read
 }
@@ -73,6 +86,7 @@ export type Client = {
 	newest: number, -- The newest sequence read, 0 for none
 	received: { [number]: boolean },
 	drawn: { [number]: { generation: number, kind: Block.Kind } }, -- What it draws, by slot, from reveals and hides
+	store: Change.Store, -- The records it read of the last 32 relay ticks, which each change is decoded against
 	seen: Seen,
 }
 
@@ -110,6 +124,8 @@ local function seen(): Seen
 		looks = {},
 		footsteps = {},
 		records = {},
+		raws = {},
+		changes = {},
 		blocks = {},
 		withheld = {},
 	}
@@ -226,6 +242,7 @@ function Harness.viewer(self: Self, name: string): Client
 		newest = 0,
 		received = {},
 		drawn = {},
+		store = Change.store(),
 		seen = seen(),
 	}
 
@@ -451,22 +468,55 @@ function Harness._receive(self: Self, key: any, data: buffer)
 		table.insert(view.footsteps, step)
 	end
 
+	-- Each record kept at the run's tick, which every block of the run samples, so a later change finds its baseline
 	for index: number = 1, block.recordCount do
-		local record: Record.Record = Record.new()
-		Record.read(data, block.records[index], record, self.limits)
-		table.insert(view.records, record)
-		table.insert(slots.records, record.slot)
+		self:_keep(client, data, block.records[index], slots.records)
+	end
+
+	for index: number = 1, block.changeCount do
+		local at: number = block.changeOffsets[index]
+		local id: number = buffer.readu16(data, at)
+		local base: number = buffer.readu8(data, at + BASE_AT)
+		local baseline: buffer?, baselineAt: number = Change.find(client.store, id, self.tick - base)
+		if not baseline then
+			error(`A change of character {id} named tick {self.tick - base}, whose record its client never kept`)
+		end
+
+		local whole: buffer = buffer.create(RECORD_BYTES)
+		Change.read(data, at, baseline, baselineAt, whole, 0)
+
+		table.insert(view.changes, {
+			slot = id % SLOTS,
+			base = base,
+			bytes = buffer.readstring(data, at, block.changeLengths[index]),
+		})
+		self:_keep(client, whole, 0, slots.records)
 	end
 end
 
--- A client reads one withheld block, which never moves its acknowledgment, refusing one with reveals, hides or steps
+-- A client reads one whole record, a block's or one a change decoded to, and keeps it for the changes after it
+function Harness._keep(self: Self, client: Client, data: buffer, at: number, slots: { number })
+	local record: Record.Record = Record.new()
+	Record.read(data, at, record, self.limits)
+
+	table.insert(client.seen.records, record)
+	table.insert(client.seen.raws, buffer.readstring(data, at, RECORD_BYTES))
+	table.insert(slots, record.slot)
+	Change.keep(client.store, self.tick, data, at)
+end
+
+--[[
+    A client reads one withheld block, which never moves its acknowledgment,
+    refusing one with reveals, hides, steps or change records
+--]]
+
 function Harness._readWithheld(self: Self, key: any, data: buffer)
 	local client: Client = self.clients[key]
 	local block: Block.Block = Block.new()
 	Block.read(data, block)
 
-	if block.revealCount + block.hideCount + block.footstepCount ~= 0 then
-		error("A withheld block carried a reveal, a hide or a footstep")
+	if block.revealCount + block.hideCount + block.footstepCount + block.changeCount ~= 0 then
+		error("A withheld block carried a reveal, a hide, a footstep or a change record")
 	end
 
 	local records: { Record.Record } = {}

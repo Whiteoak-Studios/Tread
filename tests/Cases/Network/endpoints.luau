@@ -1,6 +1,6 @@
 --[[
     Volt's server and client modules for Tread.volt start over the mock and
-    expose the eleven endpoints the design names and no other, each with
+    expose the twelve endpoints the design names and no other, each with
     the calls its side makes
 --]]
 
@@ -14,7 +14,8 @@ local CLIENT: string = "src/Network/Client.luau"
 local HEARD: { string } = { "Move", "View" }
 
 -- The endpoints the server sends, in the design's order
-local SENT: { string } = { "Relay", "Withheld", "Owner", "Feed", "Slots", "Death", "Platform", "Spectate", "Shared" }
+local SENT: { string } =
+	{ "Relay", "Withheld", "Owner", "Feed", "Slots", "Death", "Platform", "Gravity", "Spectate", "Shared" }
 
 local FIRES: { string } = { "fire", "fireAll", "fireList", "fireExcept", "fireSet" } -- What the server sends with
 local LISTENS: { string } = { "on", "iter" } -- What the side that hears an event takes it with

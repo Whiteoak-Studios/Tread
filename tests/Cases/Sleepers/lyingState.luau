@@ -60,12 +60,13 @@ return function (): (boolean, string | nil)
 	local Sleepers: any = globals.require(tread.Server.Sleepers)
 	local Slots: any = globals.require(tread.Server.Slots)
 	local State: any = globals.require(tread.Step.State)
+	local World: any = globals.require(tread.Step.World)
 
 	local shared: any = Example.shared()
 	local server: any = Example.server()
 	Slots.start(server.slots.reserve)
 	History.start(shared, server)
-	Sleepers.start(shared)
+	Sleepers.start(shared, World.new(shared.step, shared.rates.simulation, {}, shared.water, shared.rules, true))
 
 	local eye: number = math.round(shared.step.eyeDowned * EYE_STEPS) / EYE_STEPS
 

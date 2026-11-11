@@ -11,7 +11,7 @@ local Environment = require("../../Environment")
 local HARNESS: string = "tests/Fixtures/Relay/Harness.luau"
 local TICKS: number = 20
 local SOFT: number = 64 * 1000
-local ONE_RECORD: number = 27 -- A block's header and framing and one record
+local ONE_RECORD: number = 28 -- A block's header and framing and one record
 local FLOOR: number = 1 -- A far floor low enough that the queue, not the floor, decides who goes
 
 return function (): (boolean, string | nil)

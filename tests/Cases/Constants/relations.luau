@@ -18,8 +18,8 @@ return function (): (boolean, string | nil)
 
 	local relations: { Relation } = {
 		{
-			relation = "the header and 55 records fill 888 B of the 896 B relay block, and a 56th passes it",
-			holds = recordsFill == 888
+			relation = "the header and 55 records fill 889 B of the 896 B relay block, and a 56th passes it",
+			holds = recordsFill == 889
 				and recordsFill <= constants.MAX_RELAY_BYTES
 				and recordsFill + constants.RECORD_BYTES > constants.MAX_RELAY_BYTES,
 		},
@@ -103,6 +103,18 @@ return function (): (boolean, string | nil)
 		{
 			relation = "a footstep entry's X, Z, Y and ground material fill its 10 B",
 			holds = 3 + 3 + 2 + 2 == constants.FOOTSTEP_BYTES,
+		},
+
+		{
+			relation = "a change's id, base and mask fill its 4 B, 221 of which fit beside the header, over 32 kept ticks",
+			holds = 2 + 1 + 1 == constants.CHANGE_HEADER_BYTES
+				and (constants.MAX_RELAY_BYTES - constants.RELAY_HEADER_BYTES) // constants.CHANGE_HEADER_BYTES == 221
+				and constants.CHANGE_DEPTH == 32,
+		},
+
+		{
+			relation = "a tap block reaches the top of the u16 length in front of it",
+			holds = constants.TAP_BLOCK_BYTES == 2 ^ 16 - 1,
 		},
 
 		{

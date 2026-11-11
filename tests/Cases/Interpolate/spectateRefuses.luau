@@ -1,8 +1,8 @@
 --[[
-    Interpolate refuses a start with no gravity above 0, a restart, a
-    withheld block or an occupant read before start, a restart at no u16
-    tick, a withheld block that isn't one, and an occupant of a slot
-    outside the table
+    Interpolate refuses a start with no client world, a restart, a withheld
+    block or an occupant read before start, a restart at no u16 tick, a
+    withheld block that isn't one, and an occupant of a slot outside the
+    table
 --]]
 
 --!strict
@@ -40,9 +40,9 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	for _, gravity: any in { 0, -9.8, 0 / 0, math.huge, "68.1" } do
-		if not refuses(fresh.start, viewer.settings, viewer.rates, viewer.limits, {}, gravity) then
-			return false, `Interpolate.start took a gravity of {gravity}`
+	for _, world: any in { false, viewer.gravity, "world" } do
+		if not refuses(fresh.start, viewer.settings, viewer.rates, viewer.limits, {}, world) then
+			return false, `Interpolate.start took {world} as the client's world`
 		end
 	end
 

@@ -361,6 +361,23 @@ local function readPlatform(player: (Player | Bot)?, packet: buffer, cursor: num
 	return runtime:deliver(7, player, cursor, sideCursor, platform, tick)
 end
 
+local function readGravity(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 12 > length then
+		error("Gravity: truncated")
+	end
+
+	local gravity: number = buffer.readf64(packet, cursor)
+
+	if gravity ~= gravity then
+		error("Gravity.gravity: out of range")
+	end
+
+	local tick: number = buffer.readu32(packet, cursor + 8)
+	cursor += 12
+
+	return runtime:deliver(8, player, cursor, sideCursor, gravity, tick)
+end
+
 local function readSpectate(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
 	if cursor + 3 > length then
 		error("Spectate: truncated")
@@ -381,7 +398,7 @@ local function readSpectate(player: (Player | Bot)?, packet: buffer, cursor: num
 		target = target_2
 	end
 
-	return runtime:deliver(8, player, cursor, sideCursor, target, tick)
+	return runtime:deliver(9, player, cursor, sideCursor, target, tick)
 end
 
 local function readShared(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
@@ -393,7 +410,7 @@ local function readShared(player: (Player | Bot)?, packet: buffer, cursor: numbe
 	local tick: number = buffer.readu32(packet, cursor + 4)
 	cursor += 8
 
-	return runtime:deliver(9, player, cursor, sideCursor, hash, tick)
+	return runtime:deliver(10, player, cursor, sideCursor, hash, tick)
 end
 
 local function writeView(distance: number)
@@ -409,7 +426,7 @@ end
 
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x9814AF4F,
+	hash = 0x12E2915A,
 	scope = "Tread",
 	side = "client",
 	idBytes = 1,
@@ -431,8 +448,9 @@ runtime = Volt.start({
 		[5] = { name = "Slots", kind = "event", mode = "SingleSync", queue = 64, read = readSlots },
 		[6] = { name = "Death", kind = "event", mode = "SingleSync", queue = 64, read = readDeath },
 		[7] = { name = "Platform", kind = "event", mode = "SingleSync", queue = 64, read = readPlatform },
-		[8] = { name = "Spectate", kind = "event", mode = "SingleSync", queue = 64, read = readSpectate },
-		[9] = { name = "Shared", kind = "event", mode = "SingleSync", queue = 64, read = readShared },
+		[8] = { name = "Gravity", kind = "event", mode = "SingleSync", queue = 64, read = readGravity },
+		[9] = { name = "Spectate", kind = "event", mode = "SingleSync", queue = 64, read = readSpectate },
+		[10] = { name = "Shared", kind = "event", mode = "SingleSync", queue = 64, read = readShared },
 	},
 
 	outgoing = {
@@ -529,23 +547,33 @@ local Network = {
 		end,
 	}) :: ClientListener<(number, number)>,
 
-	Spectate = table.freeze({
-		on = function (listener: (target: number?, tick: number) -> ()): () -> ()
+	Gravity = table.freeze({
+		on = function (listener: (gravity: number, tick: number) -> ()): () -> ()
 			return runtime:on(8, listener)
 		end,
 
-		iter = function (): () -> (number, number?, number)
+		iter = function (): () -> (number, number, number)
 			return runtime:iter(8)
+		end,
+	}) :: ClientListener<(number, number)>,
+
+	Spectate = table.freeze({
+		on = function (listener: (target: number?, tick: number) -> ()): () -> ()
+			return runtime:on(9, listener)
+		end,
+
+		iter = function (): () -> (number, number?, number)
+			return runtime:iter(9)
 		end,
 	}) :: ClientListener<(number?, number)>,
 
 	Shared = table.freeze({
 		on = function (listener: (hash: number, tick: number) -> ()): () -> ()
-			return runtime:on(9, listener)
+			return runtime:on(10, listener)
 		end,
 
 		iter = function (): () -> (number, number, number)
-			return runtime:iter(9)
+			return runtime:iter(10)
 		end,
 	}) :: ClientListener<(number, number)>,
 
@@ -588,6 +616,7 @@ Network.events = table.freeze({
 	["Slots"] = Network.Slots,
 	["Death"] = Network.Death,
 	["Platform"] = Network.Platform,
+	["Gravity"] = Network.Gravity,
 	["Spectate"] = Network.Spectate,
 	["Shared"] = Network.Shared,
 	["View"] = Network.View,

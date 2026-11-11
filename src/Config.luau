@@ -15,6 +15,7 @@ local VELOCITY_LIMIT: number = Constants.VELOCITY_LIMIT
 local SLOTS: number = Constants.SLOTS
 local TIMER_LIMIT: number = Constants.TIMER_LIMIT -- The most ticks a mantle or a slide's cooldown takes, each a u8
 local STRAIGHT_DOWN: number = 90 -- Degrees below level a look points straight down at
+local HALF_TURN: number = 180 -- Degrees a view cone's half-angle reaches at most, every direction
 local PLAYER_RAYS: number = Constants.PLAYER_RAYS -- The rays anti-ESP's player pair test has
 local LYING_RAYS: number = Constants.LYING_RAYS -- A sleeper's or body's
 
@@ -49,8 +50,10 @@ local EXPECTED: { [string]: string } = {
 	speed = `a speed above 0 that rounds to OwnerState's precision below {VELOCITY_LIMIT} studs/s, which its i16 holds`,
 	height = `a height above 0 that rounds to OwnerState's precision at most {EYE_LIMIT} studs, which its u8 holds`,
 	drop = `a number of degrees above 0 and below {STRAIGHT_DOWN}`,
+	cone = `a half-angle in degrees above 0 and at most {HALF_TURN}`,
 	playerRays = `a whole number from 1 to {PLAYER_RAYS}, the rays a player pair's test has`,
 	lyingRays = `a whole number from 1 to {LYING_RAYS}, the rays a sleeper's or body's test has`,
+	boolean = "true or false",
 	["function"] = "a function",
 	vector = "a Vector3",
 	color = "a Color3",
@@ -173,8 +176,10 @@ local SERVER: Specs = {
 		nearAim = "positive",
 		farFloor = "positive",
 		farAim = "positive",
+		["outOfView?"] = { rate = "positive", cone = "cone", radius = "nonNegative" },
 	},
 
+	["relay?"] = { ["changes?"] = "boolean" },
 	weights = { near = "positive", far = "positive", shooter = "positive", cone = "positive" },
 	shotNear = { rate = "positive", seconds = "positive" },
 	budget = { soft = "positive", hard = "positive" },
@@ -392,7 +397,16 @@ export type ServerSettings = {
 		nearAim: number,
 		farFloor: number,
 		farAim: number,
+
+		-- The aim and floor a player outside a viewer's view cone is held to, Hz, the cone's half-angle in degrees,
+		-- and the studs inside which no player is held to it; with none, no player is. Tread only reads it, so a
+		-- tiers table a game builds in its own module fits with it or without it
+		read outOfView: { rate: number, cone: number, radius: number }?,
 	},
+
+	-- Whether each record goes as its change since what the viewer last acknowledged; left out or false, whole. Read
+	-- only, as tiers.outOfView is, so a game's own relay table fits
+	read relay: { read changes: boolean? }?,
 
 	weights: { near: number, far: number, shooter: number, cone: number }, -- The allocator's priorities
 	shotNear: { rate: number, seconds: number },
@@ -534,13 +548,15 @@ local function join(path: string, key: any): string
 end
 
 --[[
-    Whether a value is of the kind a spec names: a function, a Vector3, a
-    string, a table, an Instance of a class, or a finite number in the
-    kind's range
+    Whether a value is of the kind a spec names: a boolean, a function, a
+    Vector3, a string, a table, an Instance of a class, or a finite number
+    in the kind's range
 --]]
 
 local function accepts(kind: string, value: any): boolean
-	if kind == "function" then
+	if kind == "boolean" then
+		return type(value) == "boolean"
+	elseif kind == "function" then
 		return type(value) == "function"
 	elseif kind == "vector" then
 		return typeof(value) == "Vector3"
@@ -586,6 +602,8 @@ local function accepts(kind: string, value: any): boolean
 		return value > 0 and Math.quantizeEye(value) <= EYE_LIMIT
 	elseif kind == "drop" then
 		return value > 0 and value < STRAIGHT_DOWN
+	elseif kind == "cone" then
+		return value > 0 and value <= HALF_TURN
 	elseif kind == "playerRays" then
 		return value >= 1 and value <= PLAYER_RAYS and value % 1 == 0
 	elseif kind == "lyingRays" then

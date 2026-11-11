@@ -59,6 +59,7 @@ local EPOCHS: number = 2 ^ 8 -- The full epoch is a u8, so one past its top wrap
 local RECENT: number = 8 -- The stepped commands a character keeps for rewindFor, each with its tick and queue wait
 local NUMBER_BYTES: number = 2 -- A kept command's number, a u16
 local TICK_BYTES: number = 8 -- Its tick, unwrapped, an f64
+local WAIT_BYTES: number = 4 -- Its queue wait in simulation ticks with their fraction, an f32
 local MILLISECONDS: number = 1000 -- A second's, which a Move's interpolation delay counts in
 local RIG: Slots.Rig = "A" -- The rig mode every body is drawn with, the one the first release has
 local SIMULATE: string = "simulate" -- The stage a character's failed step is reported under
@@ -157,7 +158,7 @@ local PublicSamples: { [number]: { [Posture]: Sample } } = {} -- Each slot's pub
 -- Each character's last RECENT stepped commands by slot: the number, the tick it ran on unwrapped, and its queue wait
 local RecentNumbers: buffer = buffer.create(SLOTS * RECENT * NUMBER_BYTES)
 local RecentTicks: buffer = buffer.create(SLOTS * RECENT * TICK_BYTES)
-local RecentWaits: buffer = buffer.create(SLOTS * RECENT)
+local RecentWaits: buffer = buffer.create(SLOTS * RECENT * WAIT_BYTES)
 local RecentNext: buffer = buffer.create(SLOTS) -- The ring index the next one goes at
 local RecentHeld: buffer = buffer.create(SLOTS) -- How many the ring holds
 
@@ -201,6 +202,7 @@ local PendingAcknowledged: { [number]: number } = {}
 local PendingReceived: { [number]: number } = {}
 local PendingDelays: { [number]: number } = {}
 local PendingWires: { [number]: { Command.Wire } } = {}
+local PendingArrivals: { [number]: number } = {} -- Commands' clock as Volt delivered each
 
 -- A body's state before its step, put back when the step throws, and the state being stepped, nil outside a step
 local Before: StepState = State.new()
@@ -412,7 +414,7 @@ local function remember(slot: number, number: number, tick: number, wait: number
 
 	buffer.writeu16(RecentNumbers, index * NUMBER_BYTES, number)
 	buffer.writef64(RecentTicks, index * TICK_BYTES, tick)
-	buffer.writeu8(RecentWaits, index, wait)
+	buffer.writef32(RecentWaits, index * WAIT_BYTES, wait)
 	buffer.writeu8(RecentNext, slot, (at + 1) % RECENT)
 	buffer.writeu8(RecentHeld, slot, math.min(buffer.readu8(RecentHeld, slot) + 1, RECENT))
 end
@@ -438,7 +440,7 @@ end
 
 local function lagOf(slot: number, connection: Connection, command: number): number
 	local index: number? = recent(slot, command)
-	local wait: number = index and buffer.readu8(RecentWaits, index) or 0
+	local wait: number = index and buffer.readf32(RecentWaits, index * WAIT_BYTES) or 0
 
 	return History.lag(connection:rtt(), wait, Commands.delay(connection) / MILLISECONDS)
 end
@@ -500,10 +502,10 @@ end
 --[[
     Starts the bodies with the game's tables: the world on the game's own
     four collision functions or on engine casts over its include list, the
-    NPCs and the teleports on that world, anti-ESP on its include list over
-    the bodies' states, and the Camera the focus parts sit under. It runs
-    once, after the slot table, the intake and the history start and before
-    the first body
+    sleepers, the NPCs and the teleports on that world, anti-ESP on its
+    include list over the bodies' states, and the Camera the focus parts sit
+    under. It runs once, after the slot table, the intake and the history
+    start and before the first body
 --]]
 
 function Characters.start(context: Context)
@@ -546,6 +548,7 @@ function Characters.start(context: Context)
 		held = layout.held,
 	}
 
+	Sleepers.start(shared, world)
 	Npcs.start(world, npcLanded)
 	Teleport.start({ shared = shared, server = server }, world)
 	AntiEsp.start({ shared = shared, server = server }, world, States, blocked)
@@ -621,7 +624,8 @@ local function enlist(key: Key, player: Player?, slot: number, generation: numbe
 	buffer.writeu8(RecentNext, slot, 0)
 	buffer.writeu8(RecentHeld, slot, 0)
 	Links[slot] = connection
-	Viewers[slot] = { key = key, slot = slot, position = position, acknowledged = 0, received = 0, target = nil }
+	Viewers[slot] =
+		{ key = key, slot = slot, position = position, acknowledged = 0, received = 0, target = nil, look = nil }
 	Invisible[slot] = false
 	Departed[slot] = nil
 
@@ -964,7 +968,7 @@ function Characters.rewindFor(key: Key, command: number, renderTime: number): (n
 
 	local connection: Connection = Links[slot]
 	local tick: number = buffer.readf64(RecentTicks, index * TICK_BYTES)
-	local wait: number = buffer.readu8(RecentWaits, index)
+	local wait: number = buffer.readf32(RecentWaits, index * WAIT_BYTES)
 	local delay: number = Commands.delay(connection) / MILLISECONDS
 
 	local time: number, inside: boolean, offset: number =
@@ -1006,6 +1010,15 @@ end
 
 function Characters.callPlatform(id: number, tick: number)
 	Platforms.call(running("server:callPlatform").world, id, tick)
+end
+
+--[[
+    Changes the server's gravity from a simulation tick, unwrapped, so every
+    body steps the ticks from it under the new value
+--]]
+
+function Characters.setGravity(gravity: number, tick: number)
+	World.setGravity(running("server:setGravity").world, gravity, tick)
 end
 
 --[[
@@ -1153,8 +1166,9 @@ end
 
 --[[
     What Volt's Move listener hands over for a player or bot, kept for the
-    next tick's decode stage, which hands each to Commands. A Move from one
-    with no character is dropped
+    next tick's decode stage, which hands each to Commands with the time it
+    arrived, so its queue wait counts from then. A Move from one with no
+    character is dropped
 --]]
 
 function Characters.file(
@@ -1177,6 +1191,7 @@ function Characters.file(
 	PendingReceived[index] = received
 	PendingDelays[index] = delay
 	PendingWires[index] = wires
+	PendingArrivals[index] = Commands.now()
 end
 
 --[[
@@ -1251,7 +1266,8 @@ function Characters.decode(tick: number)
 				PendingAcknowledged[index],
 				PendingReceived[index],
 				PendingDelays[index],
-				wires
+				wires,
+				PendingArrivals[index]
 			)
 		end
 	end
@@ -1472,9 +1488,9 @@ end
 --[[
     The relay stage, on a relay tick: each character whose player is still
     here samples its ping, sends its OwnerState and is a viewer, with its
-    acknowledgments and the target it spectates, then the relay gives every
-    viewer its blocks, with each platform's place at the tick for its
-    riders, and a share of the focus parts moves
+    acknowledgments, its newest look and the target it spectates, then the
+    relay gives every viewer its blocks, with each platform's place at the
+    tick for its riders, and a share of the focus parts moves
 
     @ relayTick | the relay tick as the server counts it, unwrapped
     @ tick | the simulation tick that starts it, unwrapped
@@ -1498,6 +1514,7 @@ function Characters.relay(relayTick: number, tick: number)
 			viewer.acknowledged = acknowledged
 			viewer.received = received
 			viewer.target = Spectate.targetOf(key)
+			viewer.look = Commands.look(connection)
 
 			connection:sample(setup.relayInterval)
 			sendOwnerState(character, key, connection, setup)

@@ -8,6 +8,8 @@
 local Server = {}
 Server.__index = Server
 
+local Workspace = game:GetService("Workspace")
+
 local AntiEsp = require(script.AntiEsp)
 local Characters = require(script.Characters)
 local Commands = require(script.Commands)
@@ -20,7 +22,6 @@ local Keyframe = require(script.Parent.Codec.Keyframe)
 local Relay = require(script.Relay)
 local Reliable = require(script.Parent.Codec.Reliable)
 local Reports = require(script.Reports)
-local Sleepers = require(script.Sleepers)
 local Slots = require(script.Slots)
 local Spectate = require(script.Spectate)
 local State = require(script.Parent.Step.State)
@@ -87,6 +88,11 @@ local SimulationRate: number = 0 -- From the shared table at start, Hz
 local RelayRate: number = 0
 
 local Joined: { Key } = {} -- Every player and bot Volt has set up on Tread's scope, which the slot table goes to
+
+-- The gravity the latest setGravity call set, studs/s², and the simulation tick it applies from, unwrapped; nil
+-- until a call, while the shared table's step.gravity holds
+local Gravity: number? = nil
+local GravityTick: number? = nil
 
 -- One slot table entry, carried alone in each change's message and rewritten for the next
 local ChangeEntry: Reliable.Entry = { slot = 0, taken = nil :: { rig: Reliable.Rig, player: Instance? }? }
@@ -254,7 +260,6 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 	Connections.start(server.rewind.rttSmoothing, server.bots)
 	Commands.start(shared, layout)
 	History.start(shared, server)
-	Sleepers.start(shared)
 
 	Characters.start({
 		shared = shared,
@@ -320,6 +325,13 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 		table.insert(Joined, key)
 
 		network.Shared.fire(key, hash, ran % TICK_WRAP)
+
+		-- Before the slot table, so it lands before the client's first predicted step
+		local gravity: number?, from: number? = Gravity, GravityTick
+		if gravity ~= nil and from ~= nil then
+			network.Gravity.fire(key, gravity, from % TICK_WRAP)
+		end
+
 		sendSlotTable(network, key)
 		sendCalls(network, key)
 	end)
@@ -561,6 +573,33 @@ function Server.callPlatform(self: Self, id: number)
 	self._network.Platform.fireList(Joined, id, tick % TICK_WRAP)
 end
 
+--- Changes Tread's gravity, studs/s², from the next tick: every body the
+--- server steps, every joined player's prediction and drawing from that
+--- tick, every player who joins later, and Workspace.Gravity on the
+--- server, which its clients take from it. A moved sleeper's fall takes
+--- the gravity in force at each moment it is sampled or drawn, so a change
+--- during it moves the body to where the new value puts it. Errors,
+--- changing and sending nothing, on anything but a finite number above 0
+--- @method setGravity
+--- @within Server
+--- @param gravity number
+
+function Server.setGravity(self: Self, gravity: number)
+	if type(gravity) ~= "number" or not (gravity > 0) or gravity == math.huge then
+		error(`server:setGravity takes a gravity in studs/s² that is a finite number above 0, not {gravity}`, 2)
+	end
+
+	local ran: number = Tick.counts()
+	local tick: number = ran + 1
+
+	Characters.setGravity(gravity, tick)
+	Workspace.Gravity = gravity
+	Gravity = gravity
+	GravityTick = tick
+
+	self._network.Gravity.fireList(Joined, gravity, tick % TICK_WRAP)
+end
+
 --- Starts a moderator spectating a target's character, switches it to a
 --- new one, or with nil ends it, after the game's own moderator check. The
 --- moderator must have a character, which the game parks, and a target
@@ -654,11 +693,11 @@ function Server.observeWithheld(self: Self, viewer: Key, sink: Sink): () -> ()
 end
 
 --- Tap 6: everything a viewer is sent now, as one buffer a clip ring
---- starts from, with the latest call of every platform called, ending
---- with the view's own character with its look and held item. A
---- spectating moderator is sent its target's view, so its keyframe holds
---- the target's characters, the target's own character and, marked
---- withheld, the looks of those withheld from the target
+--- starts from, with the latest call of every platform called and the
+--- gravity in force, ending with the view's own character with its look
+--- and held item. A spectating moderator is sent its target's view, so its
+--- keyframe holds the target's characters, the target's own character
+--- and, marked withheld, the looks of those withheld from the target
 --- @method keyframe
 --- @within Server
 --- @param viewer Player | Bot
@@ -673,7 +712,7 @@ function Server.keyframe(self: Self, viewer: Key): buffer
 		end
 	end
 
-	return Relay.keyframe(viewer, called)
+	return Relay.keyframe(viewer, called, Gravity)
 end
 
 --- Tap 4's snapshot: every taken slot with its generation, kind, rig

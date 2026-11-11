@@ -207,10 +207,12 @@ return function (): (boolean, string | nil)
 		sequence = 3,
 		characters = {},
 		platforms = {},
+		gravity = 68.1,
 		own = { id = id, look = buffer.fromstring("ab"), held = buffer.fromstring("c") },
 	})
 
-	local nobody: buffer = Keyframe.write({ hash = 1, tick = 2, sequence = 3, characters = {}, platforms = {} })
+	local nobody: buffer =
+		Keyframe.write({ hash = 1, tick = 2, sequence = 3, characters = {}, platforms = {}, gravity = 68.1 })
 	local own: any = Decode.decode(version, "keyframe", keyframe).own
 	local none: any = Decode.decode(version, "keyframe", nobody)
 	if not own or own.id ~= id or own.slot ~= OWNER_SLOT or own.generation ~= OWNER_GENERATION then
@@ -256,7 +258,7 @@ return function (): (boolean, string | nil)
 		{ "past its OwnerState", "tap", patched(frame, countAt, #LOOKS - 1) },
 		{ "past its OwnerState", "tap", longer(frame) },
 		{ "past its OwnerState", "tap", longer(empty) },
-		{ "no own character", "keyframe", patched(longer(nobody), 15, 1) },
+		{ "no own character", "keyframe", patched(longer(nobody), 23, 1) },
 		{ "read only by that version", "snapshot", patched(snapshot, 0, version + 1) },
 		{ "has no value", "snapshot", patched(snapshot, 10, 9) },
 		{ "past its last slot", "snapshot", longer(snapshot) },
@@ -278,7 +280,7 @@ return function (): (boolean, string | nil)
 			end,
 		},
 		{
-			"8 to 896 B",
+			"9 to 65535 B",
 			function ()
 				Tap.writeBlock(body, 0, buffer.create(4), {}, 0)
 			end,

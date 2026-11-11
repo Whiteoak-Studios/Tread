@@ -148,7 +148,7 @@ local Shared: Tread.Shared = {
 		floatDepth = 1.83, -- An idle swimmer's feet below the surface
 		crouchDepth = 2.22,
 		mantleHeight = 4,
-		mantleReach = 1.39, -- Studs past the hull's front a ledge's face may stand, the hull's radius
+		mantleReach = 2.5, -- Studs past the hull's front a ledge's face may stand for a mantle
 		mantleTime = 0.5,
 		mantleArc = 0.5, -- Studs the mantle's path arches over the top before it settles onto it
 		ladderJump = 25,
@@ -178,16 +178,18 @@ local Shared: Tread.Shared = {
 		Mantle = 0,
 	},
 
-	-- Each posture's capsules in the character's own space, and the height a lean tilts the upper body about
+	-- Each posture's capsules in the character's own space, and the height the lean and aim pitch tilt the upper body
+	-- about, the DevRig's Waist joint above its lowest point. Each body's radius is the smallest tenth of a stud that
+	-- holds every zone at any pitch and lean, since the dev hit test reads zones only for a shot that meets the body
 	hitShapes = {
 		Stand = {
-			body = { from = Vector3.new(0, 1, 0), to = Vector3.new(0, 4, 0), radius = 1.4 },
+			body = { from = Vector3.new(0, 1, 0), to = Vector3.new(0, 4, 0), radius = 1.7 },
 			zones = {
 				head = { from = Vector3.new(0, 4.3, 0), to = Vector3.new(0, 4.7, 0), radius = 0.5 },
 				chest = { from = Vector3.new(0, 2.9, 0), to = Vector3.new(0, 3.9, 0), radius = 0.9 },
 				legs = { from = Vector3.new(0, 0.4, 0), to = Vector3.new(0, 2, 0), radius = 0.7 },
 			},
-			waist = 2.5,
+			waist = 2.4,
 		},
 
 		Crouch = {

@@ -343,9 +343,26 @@ local function writePlatform(platform: number, tick: number)
 	buffer.writeu32(out, offset + 2, tick)
 end
 
+local function writeGravity(gravity: number, tick: number)
+	local offset: number, out: buffer = beginReliable(13)
+	buffer.writeu8(out, offset, 8)
+
+	if type(gravity) ~= "number" or gravity ~= gravity then
+		refuseReliable("Gravity.gravity: expected f64")
+	end
+
+	buffer.writef64(out, offset + 1, gravity)
+
+	if type(tick) ~= "number" or bit32.band(tick, 4294967295) ~= tick then
+		refuseReliable("Gravity.tick: expected u32")
+	end
+
+	buffer.writeu32(out, offset + 9, tick)
+end
+
 local function writeSpectate(target: number?, tick: number)
 	local offset: number, out: buffer = beginReliable(6)
-	buffer.writeu8(out, offset, 8)
+	buffer.writeu8(out, offset, 9)
 	local flags: number = 0
 	flags += target ~= nil and 1 or 0
 
@@ -371,7 +388,7 @@ end
 
 local function writeShared(hash: number, tick: number)
 	local offset: number, out: buffer = beginReliable(9)
-	buffer.writeu8(out, offset, 9)
+	buffer.writeu8(out, offset, 10)
 
 	if type(hash) ~= "number" or bit32.band(hash, 4294967295) ~= hash then
 		refuseReliable("Shared.hash: expected u32")
@@ -404,7 +421,7 @@ end
 
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x9814AF4F,
+	hash = 0x12E2915A,
 	scope = "Tread",
 	side = "server",
 	idBytes = 1,
@@ -431,8 +448,9 @@ runtime = Volt.start({
 		[5] = { name = "Slots", kind = "event", reliable = true, minBytes = 2, maxBytes = 1022 },
 		[6] = { name = "Death", kind = "event", reliable = true, minBytes = 8, maxBytes = 8 },
 		[7] = { name = "Platform", kind = "event", reliable = true, minBytes = 6, maxBytes = 6 },
-		[8] = { name = "Spectate", kind = "event", reliable = true, minBytes = 4, maxBytes = 6 },
-		[9] = { name = "Shared", kind = "event", reliable = true, minBytes = 9, maxBytes = 9 },
+		[8] = { name = "Gravity", kind = "event", reliable = true, minBytes = 13, maxBytes = 13 },
+		[9] = { name = "Spectate", kind = "event", reliable = true, minBytes = 4, maxBytes = 6 },
+		[10] = { name = "Shared", kind = "event", reliable = true, minBytes = 9, maxBytes = 9 },
 	},
 })
 
@@ -626,51 +644,75 @@ local Network = {
 		end,
 	}) :: ServerEvent<(number, number)>,
 
+	Gravity = table.freeze({
+		fire = function (player: Player | Bot, gravity: number, tick: number)
+			if (before[8] == nil or before[8](player, gravity, tick)) and runtime:target(player) then
+				writeGravity(gravity, tick)
+			end
+		end,
+
+		fireAll = function (gravity: number, tick: number)
+			runtime:broadcast(8, nil, nil, writeGravity, gravity, tick)
+		end,
+
+		fireList = function (players: { Player | Bot }, gravity: number, tick: number)
+			runtime:broadcast(8, players, nil, writeGravity, gravity, tick)
+		end,
+
+		fireExcept = function (player: Player | Bot, gravity: number, tick: number)
+			runtime:broadcast(8, nil, player, writeGravity, gravity, tick)
+		end,
+
+		fireSet = function (players: { [Player | Bot]: true }, gravity: number, tick: number)
+			runtime:broadcast(8, players, nil, writeGravity, gravity, tick)
+		end,
+	}) :: ServerEvent<(number, number)>,
+
 	Spectate = table.freeze({
 		fire = function (player: Player | Bot, target: number?, tick: number)
-			if (before[8] == nil or before[8](player, target, tick)) and runtime:target(player) then
+			if (before[9] == nil or before[9](player, target, tick)) and runtime:target(player) then
 				writeSpectate(target, tick)
 			end
 		end,
 
 		fireAll = function (target: number?, tick: number)
-			runtime:broadcast(8, nil, nil, writeSpectate, target, tick)
+			runtime:broadcast(9, nil, nil, writeSpectate, target, tick)
 		end,
 
 		fireList = function (players: { Player | Bot }, target: number?, tick: number)
-			runtime:broadcast(8, players, nil, writeSpectate, target, tick)
+			runtime:broadcast(9, players, nil, writeSpectate, target, tick)
 		end,
 
 		fireExcept = function (player: Player | Bot, target: number?, tick: number)
-			runtime:broadcast(8, nil, player, writeSpectate, target, tick)
+			runtime:broadcast(9, nil, player, writeSpectate, target, tick)
 		end,
 
 		fireSet = function (players: { [Player | Bot]: true }, target: number?, tick: number)
-			runtime:broadcast(8, players, nil, writeSpectate, target, tick)
+			runtime:broadcast(9, players, nil, writeSpectate, target, tick)
 		end,
 	}) :: ServerEvent<(number?, number)>,
 
 	Shared = table.freeze({
 		fire = function (player: Player | Bot, hash: number, tick: number)
-			if (before[9] == nil or before[9](player, hash, tick)) and runtime:target(player) then
+			if (before[10] == nil or before[10](player, hash, tick)) and runtime:target(player) then
 				writeShared(hash, tick)
 			end
 		end,
 
 		fireAll = function (hash: number, tick: number)
-			runtime:broadcast(9, nil, nil, writeShared, hash, tick)
+			runtime:broadcast(10, nil, nil, writeShared, hash, tick)
 		end,
 
 		fireList = function (players: { Player | Bot }, hash: number, tick: number)
-			runtime:broadcast(9, players, nil, writeShared, hash, tick)
+			runtime:broadcast(10, players, nil, writeShared, hash, tick)
 		end,
 
 		fireExcept = function (player: Player | Bot, hash: number, tick: number)
-			runtime:broadcast(9, nil, player, writeShared, hash, tick)
+			runtime:broadcast(10, nil, player, writeShared, hash, tick)
 		end,
 
 		fireSet = function (players: { [Player | Bot]: true }, hash: number, tick: number)
-			runtime:broadcast(9, players, nil, writeShared, hash, tick)
+			runtime:broadcast(10, players, nil, writeShared, hash, tick)
 		end,
 	}) :: ServerEvent<(number, number)>,
 
@@ -737,6 +779,7 @@ Network.events = table.freeze({
 	["Slots"] = Network.Slots,
 	["Death"] = Network.Death,
 	["Platform"] = Network.Platform,
+	["Gravity"] = Network.Gravity,
 	["Spectate"] = Network.Spectate,
 	["Shared"] = Network.Shared,
 	["View"] = Network.View,

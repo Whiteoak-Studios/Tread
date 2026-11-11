@@ -93,6 +93,9 @@ function Scene.world(collision: Collision, bodies: { State }?): World
 		bodies = bodies or {},
 		platforms = {},
 		clock = 0,
+		gravity = SETTINGS.gravity,
+		gravityAt = nil,
+		gravityBefore = SETTINGS.gravity,
 	}
 end
 

@@ -201,6 +201,7 @@ return function (): (boolean, string | nil)
 		sequence = 9,
 		characters = { { kind = "Npc", withheld = true, record = recordData, look = server, held = rules } },
 		platforms = { { id = 5, tick = 6 } },
+		gravity = 68.1,
 	})
 
 	decoded = Decode.decode(version, "keyframe", keyframe)

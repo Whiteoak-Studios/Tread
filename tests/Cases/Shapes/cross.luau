@@ -1,7 +1,7 @@
 --[[
     Crossing a posture's shapes gives each capsule on vector with its radius
-    and the waist kept, every capsule a new table on each call, so a set
-    crossed again can be placed into while the first stays as it was
+    and the waist on the vector's float32, every capsule a new table on each
+    call, so a set crossed again can be placed into while the first stays
 --]]
 
 --!strict
@@ -39,10 +39,12 @@ return function (): (boolean, string | nil)
 		failure = failure or differs(name, crossed.zones[name], shape)
 	end
 
+	-- The lying shapes sit on their waist, so a point crossed from it reads as on it, never above it
+	local waist: number = vector.create(0, given.waist, 0).y
 	if failure then
 		return false, failure
-	elseif crossed.waist ~= given.waist then
-		return false, `The waist crossed as {crossed.waist}, not {given.waist}`
+	elseif crossed.waist ~= waist or crossed.body.from.y ~= crossed.waist then
+		return false, `The waist crossed as {crossed.waist}, not {waist}, which the body's points sit on`
 	elseif again.body == crossed.body or again.zones == crossed.zones or again.zones.head == crossed.zones.head then
 		return false, "Crossing the same shapes twice handed back a table it had handed out before"
 	end

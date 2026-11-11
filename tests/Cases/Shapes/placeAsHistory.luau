@@ -11,6 +11,7 @@ local SHAPES: string = "src/Step/Shapes.luau"
 local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 local YAW_SCALE: number = 65536 / (2 * math.pi) -- A sample's u16 yaw steps a radian, as the history reads its yaw back
 local LEAN_STEPS: number = 127 -- A sample's i8 lean steps to the lean limit, as the history reads its lean back
+local LEVEL: number = 0 -- The aim pitch, radians, which leaves the lean's placement as it was
 
 type Capsule = { from: vector, to: vector, radius: number }
 
@@ -167,7 +168,7 @@ return function (): (boolean, string | nil)
 		local yaw: number = placement.yawSteps / YAW_SCALE
 		local lean: number = placement.leanSteps * limit / LEAN_STEPS
 
-		Shapes.place(from, into, placement.feet, yaw, lean)
+		Shapes.place(from, into, placement.feet, yaw, lean, LEVEL)
 
 		local failure: string? = off("body", into.body, placement.body)
 		for name: string, want: Capsule in placement.zones do

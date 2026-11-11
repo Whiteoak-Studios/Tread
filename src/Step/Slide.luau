@@ -99,9 +99,10 @@ end
     stop speed. Gives back the body whose hull top it ends standing on
 
     @ steerX | the move input's direction on the ground, any length, zero for none
+    @ gravity | the gravity the world gives the tick, studs/s²
 --]]
 
-function Slide.run(state: State, world: World, steerX: number, steerZ: number): State?
+function Slide.run(state: State, world: World, steerX: number, steerZ: number, gravity: number): State?
 	local settings: Settings = world.settings
 	local slide: SlideSettings = settingsOf(settings)
 	local delta: number = world.delta
@@ -109,7 +110,7 @@ function Slide.run(state: State, world: World, steerX: number, steerZ: number): 
 	local normal: vector = state.groundNormal
 
 	-- 1) Gravity's share along the ground, which points downhill
-	local push: number = slide.slope * settings.gravity * normal.y * delta
+	local push: number = slide.slope * gravity * normal.y * delta
 	local vx: number = velocity.x + push * normal.x
 	local vz: number = velocity.z + push * normal.z
 

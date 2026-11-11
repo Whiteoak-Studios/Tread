@@ -14,7 +14,7 @@ local CULLED: vector = vector.create(20, 0, 0)
 local LOOK: { [string]: any } = { head = 7, torso = 8 }
 local CHANGED: { [string]: any } = { head = 9 }
 local HELD: { [string]: any } = { item = 11 }
-local EMPTY: number = 8 -- A block's header alone
+local EMPTY: number = 9 -- A block's header alone
 
 return function (): (boolean, string | nil)
 	local Harness: any = Environment.load(HARNESS)

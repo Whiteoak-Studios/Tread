@@ -1,7 +1,8 @@
 --[[
-    Sleepers refuses a call before its start and a second start, a kind,
-    place, yaw, tick, slot or state it cannot take, a body where only a
-    sleeper will do, and a move older than the last, changing nothing
+    Sleepers refuses a call before its start, a start with no world and a
+    second start, a kind, place, yaw, tick, slot or state it cannot take, a
+    body where only a sleeper will do, and a move older than the last,
+    changing nothing
 --]]
 
 --!strict
@@ -50,12 +51,14 @@ return function (): (boolean, string | nil)
 	local Sleepers: any = globals.require(tread.Server.Sleepers)
 	local Slots: any = globals.require(tread.Server.Slots)
 	local State: any = globals.require(tread.Step.State)
+	local World: any = globals.require(tread.Step.World)
 
 	local shared: any = Example.shared()
 	local server: any = Example.server()
+	local world: any = World.new(shared.step, shared.rates.simulation, {}, shared.water, shared.rules, true)
 	Slots.start(server.slots.reserve)
 	History.start(shared, server)
-	Sleepers.start(shared)
+	Sleepers.start(shared, world)
 
 	local sleeper: number, _: number, state: any = Sleepers.create("Sleeper", BED, 0)
 	local body: number = Sleepers.create("Body", BED, 0)
@@ -70,9 +73,16 @@ return function (): (boolean, string | nil)
 
 	local refusals: { Refusal } = {
 		{
+			name = "a start with no world",
+			call = function ()
+				unstarted.start(shared, nil)
+			end,
+			says = "takes the server's World",
+		},
+		{
 			name = "a second start",
 			call = function ()
-				Sleepers.start(shared)
+				Sleepers.start(shared, world)
 			end,
 			says = "runs once",
 		},

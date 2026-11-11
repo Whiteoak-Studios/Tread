@@ -13,6 +13,7 @@ local Math = require(script.Parent.Parent.Step.Math)
 local Sequence = require(script.Parent.Parent.Codec.Sequence)
 local Slots = require(script.Parent.Slots)
 local State = require(script.Parent.Parent.Step.State)
+local World = require(script.Parent.Parent.Step.World)
 
 local PLAY_BOUND: number = Constants.PLAY_BOUND
 local SLOTS: number = Constants.SLOTS
@@ -24,6 +25,7 @@ type Lying = History.Lying
 type Sample = History.Sample
 type Shared = Config.Shared
 type State = State.State
+type World = State.World
 
 local Kinds: { [number]: Kind } = {} -- Each slot this module holds, a sleeper's or a body's
 local States: { [number]: State } = {} -- Each held slot's lying state, create's own or the one a sleep adopted
@@ -35,8 +37,9 @@ local MoveTick: { [number]: number } = {} -- The relay tick that move's fall sta
 local Entry: Slots.Entry = { kind = "Sleeper", rig = RIG } -- The entry each change hands Slots.setEntry, which copies it
 local Fresh: State = State.new() -- Every field a new life starts with, which a reused state is reset to
 
--- The settings start reads
-local Gravity: number = 0 -- step.gravity, studs/s²
+-- What start reads
+local ServerWorld: World? = nil -- The server's world, whose gravity by tick every fall is placed under
+local SimulationRate: number = 0 -- Hz, the rate the world's gravity changes count ticks at
 local RelayRate: number = 0 -- Hz, the rate render times count ticks at
 local EyeHeight: number = 0 -- The Downed eye height above the feet, at OwnerState's 1/32 stud
 local Started: boolean = false
@@ -44,17 +47,21 @@ local Started: boolean = false
 local Sleepers = {}
 
 --[[
-    Takes the shared table's gravity, which a moved sleeper falls under,
-    its relay rate, which render times count in, and its Downed eye height.
-    It runs once, before any other call, on a table Config has checked
+    Takes the server's world, whose gravity by tick a moved sleeper falls
+    under, the shared table's rates, which render times and the world's
+    changes count ticks in, and its Downed eye height. It runs once, before
+    any other call, on a table Config has checked
 --]]
 
-function Sleepers.start(shared: Shared)
+function Sleepers.start(shared: Shared, world: World)
 	if Started then
 		error("Sleepers.start runs once, and it has already run", 2)
+	elseif type(world) ~= "table" then
+		error(`Sleepers.start takes the server's World, not a {typeof(world)}`, 2)
 	end
 
-	Gravity = shared.step.gravity
+	ServerWorld = world
+	SimulationRate = shared.rates.simulation
 	RelayRate = shared.rates.relay
 	EyeHeight = Math.quantizeEye(shared.step.eyeDowned)
 	Started = true
@@ -151,7 +158,8 @@ end
 --[[
     Where a sleeper lies at a time in relay ticks, and its yaw: where its
     latest move falls from before that move's tick, along the fall from
-    then, and where the move put it once the fall is done
+    then under the gravity the world gives that time, and where the move
+    put it once the fall is done
 --]]
 
 local function placeAt(slot: number, time: number): (vector, number)
@@ -164,7 +172,14 @@ local function placeAt(slot: number, time: number): (vector, number)
 		return from, fromYaw
 	end
 
-	local position: vector, fraction: number = Math.fall(from, state.position, Gravity, elapsed)
+	local world: World? = ServerWorld
+	if not world then
+		error("Sleepers placed a fall before Sleepers.start")
+	end
+
+	-- The time counted in simulation ticks, as the world's gravity changes are
+	local gravity: number = World.gravityFor(world, time * SimulationRate / RelayRate)
+	local position: vector, fraction: number = Math.fall(from, state.position, gravity, elapsed)
 	local start: number = fromYaw * YAW_SCALE
 	local turn: number = Sequence.difference(state.facing * YAW_SCALE, start)
 
@@ -261,6 +276,9 @@ function Sleepers.move(slot: number, position: vector, yaw: number, tick: number
 		error(`Sleepers.move took tick {tick} for slot {slot}, whose last move falls from tick {last}`, 2)
 	end
 
+	-- Whiteoak TODO: a move during a fall starts from where that fall has it under the gravity the world holds for the
+	-- move's tick when the move is made, so a setGravity later in the same frame that applies from that tick leaves
+	-- the new fall starting where the old value put it; placing the start again when such a change is set fixes it
 	local at: vector, atYaw: number = placeAt(slot, tick)
 	From[slot] = at
 	FromYaw[slot] = atYaw
@@ -271,10 +289,11 @@ end
 
 --[[
     A sleeper's lying hit shapes at a render time: at its latest move's old
-    place before the move's tick, along the fall through Math.fall during
-    it, and at the new place after. A move whose new place is not below
-    the old lands on its tick. The Sample is the slot's own table, which
-    the next read for it rewrites
+    place before the move's tick, along the fall through Math.fall under
+    the gravity the world gives the render time during it, and at the new
+    place after. A move whose new place is not below the old lands on its
+    tick. The Sample is the slot's own table, which the next read for it
+    rewrites
 
     @ renderTime | relay ticks as the server counts them, unwrapped, with their fraction
 --]]

@@ -39,8 +39,10 @@ return {
 		nearAim = 20,
 		farFloor = 10,
 		farAim = 15,
+		outOfView = { rate = 5, cone = 70, radius = 40 }, -- Hz, degrees either side of the look, and studs
 	},
 
+	relay = { changes = true }, -- Each record as its change since what the viewer last acknowledged
 	weights = { near = 1, far = 0.5, shooter = 2, cone = 1.5 },
 	shotNear = { rate = 10, seconds = 5 },
 	budget = { soft = 64, hard = 96 }, -- KB/s a viewer gets across every Volt stream

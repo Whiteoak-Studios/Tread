@@ -13,23 +13,40 @@ local Volt = require("@volt")
 local CLIENT: string = "src/Network/Client.luau"
 local VOLT: string = "ReplicatedStorage.Packages.Volt"
 local SETTLE: number = 30 -- Ticks of stand-ins before the Move, so the rewinds sit inside the history
+local HALF: number = 0.5 -- The share of a tick after SETTLE the Move arrives at
 local DELAY: number = 100 -- Milliseconds, under the rewind's 150 ms floor, so the lag carries the floor
 local FAR: number = 10 -- Relay ticks a claim lies off, so rewindFor answers with the expected time
 local CLOSE: number = 1e-9
 local YAW: number = 0.75 -- The newest command's yaw, each older one's a quarter radian more, which its frame's look carries
 local YAW_STEP: number = 0.25
 
--- Each command's lag from the bot's 0.1 s round trip, its queue wait of 0, 1 and 2 ticks at 20 Hz and the 0.15 s floor
+-- Each command's lag from the bot's 0.1 s round trip, its queue wait of 0.5, 1.5 and 2.5 ticks at 20 Hz and the
+-- 0.15 s floor
 local LAGS: { [number]: number } = {
-	[SETTLE + 1] = 250,
-	[SETTLE + 2] = 300,
-	[SETTLE + 3] = 350,
+	[SETTLE + 1] = 275,
+	[SETTLE + 2] = 325,
+	[SETTLE + 3] = 375,
 }
 
 return function (): (boolean, string | nil)
 	local rig: Rig.Rig = Rig.new()
 	local server: any = rig:start()
 	local tread: any = rig.tread
+	local now: number = 0 -- Seconds on the clock Commands is handed
+	local ticked: number = 0 -- The ticks run so far
+
+	rig:require(tread.Server.Commands).setClock(function (): number
+		return now
+	end)
+
+	-- Runs count ticks, the clock on each one's time as it runs
+	local function run(count: number)
+		for _ = 1, count do
+			ticked += 1
+			now = ticked / rig.rate
+			rig:tick(1)
+		end
+	end
 
 	local Command: any = rig:require(tread.Codec.Command)
 	local Fields: any = rig:require(tread.Codec.Fields)
@@ -56,7 +73,7 @@ return function (): (boolean, string | nil)
 	end)
 
 	local character: any = server:create(bot, rig:at(0, 0))
-	rig:tick(SETTLE)
+	run(SETTLE)
 
 	-- A stand-in waited none, and before any Move the delay is 0, held at the 150 ms floor
 	local settled: any = frames[SETTLE] and Tap.read(frames[SETTLE]).owner
@@ -64,7 +81,7 @@ return function (): (boolean, string | nil)
 		return false, `The settled frame's lag is {settled and settled.lag}, not the 250 ms of a stand-in`
 	end
 
-	-- Three commands in one Move after tick SETTLE, so the one for SETTLE + n waits n - 1 ticks in the queue
+	-- Three commands in one Move half a tick after SETTLE, so the one for SETTLE + n waits n - 0.5 ticks in the queue
 	local layout: any = Fields.compile(rig.shared.fields)
 	local limits: any = { lean = rig.shared.step.lean, headCone = rig.shared.step.headCone }
 	local commands: { any } = {}
@@ -78,11 +95,13 @@ return function (): (boolean, string | nil)
 
 	local move: any = Move.new()
 	Move.encode(move, commands, #commands, 0, 0, DELAY, layout, limits)
+
+	now = (SETTLE + HALF) / rig.rate
 	network.Move.fire(move.command, move.acknowledged, move.received, move.delay, move.commands)
 	network.flush()
 	rig:deliver()
 
-	rig:tick(3)
+	run(3)
 
 	for tick: number, lag: number in LAGS do
 		local data: buffer? = frames[tick]

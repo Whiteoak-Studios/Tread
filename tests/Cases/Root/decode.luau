@@ -111,6 +111,7 @@ return function (): (boolean, string | nil)
 			{ kind = "Npc", withheld = false, record = recordData, look = buffer.create(0), held = buffer.create(0) },
 		},
 		platforms = {},
+		gravity = 68.1,
 	})
 
 	local expected: any = Vector3.new(-100.5, 20.25, 7)

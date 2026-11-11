@@ -1,6 +1,6 @@
 --[[
     The hit shapes on the step's vector: a posture's shapes crossed from the
-    shared table, placed at the feet, the facing and the lean, and the
+    shared table, placed at the feet, facing, lean and aim pitch, and the
     posture a body is hit through, which the history and the client share
 --]]
 
@@ -23,7 +23,7 @@ export type Shape = {
 	radius: number,
 }
 
--- One posture's hit shapes crossed onto vector, and the height a lean tilts every point above about
+-- One posture's hit shapes crossed onto vector, and the height the lean and aim pitch tilt every point above about
 export type Shapes = {
 	body: Shape,
 	zones: { [string]: Shape },
@@ -51,7 +51,9 @@ end
 
 --[[
     A posture's hit shapes from the shared table crossed onto vector, every
-    capsule a new table, so the result can also be placed into
+    capsule a new table, so the result can also be placed into, and the
+    waist rounded to the float32 the points it is compared with hold, so a
+    point set on the waist never sits above it
 --]]
 
 function Shapes.cross(shapes: GameShapes): Shapes
@@ -61,13 +63,15 @@ function Shapes.cross(shapes: GameShapes): Shapes
 		zones[name] = crossShape(shape)
 	end
 
-	return { body = crossShape(shapes.body), zones = zones, waist = shapes.waist }
+	return { body = crossShape(shapes.body), zones = zones, waist = vector.create(0, shapes.waist, 0).y }
 end
 
 --[[
-    A point of a shape in the character's own space, placed: tilted by the
-    lean about the waist when it sits above it, a positive lean to the
-    right, then turned by the yaw and moved to the feet. Own space has +X
+    A point of a shape in the character's own space, placed: tilted about
+    the waist when it sits above it, by the lean first, a positive lean to
+    the right, then by the pitch about the body's right, a positive pitch
+    tipping it back, as the rig's CFrame.Angles(pitch, 0, -lean) turns its
+    Waist; then turned by the yaw and moved to the feet. Own space has +X
     right and +Z back, as the step reads it
 --]]
 
@@ -78,13 +82,19 @@ local function point(
 	cosine: number,
 	waist: number,
 	leanSine: number,
-	leanCosine: number
+	leanCosine: number,
+	pitchSine: number,
+	pitchCosine: number
 ): vector
 	local x: number, y: number, z: number = at.x, at.y, at.z
 
+	-- Every right side reads the point as it was, and a pitch of 0 leaves the lean's own sums as they were
 	if y > waist then
 		local up: number = y - waist
-		x, y = x * leanCosine + up * leanSine, waist - x * leanSine + up * leanCosine
+		x, y, z =
+			x * leanCosine + up * leanSine,
+			waist - x * (leanSine * pitchCosine) + up * (leanCosine * pitchCosine) - z * pitchSine,
+			z * pitchCosine + up * (leanCosine * pitchSine) - x * (leanSine * pitchSine)
 	end
 
 	return vector.create(feet.x + cosine * x + sine * z, feet.y + y, feet.z - sine * x + cosine * z)
@@ -98,34 +108,39 @@ local function capsule(
 	cosine: number,
 	waist: number,
 	leanSine: number,
-	leanCosine: number
+	leanCosine: number,
+	pitchSine: number,
+	pitchCosine: number
 )
-	into.from = point(from.from, feet, sine, cosine, waist, leanSine, leanCosine)
-	into.to = point(from.to, feet, sine, cosine, waist, leanSine, leanCosine)
+	into.from = point(from.from, feet, sine, cosine, waist, leanSine, leanCosine, pitchSine, pitchCosine)
+	into.to = point(from.to, feet, sine, cosine, waist, leanSine, leanCosine, pitchSine, pitchCosine)
 	into.radius = from.radius
 end
 
 --[[
     Places a posture's shapes into a set holding the same capsules: the
     body capsule and every zone, each point above the waist tilted by the
-    lean, then turned by the yaw and moved to the feet, with the step's own
-    sine and cosine
+    lean and then the aim pitch, then turned by the yaw and moved to the
+    feet, with the step's own sine and cosine
 
     @ yaw | radians, along -Z at 0 and -X at a quarter turn
     @ lean | degrees, to the right when positive
+    @ pitch | radians, up when positive, which tips the upper body back
 --]]
 
-function Shapes.place(from: Shapes, into: Placed, feet: vector, yaw: number, lean: number)
+function Shapes.place(from: Shapes, into: Placed, feet: vector, yaw: number, lean: number, pitch: number)
 	local sine: number = Math.sin(yaw)
 	local cosine: number = Math.cos(yaw)
 	local leanSine: number = Math.sin(lean * DEGREES)
 	local leanCosine: number = Math.cos(lean * DEGREES)
+	local pitchSine: number = Math.sin(pitch)
+	local pitchCosine: number = Math.cos(pitch)
 	local waist: number = from.waist
 
-	capsule(from.body, into.body, feet, sine, cosine, waist, leanSine, leanCosine)
+	capsule(from.body, into.body, feet, sine, cosine, waist, leanSine, leanCosine, pitchSine, pitchCosine)
 
 	for name: string, shape: Shape in from.zones do
-		capsule(shape, into.zones[name], feet, sine, cosine, waist, leanSine, leanCosine)
+		capsule(shape, into.zones[name], feet, sine, cosine, waist, leanSine, leanCosine, pitchSine, pitchCosine)
 	end
 end
 

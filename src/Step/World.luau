@@ -1,7 +1,7 @@
 --[[
     The read-only world the step reads: the game's step settings, casts,
     water and rules, the time a tick covers, the ladders turned into numbers
-    once, and the live players and NPCs each tick
+    once, the gravity by tick, and the live players and NPCs each tick
 --]]
 
 --!strict
@@ -31,7 +31,8 @@ local World = {}
 
 --[[
     A world for one realm's bodies, its time step from the shared table's
-    simulation rate, with no ladders, platforms or live bodies yet
+    simulation rate and its gravity the settings' own, with no ladders,
+    platforms or live bodies yet
 
     @ rate | rates.simulation, ticks a second
 --]]
@@ -63,6 +64,9 @@ function World.new(
 		bodies = {},
 		platforms = {},
 		clock = 0,
+		gravity = settings.gravity,
+		gravityAt = nil,
+		gravityBefore = settings.gravity,
 	}
 end
 
@@ -142,6 +146,48 @@ function World.setBodies(world: World, bodies: { State })
 	end
 
 	world.bodies = bodies
+end
+
+--[[
+    Changes the world's gravity from an unwrapped tick on, so the ticks from
+    it step under the new value and the ticks before it, a replay's among
+    them, under the one before. A change on the latest change's tick
+    replaces it, one before it changes nothing, and a gravity that is no
+    finite number above 0 or a tick that is no whole number is refused
+--]]
+
+function World.setGravity(world: World, gravity: number, tick: number)
+	if type(gravity) ~= "number" or not (gravity > 0) or gravity == math.huge then
+		error(`World.setGravity takes a gravity that is a finite number above 0, and got {gravity}`)
+	elseif type(tick) ~= "number" or tick % 1 ~= 0 then
+		error(`World.setGravity takes a whole tick, and got {tick}`)
+	end
+
+	-- Whiteoak TODO: only the value before the latest change is kept, so two changes inside one replay window step
+	-- its oldest replayed ticks under the middle one; a list of the changes still inside the window gives each its own
+	local at: number? = world.gravityAt
+	if at == nil or tick > at then
+		world.gravityBefore = world.gravity
+		world.gravityAt = tick
+		world.gravity = gravity
+	elseif tick == at then
+		world.gravity = gravity
+	end
+end
+
+--[[
+    The gravity a simulation tick is under, the tick unwrapped with its
+    fraction: the latest change's from its tick on, and the value before it
+    for an earlier tick
+--]]
+
+function World.gravityFor(world: World, tick: number): number
+	local changedAt: number? = world.gravityAt
+	if changedAt ~= nil and tick < changedAt then
+		return world.gravityBefore
+	end
+
+	return world.gravity
 end
 
 return World

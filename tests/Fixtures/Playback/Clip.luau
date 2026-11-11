@@ -155,7 +155,7 @@ function Clip.new(rig: any): Builder
 	    withheld?, record, outfit?, held? }, record the Record fields beside
 	    slot and generation; platforms are { id, tick }; own is { slot,
 	    generation, outfit?, held? }; a hash or version given stands in for
-	    the declarations' own
+	    the declarations' own, and a gravity given for the shared table's
 	--]]
 
 	function builder.keyframe(spec: { [string]: any }): buffer
@@ -190,6 +190,7 @@ function Clip.new(rig: any): Builder
 			sequence = 0,
 			characters = characters,
 			platforms = spec.platforms or {},
+			gravity = spec.gravity or shared.step.gravity,
 			own = own,
 		})
 

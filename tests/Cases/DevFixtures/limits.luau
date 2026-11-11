@@ -63,6 +63,11 @@ return function (): (boolean, string | nil)
 
 	local server: any = rig:start()
 
+	-- Commands' clock stands still, so each Move arrives as its tick runs and its command queues for no time
+	rig:require(rig.tread.Server.Commands).setClock(function (): number
+		return 0
+	end)
+
 	if pcall(Shots.test, nil, rig:at(0, 0).Position, rig:at(0, 1).Position, 0, 0) then
 		return false, "Shots.test ran before Shots.start"
 	end

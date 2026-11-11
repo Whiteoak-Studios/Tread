@@ -75,7 +75,7 @@ local MAX_PLATFORMS: number = 2 ^ PLATFORM_BITS - 1 -- Platform ids 1 up, since 
 
 -- The relay block, server to viewer, whose 896 B fit Volt's unreliable budget with its framing
 local MAX_RELAY_BYTES: number = 896 -- The withheld block's bound too
-local RELAY_HEADER_BYTES: number = 8 -- The sequence, the relay tick and the counts of its four sections
+local RELAY_HEADER_BYTES: number = 9 -- The sequence, the relay tick and the counts of its five counted sections
 local REVEAL_BYTES: number = 3 -- A reveal-and-kind entry: slot and generation, then kind
 local HIDE_BYTES: number = 2 -- A hide entry: slot and generation
 local MAX_RELAY_RECORDS: number = (MAX_RELAY_BYTES - RELAY_HEADER_BYTES) // RECORD_BYTES -- Withheld blocks' too
@@ -83,6 +83,9 @@ local LOOK_ENTRY_BYTES: number = 3 -- A look entry's slot and generation and fla
 local MAX_LOOK_ENTRY: number = LOOK_ENTRY_BYTES + PREFIX_BYTES + MAX_LOOK + PREFIX_BYTES + MAX_HELD
 local FOOTSTEP_BYTES: number = 10 -- X and Z u24, Y u16, then the ground material u16
 local MAX_WATCHERS: number = 31 -- Moderators one target's blocks are copied to: a u32 mask's bits past bit 0, its own
+local CHANGE_HEADER_BYTES: number = 4 -- A change record's slot and generation, base and mask, before its fields
+local CHANGE_DEPTH: number = 32 -- Relay ticks of records a client keeps a slot, so a change's base is 1 to 31
+local TAP_BLOCK_BYTES: number = 2 ^ 16 - 1 -- A tap frame's block, its every change expanded, up to its u16 length's top
 
 -- Anti-ESP's tests, whose ray tables are sized to the most rays each kind of pair casts
 local PLAYER_RAYS: number = 5 -- A player pair's: head, center, either side, and both ends moved
@@ -168,6 +171,9 @@ return {
 	MAX_LOOK_ENTRY = MAX_LOOK_ENTRY,
 	FOOTSTEP_BYTES = FOOTSTEP_BYTES,
 	MAX_WATCHERS = MAX_WATCHERS,
+	CHANGE_HEADER_BYTES = CHANGE_HEADER_BYTES,
+	CHANGE_DEPTH = CHANGE_DEPTH,
+	TAP_BLOCK_BYTES = TAP_BLOCK_BYTES,
 	PLAYER_RAYS = PLAYER_RAYS,
 	LYING_RAYS = LYING_RAYS,
 	MAX_SLOT_ENTRIES = MAX_SLOT_ENTRIES,

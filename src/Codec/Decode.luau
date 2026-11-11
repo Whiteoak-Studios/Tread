@@ -6,6 +6,7 @@
 
 --!strict
 local Block = require(script.Parent.Block)
+local Change = require(script.Parent.Change)
 local Command = require(script.Parent.Command)
 local Constants = require(script.Parent.Parent.Constants)
 local Feed = require(script.Parent.Feed)
@@ -19,6 +20,12 @@ local Tap = require(script.Parent.Tap)
 -- Lean and the head offset come back as shares of the game's limits, from -1 to 1, since a decoder isn't given them
 local SHARES: Command.Limits = { lean = 1, headCone = 1 }
 local WIRE_COMMAND_BYTES: number = Constants.COMMAND_BYTES + Constants.PREFIX_BYTES -- Before its game fields
+
+-- A change record's fields in the record's units, as Record reads them
+local YAW_SCALE: number = Constants.ANGLE_STEPS / (2 * math.pi)
+local PITCH_SCALE: number = Constants.RECORD_PITCH_STEPS / (math.pi / 2)
+local BASE_AT: number = 2 -- A change's base and mask, after its slot and generation
+local MASK_AT: number = 3
 
 type Decoded = { [string]: any }
 type Reader = (data: buffer) -> Decoded
@@ -122,9 +129,67 @@ local function readOwner(data: buffer, offset: number, length: number): Decoded
 	}
 end
 
-local function readBlock(data: buffer): Decoded
+--[[
+    A change record's fields as it carries them, with no baseline to rebuild
+    its record from: X, Z and a Y step as differences in studs, a whole Y in
+    studs, yaw and pitch in radians, the state word unpacked and the last
+    byte as it is, since its meaning rides in the baseline's Z
+--]]
+
+local function readChange(data: buffer, at: number): Decoded
+	local slot: number, generation: number = Record.split(buffer.readu16(data, at))
+	local mask: number = buffer.readu8(data, at + MASK_AT)
+	local offset: number = at + Constants.CHANGE_HEADER_BYTES
+	local change: Decoded = {
+		slot = slot,
+		generation = generation,
+		base = buffer.readu8(data, at + BASE_AT),
+		mask = mask,
+	}
+
+	if bit32.btest(mask, Change.X) then
+		change.dx = buffer.readi16(data, offset) * Constants.RECORD_QUANTUM
+		offset += 2
+	end
+
+	if bit32.btest(mask, Change.Z) then
+		change.dz = buffer.readi16(data, offset) * Constants.RECORD_QUANTUM
+		offset += 2
+	end
+
+	if bit32.btest(mask, Change.Y_STEP) then
+		change.dy = buffer.readi8(data, offset) * Constants.RECORD_HEIGHT_QUANTUM
+		offset += 1
+	elseif bit32.btest(mask, Change.Y) then
+		change.y = buffer.readu16(data, offset) * Constants.RECORD_HEIGHT_QUANTUM + Constants.HEIGHT_MIN
+		offset += 2
+	end
+
+	if bit32.btest(mask, Change.YAW) then
+		change.yaw = buffer.readu16(data, offset) / YAW_SCALE
+		offset += 2
+	end
+
+	if bit32.btest(mask, Change.PITCH) then
+		change.pitch = buffer.readi8(data, offset) / PITCH_SCALE
+		offset += 1
+	end
+
+	if bit32.btest(mask, Change.WORD) then
+		change.word = word(buffer.readu16(data, offset))
+		offset += 2
+	end
+
+	if bit32.btest(mask, Change.LAST) then
+		change.last = buffer.readu8(data, offset)
+	end
+
+	return change
+end
+
+local function readBlock(data: buffer, bound: number): Decoded
 	local block: Block.Block = Block.new()
-	Block.read(data, block)
+	Block.read(data, block, bound)
 
 	local reveals: { Decoded } = {}
 	for index: number = 1, block.revealCount do
@@ -166,6 +231,11 @@ local function readBlock(data: buffer): Decoded
 		records[index] = readRecord(data, block.records[index])
 	end
 
+	local changes: { Decoded } = {}
+	for index: number = 1, block.changeCount do
+		changes[index] = readChange(data, block.changeOffsets[index])
+	end
+
 	return {
 		sequence = block.sequence,
 		tick = block.tick,
@@ -174,13 +244,20 @@ local function readBlock(data: buffer): Decoded
 		looks = looks,
 		footsteps = footsteps,
 		records = records,
+		changes = changes,
 	}
 end
 
+local function readRelay(data: buffer): Decoded
+	return readBlock(data, Constants.MAX_RELAY_BYTES)
+end
+
 local function readWithheld(data: buffer): Decoded
-	local block: Decoded = readBlock(data)
+	local block: Decoded = readBlock(data, Constants.MAX_RELAY_BYTES)
 	if #block.reveals > 0 or #block.hides > 0 or #block.footsteps > 0 then
 		error("A withheld block carries looks and records, and no reveals, hides or footstep entries")
+	elseif #block.changes > 0 then
+		error("A withheld block carries whole records only, and no change records")
 	end
 
 	return block
@@ -236,6 +313,7 @@ local function readKeyframe(data: buffer): Decoded
 		sequence = keyframe.sequence,
 		characters = characters,
 		platforms = platforms,
+		gravity = keyframe.gravity,
 		own = own,
 	}
 end
@@ -307,7 +385,7 @@ local function readTap(data: buffer): Decoded
 
 	local blocks: { Decoded } = {}
 	for index: number, part: Tap.Part in frame.blocks do
-		local block: Decoded = readBlock(part.data)
+		local block: Decoded = readBlock(part.data, Constants.TAP_BLOCK_BYTES)
 		for at: number, record: Decoded in block.records do
 			record.reason = part.reasons[at]
 		end
@@ -358,7 +436,7 @@ end
 -- Each CODEC_VERSION's readers by the layout's name, the live codec's for the current version
 local Readers: { [number]: { [string]: Reader } } = {
 	[Constants.CODEC_VERSION] = {
-		relay = readBlock,
+		relay = readRelay,
 		withheld = readWithheld,
 		owner = readOwnerState,
 		feed = readFeed,

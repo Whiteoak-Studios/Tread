@@ -126,15 +126,15 @@ end
 
 --[[
     Writes one block into a frame's body at offset, its length, its bytes
-    as the relay sent them, then the send reasons of its records records,
-    3 bits each from the low bit, and gives the offset after it. Room for it
-    is the caller's
+    as the relay sent them with every change expanded to its whole record,
+    then the send reasons of its records records, 3 bits each from the low
+    bit, and gives the offset after it. Room for it is the caller's
 --]]
 
 function Tap.writeBlock(into: buffer, offset: number, block: buffer, reasons: { Reason }, records: number): number
 	local length: number = buffer.len(block)
-	if not (length >= Constants.RELAY_HEADER_BYTES and length <= Constants.MAX_RELAY_BYTES) then
-		error(`A frame's block is {Constants.RELAY_HEADER_BYTES} to {Constants.MAX_RELAY_BYTES} B, not {length}`)
+	if not (length >= Constants.RELAY_HEADER_BYTES and length <= Constants.TAP_BLOCK_BYTES) then
+		error(`A frame's block is {Constants.RELAY_HEADER_BYTES} to {Constants.TAP_BLOCK_BYTES} B, not {length}`)
 	end
 
 	buffer.writeu16(into, offset, length)
@@ -243,7 +243,7 @@ function Tap.read(data: buffer, limits: Limits?): Frame
 		within(offset + LENGTH_BYTES, size, length, "frame")
 
 		local block: buffer = slice(data, offset + LENGTH_BYTES, size)
-		Block.read(block, read)
+		Block.read(block, read, Constants.TAP_BLOCK_BYTES)
 
 		local records: number = read.recordCount
 		local at: number = offset + LENGTH_BYTES + size

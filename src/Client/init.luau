@@ -229,7 +229,7 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 	Started = true
 
 	local limits: Limits = { lean = shared.step.lean, headCone = shared.step.headCone }
-	Interpolate.start(client.interpolation, shared.rates, limits, layout, shared.step.gravity)
+	Interpolate.start(client.interpolation, shared.rates, limits, layout, world)
 
 	local Network = require(script.Parent.Network.Client)
 
@@ -301,6 +301,10 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 
 	Network.Platform.on(function (id: number, tick: number)
 		handle:_call(id, tick)
+	end)
+
+	Network.Gravity.on(function (gravity: number, tick: number)
+		handle:_gravity(gravity, tick)
 	end)
 
 	Network.Slots.on(function (entries: { Reliable.Entry })
@@ -436,6 +440,23 @@ function Client._call(self: Self, id: number, tick: number)
 	if world.platforms[id] ~= nil then
 		Platforms.call(world, id, tick)
 	end
+end
+
+--[[
+    Takes a gravity change as Volt's Gravity sends it, applied at once: the
+    owner's prediction and replays step its tick and later under it, and
+    every sleeper's fall is drawn under it from its tick. A body in the air
+    at the change gets one correction from the server's next state
+
+    @ tick | the simulation tick it applies from, unwrapped from the server's start
+--]]
+
+function Client._gravity(self: Self, gravity: number, tick: number)
+	if self._refused then
+		return
+	end
+
+	World.setGravity(self._world, gravity, tick)
 end
 
 --[[
@@ -946,8 +967,8 @@ function Client._place(self: Self, dt: number, viewed: StepState?)
 end
 
 --[[
-    One rendered frame: the owner's tick and Move, the render clock, the
-    owner's own rig and its first-person copy out once its body starts, a
+    One rendered frame: the render clock, then the owner's tick and Move,
+    the owner's own rig and its first-person copy out once its body starts, a
     spectated target drawn from its feed, the clock and the platforms'
     copies, then every drawn rig posed at its distance from the eye viewed,
     a remote rider on its platform's copy, each other player outlined while
@@ -964,8 +985,10 @@ function Client._frame(self: Self, dt: number)
 	end
 
 	self._clock += dt
-	xpcall(Predict.frame, warnFrame, dt)
+
+	-- The render clock moves first, so this frame's commands claim its render time and their Move reports its delay
 	Interpolate.frame(dt)
+	xpcall(Predict.frame, warnFrame, dt)
 
 	local playback: Playback? = self._playback
 	if playback then
@@ -1085,7 +1108,9 @@ function Client.getState(self: Self): PublicState?
 end
 
 --- The render time remote characters are drawn at, in relay ticks with its
---- fraction, which a game stamps on a shot.
+--- fraction, which a game stamps on a shot. Inside the sample it is the
+--- render time of the frame being drawn, the same frame whose delay the
+--- command's Move reports.
 --- @method getRenderTime
 --- @within Client
 --- @return number -- Relay ticks

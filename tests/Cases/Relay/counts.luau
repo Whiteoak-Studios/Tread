@@ -16,7 +16,12 @@ local MOVE: vector = vector.create(0.1, 0, 0) -- What each character moves a tic
 
 return function (): (boolean, string | nil)
 	local Harness: any = Environment.load(HARNESS)
-	local harness: any = Harness.new()
+
+	-- No out-of-view rate, since the viewer's body faces away from every target and the case counts what they send at
+	-- their tier rate
+	local harness: any = Harness.new(false, function (_: any, server: any)
+		server.tiers.outOfView = nil
+	end)
 	local Relay: any = Harness.Relay
 
 	local client: any = harness:viewer("Viewer")

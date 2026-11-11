@@ -1,7 +1,7 @@
 --[[
     The keyframe a clip ring starts from: a viewer's current view as one
     buffer, every character it is sent with its kind, newest record, look and
-    held item, every called platform's latest press, and its own character
+    held item, every called platform's latest press, gravity and own character
 --]]
 
 --!strict
@@ -9,6 +9,7 @@ local Block = require(script.Parent.Block)
 local Constants = require(script.Parent.Parent.Constants)
 
 local WITHHELD_AT: number = 7 -- The kind byte's top bit, marking a character withheld from a spectated target
+local GRAVITY_BYTES: number = 8 -- The gravity in force at its tick, an f64
 local ID_BYTES: number = 2 -- The own character's slot and generation, 0 for none
 local OWN_BYTES: number = ID_BYTES + 2 * Constants.PREFIX_BYTES -- Its id and the lengths of its look and held item
 local WRAP: number = 2 ^ 16
@@ -41,10 +42,16 @@ export type Keyframe = {
 	sequence: number, -- The viewer's newest message sequence
 	characters: { Character },
 	platforms: { Platform },
+	gravity: number, -- Studs/s² in force at its tick, which a clip's sleepers fall under
 	own: Own?, -- Nil while the view has no character of its own
 }
 
 local Keyframe = {}
+
+-- Whether a gravity is a finite number above 0, the one a fall can be drawn under
+local function isGravity(gravity: number): boolean
+	return type(gravity) == "number" and gravity > 0 and gravity < math.huge
+end
 
 local function writePart(data: buffer, offset: number, part: buffer): number
 	buffer.writeu8(data, offset, buffer.len(part))
@@ -56,8 +63,8 @@ end
 --[[
     Writes a keyframe into a new buffer of its exact length, stamped with
     CODEC_VERSION, erroring on a part past its bound, more characters or
-    platforms than its counts hold, or an own character's id outside 1 to
-    65,535, since 0 means none
+    platforms than its counts hold, a gravity that is no finite number
+    above 0, or an own character's id outside 1 to 65,535, since 0 means none
 --]]
 
 function Keyframe.write(keyframe: Keyframe): buffer
@@ -71,11 +78,14 @@ function Keyframe.write(keyframe: Keyframe): buffer
 		error(`A keyframe's own character's id is 1 to {WRAP - 1}, not {own.id}`)
 	elseif lookLength > Constants.MAX_LOOK or heldLength > Constants.MAX_HELD then
 		error(`A keyframe's own look of {lookLength} B or held item of {heldLength} B passes its bound`)
+	elseif not isGravity(keyframe.gravity) then
+		error(`A keyframe's gravity is a finite number above 0, not {keyframe.gravity}`)
 	end
 
 	local bytes: number = Constants.KEYFRAME_HEADER_BYTES
 		+ Constants.PREFIX_BYTES
 		+ #keyframe.platforms * Constants.KEYFRAME_PLATFORM_BYTES
+		+ GRAVITY_BYTES
 		+ OWN_BYTES
 		+ lookLength
 		+ heldLength
@@ -135,6 +145,9 @@ function Keyframe.write(keyframe: Keyframe): buffer
 		offset += Constants.KEYFRAME_PLATFORM_BYTES
 	end
 
+	buffer.writef64(data, offset, keyframe.gravity)
+	offset += GRAVITY_BYTES
+
 	buffer.writeu16(data, offset, own and own.id or 0)
 	offset = writePart(data, offset + ID_BYTES, ownLook)
 	writePart(data, offset, ownHeld)
@@ -168,8 +181,8 @@ end
 
 --[[
     Reads a keyframe into new tables, erroring on one stamped with another
-    CODEC_VERSION, since its layouts are another version's, and on bytes
-    that aren't a keyframe
+    CODEC_VERSION, since its layouts are another version's, on a gravity
+    that is no finite number above 0, and on bytes that aren't a keyframe
 --]]
 
 function Keyframe.read(data: buffer): Keyframe
@@ -187,6 +200,7 @@ function Keyframe.read(data: buffer): Keyframe
 		sequence = buffer.readu16(data, 8),
 		characters = {},
 		platforms = {},
+		gravity = 0,
 	}
 
 	local offset: number = Constants.KEYFRAME_HEADER_BYTES
@@ -219,7 +233,7 @@ function Keyframe.read(data: buffer): Keyframe
 
 	local platforms: number = buffer.readu8(data, offset)
 	offset += Constants.PREFIX_BYTES
-	within(offset, platforms * Constants.KEYFRAME_PLATFORM_BYTES + OWN_BYTES, length)
+	within(offset, platforms * Constants.KEYFRAME_PLATFORM_BYTES + GRAVITY_BYTES + OWN_BYTES, length)
 
 	for _ = 1, platforms do
 		table.insert(keyframe.platforms, {
@@ -228,6 +242,14 @@ function Keyframe.read(data: buffer): Keyframe
 		})
 		offset += Constants.KEYFRAME_PLATFORM_BYTES
 	end
+
+	local gravity: number = buffer.readf64(data, offset)
+	if not isGravity(gravity) then
+		error(`A keyframe's gravity is a finite number above 0, not {gravity}`)
+	end
+
+	keyframe.gravity = gravity
+	offset += GRAVITY_BYTES
 
 	local id: number = buffer.readu16(data, offset)
 	local look: buffer, held: buffer

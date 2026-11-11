@@ -223,7 +223,17 @@ function Example.server(): ServerSettings
 		catchUp = 2,
 		slots = { reserve = 296 },
 		relevancy = { enter = 950, leave = 1000 },
-		tiers = { nearEnter = 200, nearLeave = 220, nearFloor = 15, nearAim = 20, farFloor = 10, farAim = 15 },
+		tiers = {
+			nearEnter = 200,
+			nearLeave = 220,
+			nearFloor = 15,
+			nearAim = 20,
+			farFloor = 10,
+			farAim = 15,
+			outOfView = { rate = 5, cone = 70, radius = 40 },
+		},
+
+		relay = { changes = true },
 		weights = { near = 1, far = 0.5, shooter = 2, cone = 1.5 },
 		shotNear = { rate = 10, seconds = 5 },
 		budget = { soft = 64, hard = 96 },

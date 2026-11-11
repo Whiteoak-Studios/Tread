@@ -33,6 +33,7 @@ local World = require(script.Parent.Parent.Step.World)
 local WRAP: number = 2 ^ 16 -- The values a u16 tick holds
 local YAW_STEPS: number = Constants.ANGLE_STEPS / (2 * math.pi) -- Steps a radian of facing, the units Sequence wraps
 local RECORD_BYTES: number = Constants.RECORD_BYTES
+local TAP_BLOCK_BYTES: number = Constants.TAP_BLOCK_BYTES -- A tap frame's block, which may pass a relay block's 896 B
 local TICK_BYTES: number = 8 -- Each sample's relay tick, an f64, as the interpolation's ring keeps it
 local WINDOW: number = 8 -- The newest samples a life is drawn from, as the interpolation's ring keeps them
 local WITHHELD_INTERVALS: number = 4 -- Relay intervals a withheld character goes unrefreshed before it is dropped
@@ -153,6 +154,7 @@ type Track = {
 	fallFirst: number,
 	place: vector?, -- Where a sleeper's newest record lies, nil before one in this place
 	placeYaw: number,
+	gravity: number, -- The keyframe's, which its sleepers' falls are drawn under
 }
 
 -- A slot with a clip rig out of the pool, and what the rig was last given
@@ -175,6 +177,7 @@ type Fields = {
 	_rate: number, -- rates.relay
 	_share: number, -- Simulation ticks a relay tick
 	_start: number, -- The keyframe's relay tick, which every clip tick counts on from
+	_gravity: number, -- The keyframe's, studs/s², which the clip's sleepers fall under
 	_length: number, -- Seconds from the keyframe to the last frame
 	_offset: number, -- The server's simulation tick less the clip's own count of it
 	_owners: { Owner },
@@ -468,7 +471,7 @@ local function move(track: Track, tick: number, record: buffer, limits: Limits)
 	local falls: { Fall } = track.falls
 	if #falls >= track.fallFirst then
 		local fall: Fall = falls[#falls]
-		from, fromYaw = Interpolate.fall(fall.from, fall.fromYaw, fall.to, fall.toYaw, fall.at, tick)
+		from, fromYaw = Interpolate.fall(fall.from, fall.fromYaw, fall.to, fall.toYaw, fall.at, tick, track.gravity)
 	end
 
 	table.insert(falls, { at = tick, from = from, fromYaw = fromYaw, to = Moved.position, toYaw = yaw })
@@ -609,7 +612,8 @@ local function lie(
 	into.platform = Lying.platform
 
 	if fall then
-		into.position, into.facing = Interpolate.fall(fall.from, fall.fromYaw, fall.to, fall.toYaw, fall.at, at)
+		into.position, into.facing =
+			Interpolate.fall(fall.from, fall.fromYaw, fall.to, fall.toYaw, fall.at, at, track.gravity)
 	else
 		into.position = Lying.position
 		into.facing = Lying.yaw
@@ -763,6 +767,8 @@ function Playback.new(settings: Settings, ticks: { buffer }, withheld: { buffer 
 		last = finalWithheld.tick
 	end
 
+	-- Whiteoak TODO: a gravity change during the clip's window draws the falls after it under the keyframe's gravity;
+	-- the upgrade is the frame carrying the changes sent on its tick, as for the platforms' calls
 	local self: Self = setmetatable({
 		_settings = settings,
 		_rigs = settings.rigs,
@@ -771,6 +777,7 @@ function Playback.new(settings: Settings, ticks: { buffer }, withheld: { buffer 
 		_rate = rates.relay,
 		_share = share,
 		_start = start,
+		_gravity = keyframe.gravity,
 		_length = (last - start) / rates.relay,
 		_offset = server - counted,
 		_owners = owners,
@@ -808,7 +815,7 @@ function Playback.new(settings: Settings, ticks: { buffer }, withheld: { buffer 
 		-- At one tick the observed frame comes first, as the relay block goes before the withheld one it rides beside
 		if seen and (beside == nil or seen.tick <= beside.tick) then
 			for _, block: Tap.Part in seen.frame.blocks do
-				self:_relay(block.data, seen.tick)
+				self:_relay(block.data, seen.tick, seen.index)
 			end
 
 			observing += 1
@@ -858,6 +865,7 @@ function Playback._track(self: Self, slot: number): Track
 		fallFirst = 1,
 		place = nil,
 		placeYaw = 0,
+		gravity = self._gravity,
 	}
 
 	self._tracked[slot] = made
@@ -959,11 +967,15 @@ end
 --[[
     Runs one of the target's relay blocks through the live rules at the
     clip tick it arrived: its hides, looks, reveals, records and footstep
-    entries in that order, as the interpolation applies them
+    entries in that order, as the interpolation applies them. It errors on
+    a change record, which a tap block carries as its whole record
 --]]
 
-function Playback._relay(self: Self, data: buffer, tick: number)
-	Block.read(data, Read)
+function Playback._relay(self: Self, data: buffer, tick: number, frame: number)
+	Block.read(data, Read, TAP_BLOCK_BYTES)
+	if Read.changeCount ~= 0 then
+		error(`client:play's frame {frame} carries change records, which a tap block carries whole`, 0)
+	end
 
 	for index: number = 1, Read.hideCount do
 		local hide: Block.Hide = Read.hides[index]
@@ -1008,15 +1020,17 @@ end
 --[[
     Runs one withheld block through the live rules at the clip tick it
     arrived: its looks, then each record a stretch that stays withheld while
-    its records keep coming. It errors on one with a reveal, hide or
-    footstep entry, which no withheld block carries
+    its records keep coming. It errors on one with a reveal, hide, footstep
+    entry or change record, which no withheld block carries
 --]]
 
 function Playback._withheld(self: Self, data: buffer, tick: number, index: number)
-	Block.read(data, Read)
+	Block.read(data, Read, TAP_BLOCK_BYTES)
 	if Read.revealCount ~= 0 or Read.hideCount ~= 0 or Read.footstepCount ~= 0 then
 		local carried: string = `client:play's withheld frame {index} carries reveal, hide or footstep entries`
 		error(`{carried}, which no withheld block does`, 0)
+	elseif Read.changeCount ~= 0 then
+		error(`client:play's withheld frame {index} carries change records, which no withheld block does`, 0)
 	end
 
 	self:_looks(tick)

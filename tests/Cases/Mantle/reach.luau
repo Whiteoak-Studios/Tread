@@ -10,7 +10,7 @@ local Environment = require("../../Environment")
 local SLIDES: string = "tests/Fixtures/Step/Slides.luau"
 local MANTLE: string = "src/Step/Mantle.luau"
 local GAP: number = 1.2 -- Studs from the hull's front to the shelf's face
-local REACH: number = 1.39 -- The hull's radius, Frontier Zero's and the dev place's reach
+local REACH: number = 1.39 -- The hull's radius, Frontier Zero's reach
 local SHORT: number = 1 -- A reach short of the gap
 
 return function (): (boolean, string | nil)
