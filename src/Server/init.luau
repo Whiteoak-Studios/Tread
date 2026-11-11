@@ -794,11 +794,12 @@ end
 --- to read once a second: each stage's last time and p95 over 10 s, the
 --- anti-ESP stage's slices between ticks among them, the live characters,
 --- awake NPCs and bodies, the history's bytes, the largest and p95 traffic
---- to a player over the last second, and, as the change since the last
---- read, the ticks run and dropped, stand-ins, late commands, records sent
---- and cut, Tread's bytes out, anti-ESP's pair tests, the tests that left a
---- pair hidden and its fail-opens, and the reports by kind. It holds no
---- position and no name
+--- to a player over the last second, the sleeper and body pairs due and
+--- waiting untested, and, as the change since the last read, the ticks run
+--- and dropped, stand-ins, late commands, records sent and cut, Tread's
+--- bytes out, anti-ESP's pair tests, the tests that left a pair hidden, its
+--- fail-opens and its sleeper and body pair tests, and the reports by kind.
+--- It holds no position and no name
 --- @method stats
 --- @within Server
 --- @return { [string]: any }
@@ -809,6 +810,7 @@ function Server.stats(self: Self): { [string]: any }
 	local sent: number, cut: number = Relay.counts()
 	local players: number, awake: number = Characters.counts()
 	local tests: number, hidden: number, failOpens: number = AntiEsp.counts()
+	local lyingTests: number, lyingWaiting: number = AntiEsp.lying()
 
 	local stages: { [string]: Times } = {}
 	for _, stage: Tick.Stage in Tick.stages() do
@@ -848,6 +850,8 @@ function Server.stats(self: Self): { [string]: any }
 		antiEspTests = tests - ReadTests,
 		antiEspHidden = hidden - ReadHidden,
 		antiEspFailOpens = failOpens - ReadFailOpens,
+		antiEspLyingTests = lyingTests,
+		antiEspLyingWaiting = lyingWaiting,
 		trafficLargest = largest,
 		trafficP95 = trafficP95,
 		historyBytes = History.bytes(),

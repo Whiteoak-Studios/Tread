@@ -46,12 +46,19 @@ local LiveRuns = {
 	-- In campaign order, each about as long as its configs make it
 	runs = {
 		{ name = "BotsSmoke", minutes = 1.5 }, -- S0 to S7 once each, a 2 s warm-up and a 3 s window, and their builds
+		{ name = "GatesSmoke", minutes = 2 }, -- The gates' seven loads the same way, S9's 2,000 sleepers and G10's 331 bodies
 		{ name = "HarnessesSmoke", minutes = 2 }, -- G7's four cases at 10 s each, G8's 25 s smoke load and six openings
 		{ name = "BenchS0", minutes = 7.5 }, -- 3 seeds of a 30 s warm-up and a 120 s window, as each bench run
 		{ name = "BenchS1", minutes = 7.5 },
 		{ name = "BenchS2", minutes = 7.5 },
 		{ name = "BenchS3", minutes = 7.5 },
 		{ name = "BenchS4", minutes = 7.5 },
+		{ name = "BenchS3Npcs", minutes = 7.5 },
+		{ name = "BenchS4Npcs", minutes = 7.5 },
+		{ name = "BenchS9", minutes = 7.5 },
+		{ name = "BenchS10", minutes = 7.5 },
+		{ name = "BenchG10", minutes = 15 }, -- G10 and its rung with every NPC idle, 3 seeds each
+		{ name = "ClientCost", minutes = 7.5 },
 		{ name = "BenchS5", minutes = 7.5 },
 		{ name = "BenchS6", minutes = 7.5 },
 		{ name = "BenchS7", minutes = 7.5 },

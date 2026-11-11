@@ -6,7 +6,10 @@
 
 --!strict
 --!native
+local Constants = require(script.Parent.Parent.Constants)
 local State = require(script.Parent.State)
+
+local REJECT_MARGIN: number = Constants.SKIN -- Studs a sweep's bounds reach past its slab tests, far over rounding
 
 type Box = State.Box
 type Settings = State.Settings
@@ -94,12 +97,25 @@ function Hulls.sweep(
 	local halfX: number = size.x / 2 + radius
 	local halfZ: number = size.z / 2 + radius
 
-	-- Whiteoak TODO: every cast tests every live hull the world holds; a uniform grid of hull positions, which each
-	-- step updates as its body moves, narrows it to the nearby ones once G3 measures what the walk costs
+	-- Where on X and Z a hull's center may lie to meet the box anywhere along the move, widened by the margin
+	local endX: number = center.x + direction.x
+	local endZ: number = center.z + direction.z
+	local lowX: number = math.min(center.x, endX) - halfX - REJECT_MARGIN
+	local highX: number = math.max(center.x, endX) + halfX + REJECT_MARGIN
+	local lowZ: number = math.min(center.z, endZ) - halfZ - REJECT_MARGIN
+	local highZ: number = math.max(center.z, endZ) + halfZ + REJECT_MARGIN
+
+	-- Whiteoak TODO: each cast walks every live hull the world holds, passing one outside those bounds before any slab
+	-- test, so a tick's walks grow with the square of the bodies; a uniform grid of hull positions, which each step
+	-- updates as its body moves, narrows each walk to the nearby ones
 	for _, other: State in world.bodies do
+		local at: vector = other.position
+		if at.x < lowX or at.x > highX or at.z < lowZ or at.z > highZ then
+			continue
+		end
+
 		if blocks(other, state) then
 			local otherHalf: number = Hulls.height(other, settings) / 2
-			local at: vector = other.position
 
 			local enterX: number, exitX: number = Hulls.slab(at.x - center.x, halfX, direction.x)
 			local enterY: number, exitY: number =
@@ -144,13 +160,14 @@ function Hulls.block(state: State, world: World): boolean
 	local top: number = feet.y + Hulls.height(state, settings)
 
 	for _, other: State in world.bodies do
-		if blocks(other, state) then
-			local at: vector = other.position
-			local apart: boolean = math.abs(at.x - feet.x) >= reach
-				or math.abs(at.z - feet.z) >= reach
-				or at.y >= top
-				or feet.y >= at.y + Hulls.height(other, settings)
+		-- The cheap compares first, so a hull apart on X or Z is passed before its mode or posture is read
+		local at: vector = other.position
+		if math.abs(at.x - feet.x) >= reach or math.abs(at.z - feet.z) >= reach then
+			continue
+		end
 
+		if blocks(other, state) then
+			local apart: boolean = at.y >= top or feet.y >= at.y + Hulls.height(other, settings)
 			if not apart then
 				return true
 			end

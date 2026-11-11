@@ -1,7 +1,7 @@
 --[[
-    The bot harness's numbers: scenarios S0 to S7 and G8's load with their
-    areas and groups, the seeded runs' timings, how a bot roams, what each
-    cheat does to what it sends, and where its floors and spawns go
+    The bot harness's numbers: scenarios S0 to S7 and the gates' loads with
+    their areas and groups, the seeded runs' timings, how a bot roams, what
+    each cheat does to what it sends, and where its floors and spawns go
 --]]
 
 --!strict
@@ -14,12 +14,19 @@ export type Area = {
 -- What a cheater does to what it sends, beside an honest bot's commands
 export type Cheat = "lagSwitch" | "relabel" | "tamper" | "crouchLoss" | "freeze" | "longMove"
 
--- Bots alike: how many, where each is built, where it walks, and what its faults or cheat make of what it sends
+-- A body Tread's server builds with no player, in place of a bot, its groups after every bot group a scenario has
+export type Kind = "npc" | "sleeper"
+
+-- Bodies alike: how many, where each is built, where it walks, and for a bot its faults, cheat, team and spectate
 export type Group = {
 	name: string, -- What the run's lines call the group
 	count: number,
 	spawn: Area,
 	roam: Area?, -- nil keeps the group standing where it was built
+	kind: Kind?, -- nil for bots
+	awake: boolean?, -- false idles an NPC group from its build, so it takes no step
+	spectate: string?, -- The group whose bots this one's park and spectate, its nth bot built watching their nth
+	team: number?, -- Every bot of the group's team, so anti-ESP hides none of them from another
 	sprint: boolean?,
 	crouch: boolean?,
 	lag: { number }?, -- Seconds each bot holds its Moves back, drawn per bot from the first to the second
@@ -49,10 +56,19 @@ local CITY: Area = { center = Vector3.new(3900, 0, 0), size = Vector2.new(600, 6
 local PLAZA: Area = { center = Vector3.new(3880, 0, -45), size = Vector2.new(100, 60) }
 local FIGHT: Area = { center = Vector3.new(0, 0, 0), size = Vector2.new(100, 100) }
 
+-- S9's spread sleepers' square, about 50.5 of them within the 500-stud reveal radius of any map viewer, on the island
+local SPREAD: Area = { center = Vector3.new(0, 0, 0), size = Vector2.new(5400, 5400) }
+
 local BOTS: number = 149 -- A 150-slot server's players beside the one real client
 local IN_CITY: number = 60 -- S3's bots on the plaza, the rest spread over the map
 local CHEATERS: number = 8 -- S7's bots of each cheat, the honest rest roaming beside them
 local CHEATS: number = 6 -- S7's cheats, one group each
+local NPCS: number = 32 -- Frontier Zero's maxAwake, the most NPCs awake at once
+local CITY_SLEEPERS: number = 125 -- The estimate's hotspot, the sleepers one city viewer has within 500 studs
+local SPREAD_SLEEPERS: number = 1875 -- The rest of S9's 2,000
+local MODERATORS: number = 4 -- S10's spectating moderators, the map group cut by as many
+local SCALE: number = 299 -- G10's 300 players beside the one real client
+local TEAM: number = 1 -- G5's one team, which every bot and real player shares
 
 local SCENARIOS: { [string]: Scenario } = {
 	S0 = { groups = {}, viewer = MAP.center, follow = false, storm = false },
@@ -131,11 +147,90 @@ local SCENARIOS: { [string]: Scenario } = {
 		follow = false,
 		storm = false,
 	},
+
+	-- G3's loads: S3 and S4 with Frontier Zero's awake NPCs beside them, built after the bots so a seed's bots match
+	S3Npcs = {
+		groups = {
+			{ name = "city", count = IN_CITY, spawn = PLAZA, roam = CITY },
+			{ name = "map", count = BOTS - IN_CITY, spawn = MAP, roam = MAP },
+			{ name = "npcs", kind = "npc", count = NPCS, spawn = PLAZA, roam = CITY },
+		},
+		viewer = PLAZA.center,
+		follow = false,
+		storm = false,
+	},
+
+	S4Npcs = {
+		groups = {
+			{ name = "fight", count = BOTS, spawn = FIGHT, roam = FIGHT },
+			{ name = "npcs", kind = "npc", count = NPCS, spawn = FIGHT, roam = FIGHT },
+		},
+		viewer = FIGHT.center,
+		follow = true,
+		storm = false,
+	},
+
+	-- G9's sleepers: S3's layout with 2,000 sleepers lying over the city and spread across the map
+	S9 = {
+		groups = {
+			{ name = "city", count = IN_CITY, spawn = PLAZA, roam = CITY },
+			{ name = "map", count = BOTS - IN_CITY, spawn = MAP, roam = MAP },
+			{ name = "citySleepers", kind = "sleeper", count = CITY_SLEEPERS, spawn = CITY },
+			{ name = "spreadSleepers", kind = "sleeper", count = SPREAD_SLEEPERS, spawn = SPREAD },
+		},
+		viewer = PLAZA.center,
+		follow = false,
+		storm = false,
+	},
+
+	-- G9's spectate: S3's layout with moderators parked on the plaza, each watching one of the first city bots
+	S10 = {
+		groups = {
+			{ name = "city", count = IN_CITY, spawn = PLAZA, roam = CITY },
+			{ name = "map", count = BOTS - IN_CITY - MODERATORS, spawn = MAP, roam = MAP },
+			{ name = "moderators", count = MODERATORS, spawn = PLAZA, spectate = "city" },
+		},
+		viewer = PLAZA.center,
+		follow = false,
+		storm = false,
+	},
+
+	-- G10's 300 players as S2 spreads them, with the awake NPCs, then the same with every NPC idle
+	G10 = {
+		groups = {
+			{ name = "roam", count = SCALE, spawn = MAP, roam = MAP },
+			{ name = "npcs", kind = "npc", count = NPCS, spawn = MAP, roam = MAP },
+		},
+		viewer = MAP.center,
+		follow = true,
+		storm = false,
+	},
+
+	G10Rung2 = {
+		groups = {
+			{ name = "roam", count = SCALE, spawn = MAP, roam = MAP },
+			{ name = "npcs", kind = "npc", count = NPCS, spawn = MAP, roam = MAP, awake = false },
+		},
+		viewer = MAP.center,
+		follow = true,
+		storm = false,
+	},
+
+	-- G5's load: S4's fight with every bot on one team, so anti-ESP hides none from the real players beside them
+	G5 = {
+		groups = { { name = "fight", count = BOTS, spawn = FIGHT, roam = FIGHT, team = TEAM } },
+		viewer = FIGHT.center,
+		follow = true,
+		storm = false,
+	},
 }
 
 return {
 	scenarios = SCENARIOS,
 	order = { "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7" }, -- The order the smoke run takes them in
+
+	-- The gates' loads, in the order their smoke run takes them
+	gates = { "S3Npcs", "S4Npcs", "S9", "S10", "G10", "G10Rung2", "G5" },
 
 	-- The commands' game fields at rest, by the dev game's own declarations: empty hands and no shot
 	fields = { slot = 0, shots = {} } :: { [string]: any },
@@ -144,6 +239,13 @@ return {
 	full = { seeds = { 1, 2, 3 }, warmup = 30, window = 120, interval = 1 } :: Timing,
 	smoke = { seeds = { 1 }, warmup = 2, window = 3, interval = 1 } :: Timing,
 	percentiles = { 0.5, 0.95, 0.99 },
+	fps = 0.1, -- The share the server's frame rate is read at, G3's p10
+
+	tick = {
+		-- Each runs once a tick, so their rings of times advance together and sum tick by tick
+		stages = { "decode", "simulate", "npcs", "history", "relay" },
+		beside = "antiEsp", -- Runs between ticks too, so its p95 prints beside their total and never in it
+	},
 
 	stage = "bots", -- The stage every bot sends from, after the relay
 	scope = "Tread", -- The Volt scope a bot's client side sends on
@@ -167,6 +269,7 @@ return {
 		lift = 0.5, -- Studs above the ground a bot is built at
 		probe = 500, -- Studs above an area its ground is cast for from, and as far below
 		thickness = 2, -- Of a floor laid where an area has no ground
+		tile = 2048, -- The most studs a part spans along an axis, so a wider floor is laid in tiles
 		sink = 0.05, -- Studs a floor's top sits below its area's height, under any ground already there
 		margin = 20, -- Studs a floor reaches past its area's edge on each side
 	},

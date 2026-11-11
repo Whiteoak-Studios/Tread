@@ -1,7 +1,7 @@
 --[[
-    The dev game's client values: Frontier Zero's remote smoothing, ragdoll,
-    correction, draw distance and detail numbers, stand-ins where it sets
-    none, and the dev place's view, keys, prompt, shooter, replay, kit and panel
+    Dev client values: Frontier Zero's remote smoothing, ragdoll, correction,
+    draw distance and detail numbers, stand-ins where it sets none, and the dev
+    place's view, keys, prompt, shooter, replay, kit, panel and G5 cost window
 --]]
 
 --!strict
@@ -154,6 +154,16 @@ return {
 		gap = 6, -- Pixels between the panel's parts
 		bar = 8, -- Pixels across each scroll bar
 		textSize = 14, -- The report's, at which its height is measured
+	},
+
+	-- G5's client cost: the window the dev server's ClientCost scenario opens, and what each client's line reads
+	cost = {
+		attribute = "ClientCost", -- The Workspace attribute the scenario sets to a window's label, and clears at its end
+		longest = 180, -- Seconds a window measures at most, past the scenario's 120 s window, before it ends on its own
+		limit = 2, -- Milliseconds of remote-character work a frame the lowest device's p95 is held to
+		percentiles = { 0.5, 0.95, 0.99 }, -- The remote work's, as the line prints them
+		fps = 0.1, -- The share the frame rate is read at
+		drawn = 0.5, -- The share the rigs drawn are read at
 	},
 
 	-- The dev place's exploit kit: what its panel counts, what each tool does, and how the ESP draws

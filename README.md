@@ -424,8 +424,8 @@ Under luau-lsp's new type checker:
 - `server:onTeleported(callback: (character: Character) -> ()): () -> ()` calls back once a teleport has set a character down.
 - `server:stats(): { [string]: any }` gives Tread's aggregate numbers, with no endpoint and no signal, for the game to read about once a second. It holds no position and no name:
   - `seconds` since the last read, and `stages`, each stage's `last` and `p95` time over 10 s, in seconds;
-  - as they stand: `players` (live characters), `npcs` (awake), `bodies`, `historyBytes`, and `trafficLargest` and `trafficP95`, the largest and the p95 of the bytes Volt sent each joined player and bot over the last second;
-  - as their change since the last read: `ticks`, `dropped`, `standIns`, `late`, `recordsSent`, `recordsCut`, `bytesOut`, `antiEspTests`, `antiEspHidden`, `antiEspFailOpens`, and `reports` by kind.
+  - as they stand: `players` (live characters), `npcs` (awake), `bodies`, `historyBytes`, `trafficLargest` and `trafficP95`, the largest and the p95 of the bytes Volt sent each joined player and bot over the last second, and `antiEspLyingWaiting`, the sleeper and body pairs due for a test that anti-ESP's slices haven't had time for yet;
+  - as their change since the last read: `ticks`, `dropped`, `standIns`, `late`, `recordsSent`, `recordsCut`, `bytesOut`, `antiEspTests`, `antiEspHidden`, `antiEspFailOpens`, `antiEspLyingTests` (the sleeper and body pair tests among `antiEspTests`), and `reports` by kind.
 
 The recording taps on the server handle are under [Recording taps and clip playback](#recording-taps-and-clip-playback).
 

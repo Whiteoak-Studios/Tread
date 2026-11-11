@@ -254,9 +254,48 @@ local function readrunReport(player: (Player | Bot)?, packet: buffer, cursor: nu
 	return runtime:deliver(4, player, cursor, sideCursor, state, text)
 end
 
+local function writeclientCost(label: string, measured: boolean, line: string)
+	local offset: number, out: buffer = beginReliable(581)
+	buffer.writeu8(out, offset, 6)
+	local flags: number = 0
+
+	if type(label) ~= "string" then
+		refuseReliable("clientCost.label: expected string")
+	end
+
+	if #label < 1 or #label > 64 then
+		refuseReliable("clientCost.label: length out of range")
+	end
+
+	buffer.writeu8(out, offset + 2, #label - 1)
+
+	if type(measured) ~= "boolean" then
+		refuseReliable("clientCost.measured: expected boolean")
+	end
+
+	flags += measured and 1 or 0
+
+	if type(line) ~= "string" then
+		refuseReliable("clientCost.line: expected string")
+	end
+
+	if #line < 1 or #line > 512 then
+		refuseReliable("clientCost.line: length out of range")
+	end
+
+	buffer.writeu16(out, offset + 3, #line - 1)
+	buffer.writeu8(out, offset + 1, flags)
+	offset += 5
+	buffer.writestring(out, offset, label)
+	offset += #label
+	buffer.writestring(out, offset, line)
+	offset += #line
+	trimReliable(offset)
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x922FB784,
+	hash = 0x2474E257,
 	scope = "Dev",
 	side = "client",
 	idBytes = 1,
@@ -283,6 +322,7 @@ runtime = Volt.start({
 		[3] = { name = "shot", kind = "event", reliable = true, minBytes = 4, maxBytes = 6 },
 		[4] = { name = "played", kind = "event", reliable = true, minBytes = 6, maxBytes = 6 },
 		[5] = { name = "run", kind = "event", reliable = true, minBytes = 3, maxBytes = 34 },
+		[6] = { name = "clientCost", kind = "event", reliable = true, minBytes = 7, maxBytes = 581 },
 	},
 })
 
@@ -373,6 +413,14 @@ local Network = {
 		end,
 	}) :: ClientListener<("Refused" | "Running" | "Piece" | "Passed" | "Failed", string)>,
 
+	clientCost = table.freeze({
+		fire = function (label: string, measured: boolean, line: string)
+			if before[6] == nil or before[6](nil, label, measured, line) then
+				writeclientCost(label, measured, line)
+			end
+		end,
+	}) :: ClientEvent<(string, boolean, string)>,
+
 	version = "0.1.0",
 
 	hooks = table.freeze({
@@ -405,6 +453,7 @@ Network.events = table.freeze({
 	["played"] = Network.played,
 	["run"] = Network.run,
 	["runReport"] = Network.runReport,
+	["clientCost"] = Network.clientCost,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

@@ -143,6 +143,8 @@ local Tests: number = 0
 local HiddenResults: number = 0 -- Tests that left their pair hidden
 local FailOpens: number = 0
 
+local LyingTests: number = 0 -- Sleepers' and bodies' pair tests since AntiEsp.lying last gave them
+
 -- Each slot's kind and generation by its slot plus 1, kept from the slot table's changes, so an ask calls nothing
 local KindOf: { number } = table.create(SLOTS, NONE)
 local LifeOf: { number } = table.create(SLOTS, 0)
@@ -1030,6 +1032,7 @@ local function test(pair: number, world: World, now: number)
 	if lying then
 		open = lyingOpen(sight, target, world.settings)
 		hold = LyingHold
+		LyingTests += 1
 
 		unlink(pair)
 		join(pair, groupFor(index, sight, now))
@@ -1310,6 +1313,19 @@ end
 
 function AntiEsp.counts(): (number, number, number)
 	return Tests, HiddenResults, FailOpens
+end
+
+--[[
+    The sleepers' and bodies' pair tests run since the last call, and their
+    pairs due and waiting untested in the slices' heap now, which a slice
+    short of time leaves there and never fails open, for the server's stats
+--]]
+
+function AntiEsp.lying(): (number, number)
+	local tests: number = LyingTests
+	LyingTests = 0
+
+	return tests, LyingDue.count - LyingDue.stale
 end
 
 --[[

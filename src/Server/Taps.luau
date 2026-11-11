@@ -347,6 +347,21 @@ local function append(observer: Observer, data: buffer, records: number)
 end
 
 --[[
+    Whether a sink observes the blocks of any of the first count keys, which
+    the relay asks before it builds a block's tap copy
+--]]
+
+function Taps.observes(keys: { Key }, count: number): boolean
+	for index: number = 1, count do
+		if Observers[keys[index]] ~= nil then
+			return true
+		end
+	end
+
+	return false
+end
+
+--[[
     The relay's tap on each block it sends: for every one of its recipients
     a sink observes, the block's bytes and each record's reason, which
     anti-ESP gives for the first recipient, the viewer whose view it is

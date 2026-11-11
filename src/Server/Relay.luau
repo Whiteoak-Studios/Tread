@@ -158,6 +158,22 @@ type OutOfView = {
 	wide: boolean,
 }
 
+-- Where this run's bodies stand: a list of slots for each square cell of the play area, row by row, each in the
+-- order the states were walked, so a viewer's turn visits the cells its distance spans in place of every body
+type Grid = {
+	size: number, -- A cell's side in studs
+	across: number, -- The cells along each side
+	heads: buffer, -- u16 by cell: its list's first slot plus 1, 0 for none
+	tails: buffer, -- u16 by cell: its list's last slot
+	following: buffer, -- u16 by slot: the next slot in its cell's list plus 1, 0 at the end
+	columns: buffer, -- u16 by slot: its cell's column this run
+	rows: buffer, -- u16 by slot: and its row
+	orders: buffer, -- u16 by slot: its place from 1 in this run's walk of the states
+	walk: buffer, -- u16 by place: the slot at it
+	count: number, -- The bodies this run filed
+	visits: { number }, -- A turn's slots to visit, each as its place times SLOTS plus the slot
+}
+
 -- What a watched target's withheld block keeps for each slot, by slot in buffers
 type Withheld = {
 	flags: buffer, -- u8
@@ -239,11 +255,29 @@ local Limits: Limits = { lean = 0, headCone = 0 }
 local Keyed: { hash: number, gravity: number } = { hash = 0, gravity = 0 }
 
 -- The game's settings as the relay reads them, each distance squared and each budget in bytes a second, but the
--- radii each viewer's own render distance caps, in studs, which share one table since Luau caps a chunk's locals
+-- radii each viewer's own render distance caps, in studs, and the grid that finds the bodies inside them, which
+-- share one table since Luau caps a chunk's locals
 local RelayRate: number = 0
 local StillRuns: number = 0
-local Radii: { enter: number, leave: number, sleepers: number, npcs: number } =
-	{ enter = 0, leave = 0, sleepers = 0, npcs = 0 }
+local Radii: { enter: number, leave: number, sleepers: number, npcs: number, grid: Grid } = {
+	enter = 0,
+	leave = 0,
+	sleepers = 0,
+	npcs = 0,
+	grid = {
+		size = 0,
+		across = 0,
+		heads = buffer.create(0),
+		tails = buffer.create(0),
+		following = buffer.create(SLOTS * 2),
+		columns = buffer.create(SLOTS * 2),
+		rows = buffer.create(SLOTS * 2),
+		orders = buffer.create(SLOTS * 2),
+		walk = buffer.create((SLOTS + 1) * 2),
+		count = 0,
+		visits = {},
+	},
+}
 local NearEnterSquared: number = 0
 local NearLeaveSquared: number = 0
 local NearAim: number = 0
@@ -438,6 +472,17 @@ function Relay.start(
 	Keyed.gravity = shared.step.gravity
 	Limits = { lean = shared.step.lean, headCone = shared.step.headCone }
 
+	-- The grid's cells are relevancy.leave across, the farthest any viewer reaches, and never so small that the play
+	-- area holds more of them than there are slots
+	local bound: number = Constants.PLAY_BOUND
+	local size: number = math.max(server.relevancy.leave, 2 * bound / math.sqrt(SLOTS))
+	local across: number = math.ceil(2 * bound / size)
+	local grid: Grid = Radii.grid
+	grid.size = size
+	grid.across = across
+	grid.heads = buffer.create(across * across * 2)
+	grid.tails = buffer.create(across * across * 2)
+
 	RelayRate = shared.rates.relay
 	StillRuns = STILL_SECONDS * RelayRate
 	Radii = {
@@ -445,6 +490,7 @@ function Relay.start(
 		leave = server.relevancy.leave,
 		sleepers = server.sleepers.radius,
 		npcs = server.npcs.range,
+		grid = grid,
 	}
 	NearEnterSquared = server.tiers.nearEnter ^ 2
 	NearLeaveSquared = server.tiers.nearLeave ^ 2
@@ -1083,10 +1129,10 @@ end
 
 --[[
     Writes the open block into the buffer of its exact length and sends it
-    to its viewer and every watcher at once. The taps are handed it with
-    each change expanded to the whole record it decodes to, its slot's
-    record this run, so a clip never needs a baseline and its block may
-    pass 896 B
+    to its viewer and every watcher at once. While a sink observes one of
+    them, the taps are handed it with each change expanded to the whole
+    record it decodes to, its slot's record this run, so a clip never
+    needs a baseline and its block may pass 896 B
 --]]
 
 local function flush()
@@ -1103,9 +1149,10 @@ local function flush()
 
 	Send(Recipients, data)
 
+	-- Only a block whose recipients a sink observes goes in a frame, so only such a block's changes are expanded
 	if Taps.observing and Out.changeCount == 0 then
 		Taps.relayed(Recipients, RecipientCount, Out, data)
-	elseif Taps.observing then
+	elseif Taps.observing and Taps.observes(Recipients, RecipientCount) then
 		local tapped: Block.Block = Deltas.tapped
 		local records: { number } = tapped.records
 		local count: number = Out.recordCount
@@ -1564,26 +1611,115 @@ local function claim(view: View, own: number?)
 end
 
 --[[
-    Every other present body against the viewer: its relevancy and tier,
-    whether anti-ESP hides it, which leaves it culled, and the stretch that
-    follows. Invisible bodies are wanted by no one and never culled
+    Every other present body against the viewer that the run could change:
+    those in the cells its distance spans, and each it holds anything for
+    elsewhere. Any other holds nothing and is out of every radius, so it
+    stays as it is. Each gets its relevancy and tier, and one holding
+    nothing out of range is done; the rest, in the order the states were
+    walked, get whether anti-ESP hides them, which leaves them culled, and
+    the stretch that follows. Invisible bodies are wanted by no one and
+    never culled
 --]]
 
 local function consider(view: View, viewer: Viewer, states: { [number]: State }, own: number?)
 	local origin: vector = viewer.position
+	local grid: Grid = Radii.grid
+	local size: number = grid.size
+	local across: number = grid.across
+	local bound: number = Constants.PLAY_BOUND
 
-	for slot: number, state: State in states do
-		if slot == own or buffer.readu32(Present, slot * 4) ~= Run then
+	-- f32 rounding moves an offset by under a millionth of its length, so the cells reach that much past the
+	-- distance, and no body measure finds inside it lies outside them
+	local slack: number = 2 ^ -20
+	local reach: number = view.distance * (1 + slack)
+	local west: number = (origin.x - reach + bound) // size
+	local east: number = (origin.x + reach + bound) // size
+	local south: number = (origin.z - reach + bound) // size
+	local north: number = (origin.z + reach + bound) // size
+
+	-- Held to the grid's edges as each body was, a NaN to its first cell
+	west = west >= 0 and math.min(west, across - 1) or 0
+	east = east >= 0 and math.min(east, across - 1) or 0
+	south = south >= 0 and math.min(south, across - 1) or 0
+	north = north >= 0 and math.min(north, across - 1) or 0
+
+	-- The cells' bodies, each as its place in the walk of the states times SLOTS plus its slot, in the walk's order
+	-- within each cell
+	local visits: { number } = grid.visits
+	local count: number = 0
+
+	for row: number = south, north do
+		for column: number = west, east do
+			local entry: number = buffer.readu16(grid.heads, (row * across + column) * 2)
+			while entry ~= 0 do
+				local slot: number = entry - 1
+				count += 1
+				visits[count] = buffer.readu16(grid.orders, slot * 2) * SLOTS + slot
+				entry = buffer.readu16(grid.following, slot * 2)
+			end
+		end
+	end
+
+	if count == grid.count then
+		-- Every body lies in those cells, so they go in the walk's own order
+		for place: number = 1, count do
+			visits[place] = place * SLOTS + buffer.readu16(grid.walk, place * 2)
+		end
+	else
+		-- And each slot it holds anything for outside them, which lies inside no radius
+		for _, slot: number in view.tracked do
+			local column: number = buffer.readu16(grid.columns, slot * 2)
+			local row: number = buffer.readu16(grid.rows, slot * 2)
+
+			if
+				buffer.readu32(Present, slot * 4) == Run
+				and not (column >= west and column <= east and row >= south and row <= north)
+			then
+				count += 1
+				visits[count] = buffer.readu16(grid.orders, slot * 2) * SLOTS + slot
+			end
+		end
+	end
+
+	-- Out of range and holding nothing is all the rest would leave a pair, so only the others stay listed
+	local listed: number = 0
+	local ordered: boolean = true
+
+	for index: number = 1, count do
+		local visit: number = visits[index]
+		local slot: number = visit % SLOTS
+		if slot == own then
 			continue
 		end
 
-		local generation: number = buffer.readu8(Generations, slot)
-		local offset: vector = state.position - origin
-		local flags: number = buffer.readu16(view.flags, slot * 2)
-
-		flags = measure(flags, buffer.readu8(Kinds, slot), vector.dot(offset, offset))
+		local offset: vector = states[slot].position - origin
+		local kept: number = buffer.readu16(view.flags, slot * 2)
+		local flags: number = measure(kept, buffer.readu8(Kinds, slot), vector.dot(offset, offset))
 		flags = bit32.band(flags, bit32.bnot(CULLED))
 
+		if flags ~= 0 then
+			if listed > 0 and visit < visits[listed] then
+				ordered = false
+			end
+
+			listed += 1
+			visits[listed] = visit
+			buffer.writeu16(view.flags, slot * 2, flags)
+		elseif kept ~= 0 then
+			buffer.writeu16(view.flags, slot * 2, 0)
+		end
+	end
+
+	-- The rest in the walk's order, the order anti-ESP is asked in and new slots join the tracked list in
+	trim(visits, listed)
+	if not ordered then
+		table.sort(visits)
+	end
+
+	for index: number = 1, listed do
+		local slot: number = visits[index] % SLOTS
+		local flags: number = buffer.readu16(view.flags, slot * 2)
+		local generation: number = buffer.readu8(Generations, slot)
 		local wanted: boolean = false
 		if bit32.btest(flags, RELEVANT) and buffer.readu8(Invisible, slot) ~= generation + 1 then
 			if IsHidden(viewer, slot) then
@@ -2266,11 +2402,12 @@ end
 --[[
     One relay tick: encodes each live body's record and footsteps once, a
     rider's in its platform's space where platforms holds that platform's
-    place at the tick, then gives each viewer with no target its blocks,
-    copied to the viewers watching it. states holds the server's live
-    bodies by slot, and commands the command each last stepped, whose pitch
-    and head offset its record carries. A target handed more watchers than
-    it takes errors, naming it, once every viewer has had its turn
+    place at the tick, and files the body by where it stands, then gives
+    each viewer with no target its blocks, copied to the viewers watching
+    it. states holds the server's live bodies by slot, and commands the
+    command each last stepped, whose pitch and head offset its record
+    carries. A target handed more watchers than it takes errors, naming
+    it, once every viewer has had its turn
 --]]
 
 function Relay.run(
@@ -2295,6 +2432,14 @@ function Relay.run(
 		buffer.writeu16(Deltas.ticks, plane * 2, TickWire)
 	end
 
+	-- Each body is filed in its cell's list, numbered in the order the states are walked, which each turn keeps
+	local grid: Grid = Radii.grid
+	local size: number = grid.size
+	local across: number = grid.across
+	local bound: number = Constants.PLAY_BOUND
+	local order: number = 0
+	buffer.fill(grid.heads, 0, 0)
+
 	for slot: number, state: State in states do
 		local generation: number, entry: Slots.Entry? = Slots.get(slot)
 		if not entry then
@@ -2313,7 +2458,31 @@ function Relay.run(
 		if kind == PLAYER or kind == NPC then
 			walk(slot, state, generation)
 		end
+
+		-- Held to the grid's edges, and a NaN place to its first cell, since measure finds that inside no radius
+		local position: vector = state.position
+		local column: number = (position.x + bound) // size
+		local row: number = (position.z + bound) // size
+		column = column >= 0 and math.min(column, across - 1) or 0
+		row = row >= 0 and math.min(row, across - 1) or 0
+
+		local cell: number = (row * across + column) * 2
+		if buffer.readu16(grid.heads, cell) == 0 then
+			buffer.writeu16(grid.heads, cell, slot + 1)
+		else
+			buffer.writeu16(grid.following, buffer.readu16(grid.tails, cell) * 2, slot + 1)
+		end
+
+		order += 1
+		buffer.writeu16(grid.tails, cell, slot)
+		buffer.writeu16(grid.following, slot * 2, 0)
+		buffer.writeu16(grid.columns, slot * 2, column)
+		buffer.writeu16(grid.rows, slot * 2, row)
+		buffer.writeu16(grid.orders, slot * 2, order)
+		buffer.writeu16(grid.walk, order * 2, slot)
 	end
+
+	grid.count = order
 
 	-- Every viewer's view, and which of them run their own this run
 	for _, viewer: Viewer in viewers do

@@ -77,3 +77,12 @@ event runReport {
 	call: SingleSync,
 	data: (state: enum { Refused, Running, Piece, Passed, Failed }, text: string(0..4000)),
 }
+
+-- A client's report of one ClientCost window: the label the server opened it with, whether the client measured it
+-- whole, and its line, which the server prints. A line stays well under Volt's 8,192 B maxPacket
+event clientCost {
+	from: Client,
+	type: Reliable,
+	call: SingleSync,
+	data: (label: string(1..64), measured: boolean, line: string(1..512)),
+}

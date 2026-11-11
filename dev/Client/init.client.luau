@@ -1,7 +1,7 @@
 --[[
-    The dev place's client: starts Tread's client as a game does, with the
-    dev game's shared table and Frontier Zero's client settings, then its
-    kit, shooter, elevator, input, camera, keys, prompt, G2, replay and panel
+    The dev client: starts Tread's client as a game does, with the dev game's
+    shared table and Frontier Zero's client settings, then its kit, shooter,
+    G5 cost window, elevator, input, camera, keys, prompt, G2, replay and panel
 --]]
 
 --!strict
@@ -18,6 +18,7 @@ local Tread = require(packages.Tread)
 local Network = require(ReplicatedStorage.Shared.Network.Client)
 
 local Config = require(script.Config)
+local Cost = require(script.Cost)
 local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
 local Exploits = require(script.Exploits)
 local Input = require(script.Input)
@@ -213,6 +214,7 @@ local clientSettings: Tread.ClientSettings = {
 local client: Tread.Client = Tread.startClient(Shared, clientSettings)
 Exploits.start({ client = client, shared = Shared }) -- In this frame, so the ESP hears the first slot table
 Shots.start(client, Shared) -- In this frame too, so it hears every slot drawn
+Cost.start(client) -- In this frame too, so it counts every rig drawn
 local view: View.View = View.new(client, Config.view, cast)
 local mantle: TextLabel? = nil -- The prompt, once the PlayerGui it waits for has come
 local replay: Replay.Replay? = nil -- The clip replay, once the PlayerGui its label waits for has come

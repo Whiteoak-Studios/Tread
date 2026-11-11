@@ -43,7 +43,8 @@ local Collide = {}
 -- The body a move is moving, in numbers, loaded from its state and written back
 local px: number, py: number, pz: number = 0, 0, 0
 local vx: number, vy: number, vz: number = 0, 0, 0
-local blocked: boolean = false -- Whether a slide met a surface too steep to walk
+local blocked: boolean = false -- Whether a slide met a surface too steep to walk that a step up might clear
+local stepTop: number = 0 -- The highest hull top a step up from where the walk started can clear
 
 -- The last cast's hit, in numbers, and the body whose hull it met, if any
 local hitDistance: number = 0
@@ -172,7 +173,11 @@ local function slide(
 		local normalX: number, normalY: number, normalZ: number = hitNormalX, hitNormalY, hitNormalZ
 
 		if normalY < walkable then
-			blocked = true
+			-- A hull whose top is past a step's reach is never cleared by one, so only the rest call for the step up
+			local body: State? = hitBody
+			if not body or body.position.y + Hulls.height(body, world.settings) <= stepTop then
+				blocked = true
+			end
 
 			-- Seen from the ground, a surface too steep to walk is a wall
 			local flat: number = math.sqrt(normalX * normalX + normalZ * normalZ)
@@ -239,9 +244,10 @@ end
 
 --[[
     A grounded body's move: a level slide, and when a surface too steep to
-    walk stopped it, the same slide a step's height up and back down onto
-    walkable ground, kept when it got farther. Then the ground snap follows
-    the ground down a step's height, or the body leaves the ground
+    walk stopped it, the world's or a hull a step's height can clear, the
+    same slide a step's height up and back down onto walkable ground, kept
+    when it got farther. Then the ground snap follows the ground down a
+    step's height, or the body leaves the ground
 --]]
 
 local function walk(state: State, world: World, moveX: number, moveZ: number, size: vector, half: number): State?
@@ -250,6 +256,7 @@ local function walk(state: State, world: World, moveX: number, moveZ: number, si
 	local startVX: number, startVY: number, startVZ: number = vx, vy, vz
 
 	blocked = false
+	stepTop = py + settings.stepHeight
 	slide(state, world, moveX, 0, moveZ, size, half, true)
 
 	if blocked and settings.stepHeight > 0 then

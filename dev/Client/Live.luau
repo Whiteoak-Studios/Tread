@@ -1,7 +1,7 @@
 --[[
-    The dev place's live-run panel, shown on its key: a button for each
-    live run, which asks the dev server to start it, the run's status, and
-    its report in a box that selects whole as it takes focus, for a copy
+    The dev place's live-run panel, shown on its key or a touch screen's
+    button: a button for each live run, which asks the dev server to start
+    it, the run's status, and its report in a box that selects whole on focus
 --]]
 
 --!strict
@@ -30,6 +30,7 @@ local UNBOUNDED: number = math.huge -- The report is measured with no limit on i
 local FRAME_LAYER: number = 1 -- The panel's frame, under its parts
 local PART_LAYER: number = 2 -- The status line, the run buttons' column and the report's frame
 local CONTENT_LAYER: number = 3 -- The buttons and the report's box, over the frames they sit in
+local BUTTON_ORDER: number = 1 -- The touch button's screen, drawn over the panel's wherever the two meet
 
 -- The panel's parts its listeners bring up to date
 type Gui = {
@@ -152,6 +153,36 @@ local function build(playerGui: PlayerGui): Gui
 end
 
 --[[
+    The button a touch screen with no keyboard shows and hides the panel
+    by, always on screen in a screen of its own at the top edge's middle,
+    clear of the dev game's stick, look drag and jump button
+--]]
+
+local function touchButton(playerGui: PlayerGui): TextButton
+	local screen: ScreenGui = Instance.new("ScreenGui")
+	screen.Name = "DevLiveButton"
+	screen.ResetOnSpawn = false
+	screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	screen.DisplayOrder = BUTTON_ORDER
+	screen.Parent = playerGui
+
+	local button: TextButton = Instance.new("TextButton")
+	button.Name = "Toggle"
+	button.Text = "Live"
+	button.AnchorPoint = Vector2.new(0.5, 0)
+	button.Position = UDim2.new(0.5, 0, 0, 8)
+	button.Size = UDim2.fromOffset(96, 40)
+	button.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	button.BackgroundTransparency = 0.25
+	button.TextColor3 = Color3.new(1, 1, 1)
+	button.TextSize = TEXT_SIZE
+	button.ZIndex = CONTENT_LAYER
+	button.Parent = screen
+
+	return button
+end
+
+--[[
     Brings the panel up to what it shows. The box is sized from its text's
     measured height and the canvas from the box, since an automatic size
     never grows a child past the frame it sits in
@@ -173,7 +204,8 @@ end
 --[[
     Builds the panel, hidden, and connects its key, its buttons, its box's
     selection and edits, and the server's reports, each for the client
-    session. It runs once a client, and waits at boot for the PlayerGui
+    session, with a button for the key on a touch screen with no keyboard.
+    It runs once a client, and waits at boot for the PlayerGui
 --]]
 
 function Live.start()
@@ -224,12 +256,23 @@ function Live.start()
 		end
 	end)
 
+	-- Shows the panel or hides it, on its key and on a touch screen's button alike
+	local function toggle()
+		gui.screen.Enabled = not gui.screen.Enabled
+	end
+
 	-- A key typed into the focused box is processed, so L there neither toggles the panel nor stays in the report
 	UserInputService.InputBegan:Connect(function (input: InputObject, processed: boolean)
 		if not processed and input.KeyCode == KEY then
-			gui.screen.Enabled = not gui.screen.Enabled
+			toggle()
 		end
 	end)
+
+	-- A touch screen with no keyboard has no key to press, so the button stands in for it. Its connection lives for the
+	-- client session, as the panel's others do, and goes with the button
+	if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
+		touchButton(playerGui).Activated:Connect(toggle)
+	end
 end
 
 -- Whether the panel shows, which the dev client frees the mouse for

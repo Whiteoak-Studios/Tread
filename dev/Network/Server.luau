@@ -256,9 +256,46 @@ local function writerunReport(state: "Refused" | "Running" | "Piece" | "Passed" 
 	trimReliable(offset)
 end
 
+local function readclientCost(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 4 > length then
+		error("clientCost: truncated")
+	end
+
+	local flags: number = buffer.readu8(packet, cursor)
+	local labelLength: number = 1 + buffer.readu8(packet, cursor + 1)
+
+	if labelLength > 64 then
+		error("clientCost.label: length out of range")
+	end
+
+	local lineLength: number = 1 + buffer.readu16(packet, cursor + 2)
+
+	if lineLength > 512 then
+		error("clientCost.line: length out of range")
+	end
+
+	cursor += 4
+
+	if cursor + labelLength > length then
+		error("clientCost.label: truncated")
+	end
+
+	local label: string = buffer.readstring(packet, cursor, labelLength)
+	cursor += labelLength
+
+	if cursor + lineLength > length then
+		error("clientCost.line: truncated")
+	end
+
+	local line: string = buffer.readstring(packet, cursor, lineLength)
+	cursor += lineLength
+
+	return runtime:deliver(6, player, cursor, sideCursor, label, bit32.btest(flags, 1), line)
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x922FB784,
+	hash = 0x2474E257,
 	scope = "Dev",
 	side = "server",
 	idBytes = 1,
@@ -278,6 +315,7 @@ runtime = Volt.start({
 		[3] = { name = "shot", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readshot },
 		[4] = { name = "played", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readplayed },
 		[5] = { name = "run", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readrun },
+		[6] = { name = "clientCost", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readclientCost },
 	},
 
 	outgoing = {
@@ -441,6 +479,16 @@ local Network = {
 		end,
 	}) :: ServerEvent<("Refused" | "Running" | "Piece" | "Passed" | "Failed", string)>,
 
+	clientCost = table.freeze({
+		on = function (listener: (player: Player | Bot, label: string, measured: boolean, line: string) -> ()): () -> ()
+			return runtime:on(6, listener)
+		end,
+
+		iter = function (): () -> (number, Player | Bot, string, boolean, string)
+			return runtime:iter(6)
+		end,
+	}) :: ServerListener<(string, boolean, string)>,
+
 	version = "0.1.0",
 
 	hooks = table.freeze({
@@ -495,6 +543,7 @@ Network.events = table.freeze({
 	["played"] = Network.played,
 	["run"] = Network.run,
 	["runReport"] = Network.runReport,
+	["clientCost"] = Network.clientCost,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

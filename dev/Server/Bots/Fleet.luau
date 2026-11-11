@@ -27,6 +27,7 @@ export type Entry = {
 	character: Tread.Character,
 	bot: Bot.Bot,
 	group: string, -- The group of its scenario it belongs to
+	watching: Volt.Bot?, -- The bot whose character it spectates, nil while it spectates none
 }
 
 -- What a bot is built from
@@ -135,7 +136,7 @@ function Fleet.add(plan: Plan): Entry
 		error(bot, 0)
 	end
 
-	local entry: Entry = { volt = volt, character = character, bot = bot, group = plan.group }
+	local entry: Entry = { volt = volt, character = character, bot = bot, group = plan.group, watching = nil }
 	table.insert(Entries, entry)
 
 	return entry
