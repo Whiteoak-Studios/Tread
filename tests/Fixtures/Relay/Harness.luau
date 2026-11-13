@@ -1,0 +1,593 @@
+--[[
+    The relay cases' harness: the relay and its taps started on the example's
+    tables, bodies in the slot table, and viewers whose clients read every
+    block and withheld block they are sent, each change against what they kept
+--]]
+
+--!strict
+local Harness = {}
+Harness.__index = Harness
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local Packages = ReplicatedStorage.Packages
+
+local Tread = Packages.Tread
+local Block = require(Tread.Codec.Block)
+local Change = require(Tread.Codec.Change)
+local Constants = require(Tread.Constants)
+local Example = require(ServerScriptService.Fixtures.Config.Example)
+local Fields = require(Tread.Codec.Fields)
+local Record = require(Tread.Codec.Record)
+local Relay = require(Tread.Server.Relay)
+local Sequence = require(Tread.Codec.Sequence)
+local Slots = require(Tread.Server.Slots)
+local State = require(Tread.Step.State)
+local Taps = require(Tread.Server.Taps)
+
+local MASK_BITS: number = 16 -- The sequences before the newest a client's acknowledgment covers
+local WRAP: number = 2 ^ 16
+local STEPS: number = 3 -- Mock steps that carry a flush across, as manualFlush.luau finds
+local RECORD_BYTES: number = Constants.RECORD_BYTES
+local SLOTS: number = Constants.SLOTS
+local BASE_AT: number = 2 -- A change record's base, after its slot and generation
+
+type Kind = Slots.Kind
+type State = State.State
+type Values = State.Values
+type Viewer = Relay.Viewer
+
+-- A look entry as a client read it, each part present as its packed bytes
+export type Look = {
+	slot: number,
+	generation: number,
+	look: string?,
+	held: string?,
+}
+
+-- One withheld block as a client read it
+export type Withheld = {
+	sequence: number,
+	tick: number,
+	size: number,
+	looks: { Look },
+	records: { Record.Record },
+}
+
+-- A change record as a client read it: whose it is, its base and its bytes as sent
+export type Delta = {
+	slot: number,
+	base: number,
+	bytes: string,
+}
+
+-- What one client read in one run
+export type Seen = {
+	sizes: { number }, -- Each block's bytes, a lost one included
+	lost: number,
+	sequences: { number }, -- Each block's sequence, a lost one's left out
+	reveals: { Block.Reveal },
+	hides: { Block.Hide },
+	looks: { Look },
+	footsteps: { Block.Footstep },
+	records: { Record.Record }, -- Whole records, then each block's changes as the records they decode to
+	raws: { string }, -- Each of those records' 16 B
+	changes: { Delta }, -- The change records among them
+	blocks: { { reveals: { number }, looks: { number }, records: { number } } }, -- The slots in each block read
+	withheld: { Withheld }, -- Each withheld block read
+}
+
+-- One simulated viewer's client
+export type Client = {
+	viewer: Viewer,
+	lose: number, -- The blocks still to come that are lost in transit
+	lag: number, -- The runs its acknowledgment takes to reach the relay, 0 for at once
+	sent: { { newest: number, mask: number } }, -- The acknowledgments on their way, oldest first
+	newest: number, -- The newest sequence read, 0 for none
+	received: { [number]: boolean },
+	drawn: { [number]: { generation: number, kind: Block.Kind } }, -- What it draws, by slot, from reveals and hides
+	store: Change.Store, -- The records it read of the last 32 relay ticks, which each change is decoded against
+	seen: Seen,
+}
+
+type Network = {
+	server: any,
+	client: any,
+	mock: any,
+	player: any,
+}
+
+type Fields = {
+	layout: Fields.Layout,
+	limits: { lean: number, headCone: number },
+	states: { [number]: State },
+	commands: { [number]: State.Command },
+	platforms: { [number]: vector }?, -- Each platform's place at the tick, handed to each run
+	viewers: { Viewer },
+	clients: { [any]: Client },
+	hidden: { [any]: { [number]: boolean } },
+	reasons: { [any]: { [number]: string } }, -- The send reason anti-ESP gives for a pair, Clear where none is set
+	traffic: number,
+	tick: number,
+	sends: { { any } }, -- The keys each block went to this run, one list a send
+	withheldSends: { { any } }, -- And each withheld block
+	network: Network?,
+}
+
+local function seen(): Seen
+	return {
+		sizes = {},
+		lost = 0,
+		sequences = {},
+		reveals = {},
+		hides = {},
+		looks = {},
+		footsteps = {},
+		records = {},
+		raws = {},
+		changes = {},
+		blocks = {},
+		withheld = {},
+	}
+end
+
+--[[
+    A harness with the relay and its taps started on the example's shared
+    and server tables, which tweak may change first, every viewer's traffic
+    at the harness's own count and anti-ESP hiding whatever hide asks and
+    giving whatever reason sets. With network, the first viewer is the
+    mock's player and its blocks cross Volt.mock
+--]]
+
+function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ())?): Self
+	local shared = Example.shared()
+	local server = Example.server()
+	if tweak then
+		tweak(shared, server)
+	end
+
+	local layout: Fields.Layout = Fields.compile(shared.fields)
+
+	Slots.start(server.slots.reserve)
+
+	local self: Self = setmetatable({
+		layout = layout,
+		limits = { lean = shared.step.lean, headCone = shared.step.headCone },
+		states = {} :: { [number]: State },
+		commands = {} :: { [number]: State.Command },
+		platforms = nil :: { [number]: vector }?,
+		viewers = {} :: { Viewer },
+		clients = {} :: { [any]: Client },
+		hidden = {} :: { [any]: { [number]: boolean } },
+		reasons = {} :: { [any]: { [number]: string } },
+		traffic = 0,
+		tick = 0,
+		sends = {} :: { { any } },
+		withheldSends = {} :: { { any } },
+		network = nil :: Network?,
+	}, Harness)
+
+	Relay.start({ shared = shared, server = server, layout = layout }, function (keys: { any }, data: buffer)
+		self:_deliver(keys, data)
+	end, function (keys: { any }, data: buffer)
+		self:_withhold(keys, data)
+	end, function (_: any): number
+		return self.traffic
+	end, function (viewer: Viewer, slot: number): boolean
+		local hidden: { [number]: boolean }? = self.hidden[viewer.key]
+
+		return hidden ~= nil and hidden[slot] == true
+	end)
+
+	Taps.start({
+		layout = layout,
+		wearing = Relay.wearing,
+
+		reason = function (key: any, slot: number): any
+			local reasons: { [number]: string }? = self.reasons[key]
+			local reason: string? = reasons and reasons[slot]
+			if reason == nil then
+				return "Clear"
+			end
+
+			return reason
+		end,
+	})
+
+	if network then
+		-- The server first, so the player the client joins as is one it hears join
+		local serverNetwork: any = require(Tread.Network.Server)
+		local clientNetwork: any = require(Tread.Network.Client)
+		local mock: any = require(Packages.Volt).mock
+
+		clientNetwork.flush()
+		for _ = 1, STEPS do
+			mock:step()
+		end
+
+		local player: any = mock.players[1]
+		self.network = { server = serverNetwork, client = clientNetwork, mock = mock, player = player }
+
+		clientNetwork.Relay.on(function (data: buffer)
+			self:_receive(player, data)
+		end)
+
+		clientNetwork.Withheld.on(function (data: buffer)
+			self:_readWithheld(player, data)
+		end)
+	end
+
+	return self
+end
+
+--[[
+    A new viewer with no character at the origin: the mock's player for the
+    first one on a network harness, else a key of its own
+--]]
+
+function Harness.viewer(self: Self, name: string): Client
+	local network: Network? = self.network
+	local key: any = { Name = name }
+	if network and #self.viewers == 0 then
+		key = network.player
+	end
+
+	local viewer: Viewer =
+		{ key = key, slot = nil, position = vector.zero, acknowledged = 0, received = 0, target = nil }
+	local client: Client = {
+		viewer = viewer,
+		lose = 0,
+		lag = 0,
+		sent = {},
+		newest = 0,
+		received = {},
+		drawn = {},
+		store = Change.store(),
+		seen = seen(),
+	}
+
+	table.insert(self.viewers, viewer)
+	self.clients[key] = client
+	self.hidden[key] = {}
+	self.reasons[key] = {}
+
+	return client
+end
+
+-- Sets the viewer a client's viewer spectates, or ends its spectate with nil
+function Harness.watch(self: Self, client: Client, target: Client?)
+	if target then
+		client.viewer.target = target.viewer.key
+	else
+		client.viewer.target = nil
+	end
+end
+
+--[[
+    A body of a kind standing at a place in a slot of its own, with its
+    entry set and a resting state on the ground
+--]]
+
+function Harness.spawn(self: Self, kind: Kind, position: vector): number
+	local slot: number? = Slots.take(kind)
+	if slot == nil then
+		error(`No slot was free for a {kind}`)
+	end
+
+	Slots.setEntry(slot, { kind = kind, rig = "A" })
+
+	local state: State = State.new()
+	state.position = position
+	state.mode = "Ground"
+	state.grounded = true
+	state.groundMaterial = Enum.Material.Grass
+	self.states[slot] = state
+
+	return slot
+end
+
+-- Takes a body out of the states and frees its slot
+function Harness.despawn(self: Self, slot: number)
+	self.states[slot] = nil
+	self.commands[slot] = nil
+	Slots.release(slot)
+end
+
+-- Sets whether anti-ESP hides a slot from a viewer
+function Harness.hide(self: Self, client: Client, slot: number, hidden: boolean)
+	self.hidden[client.viewer.key][slot] = hidden
+end
+
+-- Sets the send reason anti-ESP gives the taps for a slot a viewer is sent or has withheld
+function Harness.reason(self: Self, client: Client, slot: number, reason: string)
+	self.reasons[client.viewer.key][slot] = reason
+end
+
+--[[
+    One relay tick: every client's view of the run starts empty, the relay
+    runs, a network harness flushes and steps the mock, the taps hand their
+    frames to their sinks as the relay stage does, and each viewer's
+    acknowledgment is what its client had read lag runs before
+--]]
+
+function Harness.run(self: Self)
+	self.tick += 1
+	self.sends = {}
+	self.withheldSends = {}
+
+	for _, client: Client in self.clients do
+		client.seen = seen()
+	end
+
+	Relay.run(self.tick, self.viewers, self.states, self.commands, self.platforms)
+
+	local network: Network? = self.network
+	if network then
+		network.server.flush()
+
+		for _ = 1, STEPS do
+			network.mock:step()
+		end
+	end
+
+	if Taps.observing then
+		Taps.finish(self.tick)
+	end
+
+	for _, client: Client in self.clients do
+		local mask: number = 0
+
+		for back: number = 1, MASK_BITS do
+			if client.received[(client.newest - back) % WRAP] then
+				mask += 2 ^ (back - 1)
+			end
+		end
+
+		-- The acknowledgment reaches the relay lag runs after the client read what it covers
+		table.insert(client.sent, { newest = client.newest, mask = mask })
+		if #client.sent > client.lag then
+			local arrived: { newest: number, mask: number } = table.remove(client.sent, 1) :: any
+			client.viewer.acknowledged = arrived.newest
+			client.viewer.received = arrived.mask
+		end
+	end
+end
+
+-- Runs count relay ticks
+function Harness.runs(self: Self, count: number)
+	for _ = 1, count do
+		self:run()
+	end
+end
+
+--[[
+    Hands a block to every key it went to: over the mock in one fireList
+    for its player, else straight to each client as a copy of its own
+--]]
+
+function Harness._deliver(self: Self, keys: { any }, data: buffer)
+	table.insert(self.sends, table.clone(keys))
+
+	local network: Network? = self.network
+	for _, key: any in keys do
+		if network and key == network.player then
+			network.server.Relay.fireList(keys, data)
+		else
+			self:_receive(key, buffer.fromstring(buffer.tostring(data)))
+		end
+	end
+end
+
+-- Hands a withheld block to every key it went to, as a block is handed
+function Harness._withhold(self: Self, keys: { any }, data: buffer)
+	table.insert(self.withheldSends, table.clone(keys))
+
+	local network: Network? = self.network
+	for _, key: any in keys do
+		if network and key == network.player then
+			network.server.Withheld.fireList(keys, data)
+		else
+			self:_readWithheld(key, buffer.fromstring(buffer.tostring(data)))
+		end
+	end
+end
+
+-- The look entries of a block read, each part present as its packed bytes
+local function readLooks(data: buffer, block: Block.Block): { Look }
+	local looks: { Look } = {}
+
+	for index: number = 1, block.lookCount do
+		local look: Block.Look = block.looks[index]
+		local read: Look = { slot = look.slot, generation = look.generation }
+
+		if look.look then
+			read.look = buffer.readstring(data, look.lookAt, look.lookLength)
+		end
+
+		if look.held then
+			read.held = buffer.readstring(data, look.heldAt, look.heldLength)
+		end
+
+		table.insert(looks, read)
+	end
+
+	return looks
+end
+
+-- A client reads one block, unless it is one it is set to lose
+function Harness._receive(self: Self, key: any, data: buffer)
+	local client: Client = self.clients[key]
+	local view: Seen = client.seen
+	table.insert(view.sizes, buffer.len(data))
+
+	if client.lose > 0 then
+		client.lose -= 1
+		view.lost += 1
+
+		return
+	end
+
+	local block: Block.Block = Block.new()
+	Block.read(data, block)
+
+	table.insert(view.sequences, block.sequence)
+	client.received[block.sequence] = true
+	if client.newest == 0 or Sequence.difference(block.sequence, client.newest) > 0 then
+		client.newest = block.sequence
+	end
+
+	local slots: { reveals: { number }, looks: { number }, records: { number } } =
+		{ reveals = {}, looks = {}, records = {} }
+	table.insert(view.blocks, slots)
+
+	for index: number = 1, block.revealCount do
+		local reveal: Block.Reveal = block.reveals[index]
+		client.drawn[reveal.slot] = { generation = reveal.generation, kind = reveal.kind }
+		table.insert(view.reveals, table.clone(reveal))
+		table.insert(slots.reveals, reveal.slot)
+	end
+
+	for index: number = 1, block.hideCount do
+		local hide: Block.Hide = block.hides[index]
+		local drawn: { generation: number, kind: Block.Kind }? = client.drawn[hide.slot]
+		if drawn and drawn.generation == hide.generation then
+			client.drawn[hide.slot] = nil
+		end
+
+		table.insert(view.hides, table.clone(hide))
+	end
+
+	for _, look: Look in readLooks(data, block) do
+		table.insert(view.looks, look)
+		table.insert(slots.looks, look.slot)
+	end
+
+	for index: number = 1, block.footstepCount do
+		local step: Block.Footstep = { at = vector.zero, kind = "Walk", material = Enum.Material.Air }
+		Block.readFootstep(data, block.footsteps[index], step)
+		table.insert(view.footsteps, step)
+	end
+
+	-- Each record kept at the run's tick, which every block of the run samples, so a later change finds its baseline
+	for index: number = 1, block.recordCount do
+		self:_keep(client, data, block.records[index], slots.records)
+	end
+
+	for index: number = 1, block.changeCount do
+		local at: number = block.changeOffsets[index]
+		local id: number = buffer.readu16(data, at)
+		local base: number = buffer.readu8(data, at + BASE_AT)
+		local baseline: buffer?, baselineAt: number = Change.find(client.store, id, self.tick - base)
+		if not baseline then
+			error(`A change of character {id} named tick {self.tick - base}, whose record its client never kept`)
+		end
+
+		local whole: buffer = buffer.create(RECORD_BYTES)
+		Change.read(data, at, baseline, baselineAt, whole, 0)
+
+		table.insert(view.changes, {
+			slot = id % SLOTS,
+			base = base,
+			bytes = buffer.readstring(data, at, block.changeLengths[index]),
+		})
+		self:_keep(client, whole, 0, slots.records)
+	end
+end
+
+-- A client reads one whole record, a block's or one a change decoded to, and keeps it for the changes after it
+function Harness._keep(self: Self, client: Client, data: buffer, at: number, slots: { number })
+	local record: Record.Record = Record.new()
+	Record.read(data, at, record, self.limits)
+
+	table.insert(client.seen.records, record)
+	table.insert(client.seen.raws, buffer.readstring(data, at, RECORD_BYTES))
+	table.insert(slots, record.slot)
+	Change.keep(client.store, self.tick, data, at)
+end
+
+--[[
+    A client reads one withheld block, which never moves its acknowledgment,
+    refusing one with reveals, hides, steps or change records
+--]]
+
+function Harness._readWithheld(self: Self, key: any, data: buffer)
+	local client: Client = self.clients[key]
+	local block: Block.Block = Block.new()
+	Block.read(data, block)
+
+	if block.revealCount + block.hideCount + block.footstepCount + block.changeCount ~= 0 then
+		error("A withheld block carried a reveal, a hide, a footstep or a change record")
+	end
+
+	local records: { Record.Record } = {}
+	for index: number = 1, block.recordCount do
+		local record: Record.Record = Record.new()
+		Record.read(data, block.records[index], record, self.limits)
+		table.insert(records, record)
+	end
+
+	table.insert(client.seen.withheld, {
+		sequence = block.sequence,
+		tick = block.tick,
+		size = buffer.len(data),
+		looks = readLooks(data, block),
+		records = records,
+	})
+end
+
+--[[
+    The packed bytes of a look or a held item, as a look entry carries them
+--]]
+
+function Harness.pack(self: Self, list: "slot" | "held", values: Values): string
+	local data: buffer = buffer.create(Constants.MAX_LOOK)
+	local length: number = Fields.write(self.layout[list], values, data, 0)
+
+	return buffer.readstring(data, 0, length)
+end
+
+-- The first of a list's entries that names a slot, or nil
+function Harness.find(entries: { any }, slot: number): any
+	for _, entry: any in entries do
+		if entry.slot == slot then
+			return entry
+		end
+	end
+
+	return nil
+end
+
+-- How many of a list's entries name a slot
+function Harness.count(entries: { { slot: number } }, slot: number): number
+	local count: number = 0
+
+	for _, entry: { slot: number } in entries do
+		if entry.slot == slot then
+			count += 1
+		end
+	end
+
+	return count
+end
+
+-- Every record and look entry the withheld blocks a client read this run carried, in one list each
+function Harness.withheld(client: Client): ({ Record.Record }, { Look })
+	local records: { Record.Record } = {}
+	local looks: { Look } = {}
+
+	for _, block: Withheld in client.seen.withheld do
+		table.move(block.records, 1, #block.records, #records + 1, records)
+		table.move(block.looks, 1, #block.looks, #looks + 1, looks)
+	end
+
+	return records, looks
+end
+
+Harness.Relay = Relay
+Harness.Slots = Slots
+Harness.Taps = Taps
+
+export type Harness = Self
+type Self = typeof(setmetatable({} :: Fields, Harness))
+
+return Harness
