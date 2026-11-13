@@ -20,8 +20,8 @@ local SKIN: number = 0.02 -- Studs collide-and-slide keeps between the hull and 
 local MAX_BUMPS: number = 4 -- The most bumps one collide-and-slide move takes, each a hit and a slide
 local CAST_REACH: number = 0.5 -- Studs a slide's cast reaches past its move, so a near miss keeps its skin too
 local MIN_CREASE: number = 1e-3 -- How nearly parallel two surfaces may be before the line they meet on gives no way
-local DEPENETRATION_FIRST: number = 1 / 16 -- Hull widths depenetration first tries a spot at, each next one twice that
-local DEPENETRATION_STEPS: number = 5 -- The distances depenetration tries, the last one a whole hull width
+local DEPENETRATION_FIRST: number = 1 / 1024 -- Hull widths depenetration first tries a spot at, each next twice that
+local DEPENETRATION_STEPS: number = 11 -- The distances depenetration tries, the last one a whole hull width
 local PLAY_BOUND: number = 8192 -- Studs from 0 a position's X and Z may reach either way, whatever the map's size
 
 -- Angles, which a u16 or i16 counts in steps of the turn

@@ -735,13 +735,14 @@ local TRIALS: { Trial } = {
 	},
 
 	{
-		-- A body inside the wall, which only the exact overlap finds, stays in it on command 9 and leaves it on
-		-- command 10, and a body no spot frees is handed back stuck, sunk none
+		-- A still body inside the wall, which only the exact overlap finds, stays in it on command 9 and leaves it on
+		-- command 10, and a body no spot frees is handed back stuck, sunk none. Its feet start on the quantum, since
+		-- a step whose rounding moves the body settles it out of the wall at once
 		name = "tenthCommand",
 		run = function (collision: Collision): string?
 			local wall: Part = Geometry.wall
 			local world: World = newWorld(collision)
-			local start: vector = vector.create(wall.center.x, RESTING, wall.center.z)
+			local start: vector = vector.create(wall.center.x, Math.quantize(RESTING), wall.center.z)
 			local state: State = Scene.state(start, true)
 			local order: Command = newCommand()
 

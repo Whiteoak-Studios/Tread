@@ -328,6 +328,16 @@ function Bot.send(self: Self, commands: { State.Command }, count: number)
 	self._network.flush()
 end
 
+-- Sends a render distance in whole studs over View, as the client handle announces its own, at once
+function Bot.view(self: Self, distance: number)
+	if not self._live then
+		error("bot:view ran on a bot already destroyed", 2)
+	end
+
+	self._network.View.fire(distance)
+	self._network.flush()
+end
+
 -- What the bot saw and did so far, its own table, which it goes on writing
 function Bot.measure(self: Self): Measure
 	return self._measure

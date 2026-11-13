@@ -1,7 +1,7 @@
 --[[
     The live runs' numbers on the dev server: the rate a run is asked for,
-    the report's size, its wait for the verdict line and its pieces, and
-    the lines it leaves out
+    the report's size, its wait for the verdict line and its pieces, the
+    lines it leaves out, and where the Run all queue saves its reports
 --]]
 
 --!strict
@@ -14,4 +14,11 @@ return {
 
 	-- The bot run's per-second lines and G8's per-episode lines, too many to paste
 	dropped = { "^Bots %S+ seed %d+ second %d+: ", "^G8 %a+ %a+ late reveal: " },
+
+	-- The Run all queue's reports, each saved to the experience's DataStore under the queue's start time
+	queue = {
+		store = "LiveRuns", -- The DataStore's name
+		tries = 3, -- Writes of one key before its failure is reported
+		retryWait = 3, -- Seconds between them, so the tries span the DataStore's wait between writes of one key
+	},
 }

@@ -1148,15 +1148,16 @@ end
 
 --[[
     Fills into with a remote slot's drawn state at the render time and
-    gives whether it has one, with the aim pitch in radians, which a state
-    holds none of. Every value goes through the one lerp, yaw on the
-    shortest arc, and velocity comes from the two samples drawn between.
-    The state word, its epoch the 2-bit parity, the platform and grounded
-    come from the sample at or before the render time; nothing else changes.
-    A sleeper or a body is drawn lying, with no aim pitch
+    gives whether it has one, with the aim pitch in radians and the head
+    offset's yaw and pitch in degrees, which a state holds none of. Every
+    value goes through the one lerp, yaw on the shortest arc, and velocity
+    comes from the two samples drawn between. The state word, its epoch the
+    2-bit parity, the platform and grounded come from the sample at or
+    before the render time; nothing else changes. A sleeper or a body is
+    drawn lying, with no aim pitch or head offset
 --]]
 
-function Interpolate.pose(slot: number, into: State): (boolean, number)
+function Interpolate.pose(slot: number, into: State): (boolean, number, number, number)
 	begun("pose")
 	if not (slot >= 0 and slot < SLOTS and slot % 1 == 0) then
 		error(`Interpolate.pose takes a slot from 0 to {SLOTS - 1}, not {slot}`, 2)
@@ -1164,7 +1165,7 @@ function Interpolate.pose(slot: number, into: State): (boolean, number)
 
 	local count: number = buffer.readu8(RingCounts, slot)
 	if count == 0 then
-		return false, 0
+		return false, 0, 0, 0
 	end
 
 	local base: number = slot * RING
@@ -1172,7 +1173,7 @@ function Interpolate.pose(slot: number, into: State): (boolean, number)
 
 	local kind: Kind? = Kinds[slot]
 	if kind == "Sleeper" or kind == "Body" then
-		return poseLying(slot, into, base, head, count), 0
+		return poseLying(slot, into, base, head, count), 0, 0, 0
 	end
 
 	return Interpolate.sample(RingTicks, RingRecords, base, head, count, RenderTime, into)
@@ -1181,10 +1182,11 @@ end
 --[[
     Fills into with a standing character's drawn state at a render time
     from a window of its samples, and gives whether it has one, with the
-    aim pitch in radians, as pose does for a live slot's ring. The window
-    is count samples, the newest at head, each sample back from it at
-    base + (head - back) % 8 of ticks, f64 relay ticks, and records, 16 B
-    each, so a live ring and a contiguous run, head count - 1, both serve
+    aim pitch in radians and the head offset in degrees, as pose does for a
+    live slot's ring. The window is count samples, the newest at head, each
+    sample back from it at base + (head - back) % 8 of ticks, f64 relay
+    ticks, and records, 16 B each, so a live ring and a contiguous run,
+    head count - 1, both serve
 
     @ at | the render time, in relay ticks with their fraction
 --]]
@@ -1197,7 +1199,7 @@ function Interpolate.sample(
 	count: number,
 	at: number,
 	into: State
-): (boolean, number)
+): (boolean, number, number, number)
 	begun("sample")
 	if not (count >= 0 and count <= RING) then
 		error(`Interpolate.sample takes a window of 0 to {RING} samples, not {count}`, 2)
@@ -1210,7 +1212,7 @@ function Interpolate.sample(
 	end
 
 	if back == count then
-		return false, 0
+		return false, 0, 0, 0
 	end
 
 	-- Between it and the next newer sample, or past the newest along the last two, or one sample alone
@@ -1279,7 +1281,11 @@ function Interpolate.sample(
 		into.velocity = (newerAt - olderAt) * (Rate / span)
 	end
 
-	return true, Math.lerp(Older.pitch, Newer.pitch, t)
+	local pitch: number = Math.lerp(Older.pitch, Newer.pitch, t)
+	local headYaw: number = Math.lerp(Older.headYaw, Newer.headYaw, t)
+	local headPitch: number = Math.lerp(Older.headPitch, Newer.headPitch, t)
+
+	return true, pitch, headYaw, headPitch
 end
 
 --[[

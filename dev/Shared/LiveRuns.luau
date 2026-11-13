@@ -1,11 +1,12 @@
 --[[
-    The dev place's live runs: the scenarios its panel starts, in campaign
-    order, why the server refuses one, the report a run's Output makes and
-    its pieces over the dev scope, and what the panel shows of each
+    The dev place's live runs: the scenarios its panel starts and the queue
+    Run all takes, why the server refuses one, a run's report and its pieces
+    over the dev scope, and what the panel shows of each
 --]]
 
 --!strict
 local IDLE: string = "Idle" -- The panel's status before any run
+local KEPT: string = "^Kept (%d+)$" -- An ask for a report the queue kept, by its place, 0 for the queue's state
 local NEWLINE: string = "\n" -- Between the report's lines
 local NEWLINE_BYTES: number = 1 -- What each line's newline adds to the report's head
 local CHARACTER_BYTES: number = 4 -- The most bytes one UTF-8 character takes
@@ -18,12 +19,13 @@ export type Run = {
 	minutes: number,
 }
 
--- What the dev scope's runReport says of a run
-export type State = "Refused" | "Running" | "Piece" | "Passed" | "Failed"
+-- What the dev scope's runReport says of a run, the Run all queue's state, its kept reports' list, or one of them
+export type State = "Refused" | "Running" | "Piece" | "Passed" | "Failed" | "Queue" | "Kept" | "Report"
 
--- What the panel shows: its status line and the report so far
+-- What the panel shows: its status line, the queue's own while one has run, and the report so far
 export type Panel = {
 	status: string,
+	queue: string, -- Empty before any queue
 	text: string,
 }
 
@@ -57,17 +59,46 @@ local LiveRuns = {
 		{ name = "BenchS4Npcs", minutes = 7.5 },
 		{ name = "BenchS9", minutes = 7.5 },
 		{ name = "BenchS10", minutes = 7.5 },
-		{ name = "BenchG10", minutes = 15 }, -- G10 and its rung with every NPC idle, 3 seeds each
+		{ name = "BenchG10", minutes = 7.5 },
+		{ name = "BenchG10Rung2", minutes = 7.5 }, -- G10's load with every NPC idle
 		{ name = "ClientCost", minutes = 7.5 },
 		{ name = "ParallelProbe", minutes = 0.2 }, -- The loop timed serially, then 50 batches at each of 5 worker counts
+		{ name = "ParallelReturn", minutes = 0.5 }, -- P1's 600 rounds a Heartbeat apart, P4's values, P5's 28 rows of 30
 		{ name = "BenchS5", minutes = 7.5 },
 		{ name = "BenchS6", minutes = 7.5 },
 		{ name = "BenchS7", minutes = 7.5 },
+		{ name = "BenchRelevancy", minutes = 8 }, -- S3 and S4 at 3 render distances, one seed of a 15 s warm-up and 60 s each
 		{ name = "Openings", minutes = 1 }, -- The city block's markers 20 at a time, 3 s a batch
 		{ name = "LateReveals", minutes = 31.5 }, -- 3 seeds of a 30 s warm-up and a 600 s window
 		{ name = "Corrections", minutes = 0.1 }, -- Prints the counts kept since each player joined
 		{ name = "HitAgreement", minutes = 8.4 }, -- A 3 s settle, then 4 cases of a 3 s warm-up, 120 s firing, 2 s drain
 	} :: { Run },
+
+	-- What Run all runs one after another on one server, each a listed run needing neither a player's hands nor a server
+	-- booted another way, the probe's Actors last so they run nothing before it
+	queue = {
+		"BenchS0",
+		"BenchS1",
+		"BenchS2",
+		"BenchS3",
+		"BenchS4",
+		"BenchS5",
+		"BenchS6",
+		"BenchS7",
+		"BenchS3Npcs",
+		"BenchS4Npcs",
+		"BenchS9",
+		"BenchS10",
+		"BenchRelevancy",
+		"BenchG10",
+		"BenchG10Rung2",
+		"LateReveals",
+		"Openings",
+		"ClientCost",
+		"ParallelProbe",
+	},
+
+	ALL = "Run all", -- The ask that starts the queue, which no run is named
 }
 
 -- The listed run of that name, nil for one not listed
@@ -83,18 +114,53 @@ end
 
 --[[
     Why the server refuses a player's ask to start a run, nil when it
-    doesn't: any ask while another run is going first, then a name the
-    list doesn't have
+    doesn't: any ask while another run is going first, the queue's among
+    them, then a name the list doesn't have, Run all aside
 --]]
 
 function LiveRuns.refusal(running: string?, name: string): string?
 	if running then
 		return `{running} is still running`
-	elseif not find(name) then
+	elseif name ~= LiveRuns.ALL and not find(name) then
 		return `no live run is named {name}`
 	end
 
 	return nil
+end
+
+-- The ask for the report the queue kept at that place, from 1, or with 0 for the queue's state and its list
+function LiveRuns.kept(index: number): string
+	return `Kept {index}`
+end
+
+-- The place an ask for a kept report names, nil for an ask that is none
+function LiveRuns.keptIndex(name: string): number?
+	local index: string? = string.match(name, KEPT)
+	if index then
+		return tonumber(index)
+	end
+
+	return nil
+end
+
+--[[
+    The queue's status line: the run going, about how long it runs and how
+    many follow it, or once the queue is done, how many it kept and failed
+--]]
+
+function LiveRuns.queueStatus(going: string?, left: number, kept: number, failed: number): string
+	local tally: string = `{kept} kept, {failed} failed`
+	if not going then
+		return `Run all done: {tally}`
+	end
+
+	local run: Run? = find(going)
+	local length: string = ""
+	if run then
+		length = `, about {run.minutes} min`
+	end
+
+	return `Run all: {going} running{length}, {left} left after it, {tally}`
 end
 
 --[[
@@ -231,16 +297,20 @@ end
 
 -- The panel before any run
 function LiveRuns.idle(): Panel
-	return { status = IDLE, text = "" }
+	return { status = IDLE, queue = "", text = "" }
 end
 
 --[[
-    What the panel shows once the server says a run's state. Running clears
-    the report and Piece adds to it, while Passed, Failed and Refused set
-    only the status, so a refused click never wipes a report not yet copied
+    What the panel shows once the server says a run's state. Running and a
+    kept Report clear the report and Piece adds to it, while Passed, Failed
+    and Refused set only the status, so a refused click never wipes a report
+    not yet copied, and Queue sets the queue's line alone. The kept list is
+    the panel's buttons, so it leaves what shows as it was
 --]]
 
 function LiveRuns.apply(panel: Panel, state: State, text: string): Panel
+	local queue: string = panel.queue
+
 	if state == "Running" then
 		local run: Run? = find(text)
 		local status: string = `Running {text}`
@@ -248,16 +318,22 @@ function LiveRuns.apply(panel: Panel, state: State, text: string): Panel
 			status = `Running {text}, about {run.minutes} min`
 		end
 
-		return { status = status, text = "" }
+		return { status = status, queue = queue, text = "" }
 	elseif state == "Piece" then
-		return { status = panel.status, text = `{panel.text}{text}` }
+		return { status = panel.status, queue = queue, text = `{panel.text}{text}` }
 	elseif state == "Passed" then
-		return { status = `Done: {text} passed`, text = panel.text }
+		return { status = `Done: {text} passed`, queue = queue, text = panel.text }
 	elseif state == "Failed" then
-		return { status = `Failed: {text}`, text = panel.text }
+		return { status = `Failed: {text}`, queue = queue, text = panel.text }
+	elseif state == "Queue" then
+		return { status = panel.status, queue = text, text = panel.text }
+	elseif state == "Report" then
+		return { status = `Report {text}`, queue = queue, text = "" }
+	elseif state == "Kept" then
+		return { status = panel.status, queue = queue, text = panel.text }
 	end
 
-	return { status = `Refused: {text}`, text = panel.text }
+	return { status = `Refused: {text}`, queue = queue, text = panel.text }
 end
 
 return LiveRuns

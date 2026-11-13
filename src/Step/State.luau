@@ -286,6 +286,20 @@ export type PlatformEntry = {
 	_casts: Collision, -- Those casts wrapped to meet the boxes, which the world holds while it holds a platform
 }
 
+-- The uniform grid of hull positions on X and Z a server's world keeps, so a hull test visits only the bodies filed in
+-- the cells its bounds touch. Its cells tile a fixed square of buckets, and each body is filed by its place in the list
+export type Grid = {
+	size: number, -- A cell's side, studs
+	bodies: { State }, -- The list it filed, so a new list World.setBodies hands the world is filed at the next read
+	count: number, -- The bodies that list holds
+	places: { [State]: number }, -- Each body's place in it, from 1
+	heads: buffer, -- u16 by bucket: the first place filed in it, 0 for none
+	following: buffer, -- u16 by place: the next place in its bucket, 0 at the end
+	preceding: buffer, -- u16 by place: the place before it, 0 at the start
+	buckets: buffer, -- u16 by place: the bucket it is filed in
+	found: { number }, -- The places a test's cells hold, reused by every test
+}
+
 -- The read-only context the step reads, which World.new builds
 export type World = {
 	settings: Settings,
@@ -298,6 +312,7 @@ export type World = {
 	leanShift: vector, -- The settings' leanShift, crossed once
 	ladders: { Ladder },
 	bodies: { State }, -- The live players and NPCs this tick, each body's state where it stands now
+	grid: Grid?, -- Where those bodies stand, which the hull tests read; nil walks every body
 	platforms: { [number]: PlatformEntry }, -- By id
 	clock: number, -- An unwrapped simulation tick within 32,767 of every tick the step runs until it is next set
 	gravity: number, -- Studs/s², the latest change's, the settings' own before any

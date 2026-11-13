@@ -37,7 +37,7 @@ local beginReliable: (number) -> (number, buffer)
 local trimReliable: (number) -> ()
 local refuseReliable: (string) -> never
 
-local RUNREPORT_STATE: { "Refused" | "Running" | "Piece" | "Passed" | "Failed" } = { "Refused", "Running", "Piece", "Passed", "Failed" }
+local RUNREPORT_STATE: { "Refused" | "Running" | "Piece" | "Passed" | "Failed" | "Queue" | "Kept" | "Report" } = { "Refused", "Running", "Piece", "Passed", "Failed", "Queue", "Kept", "Report" }
 
 local BOTSPAWN_BEHAVIOR: { "Idle" | "Walk" | "Sprint" } = { "Idle", "Walk", "Sprint" }
 
@@ -232,7 +232,7 @@ local function readrunReport(player: (Player | Bot)?, packet: buffer, cursor: nu
 	end
 
 	local flags: number = buffer.readu8(packet, cursor)
-	local state: ("Refused" | "Running" | "Piece" | "Passed" | "Failed")? = RUNREPORT_STATE[bit32.extract(flags, 0, 3) + 1]
+	local state: ("Refused" | "Running" | "Piece" | "Passed" | "Failed" | "Queue" | "Kept" | "Report")? = RUNREPORT_STATE[bit32.extract(flags, 0, 3) + 1]
 
 	if not state then
 		error("runReport.state: out of range")
@@ -395,7 +395,7 @@ end
 
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x0A7B4066,
+	hash = 0x17BACF31,
 	scope = "Dev",
 	side = "client",
 	idBytes = 1,
@@ -509,14 +509,14 @@ local Network = {
 	}) :: ClientEvent<(string)>,
 
 	runReport = table.freeze({
-		on = function (listener: (state: "Refused" | "Running" | "Piece" | "Passed" | "Failed", text: string) -> ()): () -> ()
+		on = function (listener: (state: "Refused" | "Running" | "Piece" | "Passed" | "Failed" | "Queue" | "Kept" | "Report", text: string) -> ()): () -> ()
 			return runtime:on(4, listener)
 		end,
 
-		iter = function (): () -> (number, "Refused" | "Running" | "Piece" | "Passed" | "Failed", string)
+		iter = function (): () -> (number, "Refused" | "Running" | "Piece" | "Passed" | "Failed" | "Queue" | "Kept" | "Report", string)
 			return runtime:iter(4)
 		end,
-	}) :: ClientListener<("Refused" | "Running" | "Piece" | "Passed" | "Failed", string)>,
+	}) :: ClientListener<("Refused" | "Running" | "Piece" | "Passed" | "Failed" | "Queue" | "Kept" | "Report", string)>,
 
 	clientCost = table.freeze({
 		fire = function (label: string, measured: boolean, line: string)

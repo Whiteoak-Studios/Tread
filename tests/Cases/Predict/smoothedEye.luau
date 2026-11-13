@@ -31,7 +31,7 @@ return function (): (boolean, string | nil)
 		return false, `The correction moved the eye from {before} to {carried}, where the offset should hold it`
 	end
 
-	-- A frame of 0.4 ticks places the body 0.4 of the way along, and shrinks the offset by 15 a second
+	-- A frame of 0.4 ticks places the body 0.4 of the way along, and shrinks the offset at 15 a second over its time
 	local Math: any = rig.Math
 	local dt: number = rig.delta * 0.4
 	local fraction: number = dt / rig.delta
@@ -43,7 +43,7 @@ return function (): (boolean, string | nil)
 	rig.frames(1, dt)
 
 	-- A vector holds float32s, so the sum is a vector's, as the drawn body's is
-	local shrunk: number = Math.lerp(-1, 0, 15 * dt)
+	local shrunk: number = Math.lerp(-1, 0, 1 - math.exp(-15 * dt))
 	local placed: number = Math.lerp(third.position.z, fourth.position.z, fraction)
 	local want: number = (vector.create(0, 0, placed) + vector.create(0, 0, shrunk)).z
 	local smoothed: vector = eyeAt(rig)

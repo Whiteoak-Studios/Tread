@@ -33,8 +33,7 @@ local INTERVAL: number = require(ServerScriptService.Server.Config.BotPanel).int
 local MEDIAN: number = require(ServerScriptService.Server.Config.BotPanel).median
 local HIGH: number = require(ServerScriptService.Server.Config.BotPanel).high
 local REASON_BYTES: number = require(ServerScriptService.Server.Config.BotPanel).reasonBytes
-local RATES: { [string]: { perSecond: number, burst: number } } =
-	require(ServerScriptService.Server.Config.BotPanel).rates
+local RATES: { spawn: Rate, clear: Rate, watch: Rate } = require(ServerScriptService.Server.Config.BotPanel).rates
 local BATCH: number = require(ServerScriptService.Server.Bots.Config).spawn.batch
 local LIFT: number = require(ServerScriptService.Server.Bots.Config).spawn.lift
 local PROBE: number = require(ServerScriptService.Server.Bots.Config).spawn.probe
@@ -60,6 +59,7 @@ local SHOWN_BESIDE: { string } = { BESIDE, BOTS_STAGE }
 
 type Area = Config.Area
 type Key = Player | Volt.Bot
+type Rate = { perSecond: number, burst: number }
 
 -- How a spawn's bots move, as the botSpawn event names it
 type Behavior = "Idle" | "Walk" | "Sprint"
@@ -360,14 +360,16 @@ local function build(player: Player, area: Area, count: number, behavior: Behavi
 		local at: CFrame? = groundIn(area, own, params)
 
 		if at then
-			local added: boolean, problem: any = pcall(Fleet.add, {
+			local plan: Fleet.Plan = {
 				name = `PanelBot{Spawned}`,
 				group = GROUP,
 				at = at,
 				steer = steerOf(behavior, area, own, shared),
 				faults = nil,
 				seed = Spawned,
-			})
+			}
+
+			local added: boolean, problem: any = pcall(Fleet.add, plan)
 
 			if added then
 				Made += 1

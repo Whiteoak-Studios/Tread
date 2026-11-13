@@ -1,6 +1,7 @@
 --[[
-    The parallel probe's arithmetic: one worker count's batches measured by
-    nearest rank into its line, and the closing line over every count
+    ParallelProbe's arithmetic: one worker count's batches measured by
+    nearest rank into its line, and the closing line over every count, with
+    the rank and the worker count's noun ParallelReturn's lines use too
 --]]
 
 --!strict
@@ -37,7 +38,7 @@ export type Measured = {
 local Summary = {}
 
 -- The value a share of the samples are at or under, by nearest rank, 0 for none. It sorts the list in place
-local function rank(samples: { number }, share: number): number
+function Summary.rank(samples: { number }, share: number): number
 	if #samples == 0 then
 		return 0
 	end
@@ -48,7 +49,7 @@ local function rank(samples: { number }, share: number): number
 end
 
 -- A worker count with its noun, "1 worker" or "8 workers"
-local function named(workers: number): string
+function Summary.named(workers: number): string
 	local noun: string = workers == 1 and "worker" or "workers"
 
 	return `{workers} {noun}`
@@ -100,11 +101,11 @@ function Summary.measure(workers: number, repeats: number, batches: { Batch }): 
 		workers = workers,
 		repeats = repeats,
 		batches = #batches,
-		wall = rank(walls, P50),
-		wallHigh = rank(walls, P95),
-		start = rank(starts, P50),
-		busy = rank(busy, P50),
-		parallelism = rank(parallel, P50),
+		wall = Summary.rank(walls, P50),
+		wallHigh = Summary.rank(walls, P95),
+		start = Summary.rank(starts, P50),
+		busy = Summary.rank(busy, P50),
+		parallelism = Summary.rank(parallel, P50),
 		byNext = byNext,
 		early = early,
 	}
@@ -112,7 +113,7 @@ end
 
 -- One worker count's line, its times in ms
 function Summary.line(measured: Measured): string
-	local head: string = `{PREFIX} {named(measured.workers)}: {measured.batches} of {measured.repeats} batches`
+	local head: string = `{PREFIX} {Summary.named(measured.workers)}: {measured.batches} of {measured.repeats} batches`
 	local times: string = string.format(
 		"wall p50 %.3f ms p95 %.3f ms, start p50 %.3f ms, busy sum p50 %.3f ms",
 		measured.wall * MILLISECONDS,
@@ -134,7 +135,7 @@ end
 --]]
 
 function Summary.close(serial: { number }, passes: number, counts: { Measured }): string
-	local serialMs: string = string.format("%.3f", rank(table.clone(serial), P50) * MILLISECONDS)
+	local serialMs: string = string.format("%.3f", Summary.rank(table.clone(serial), P50) * MILLISECONDS)
 	local baseline: string = `serial loop p50 {serialMs} ms at {passes} passes`
 
 	local peak: Measured? = nil
@@ -153,7 +154,7 @@ function Summary.close(serial: { number }, passes: number, counts: { Measured })
 
 	local peaked: string = "no batch landed at any count"
 	if peak then
-		peaked = string.format("parallelism peaked at p50 %.2f with %s", peak.parallelism, named(peak.workers))
+		peaked = string.format("parallelism peaked at p50 %.2f with %s", peak.parallelism, Summary.named(peak.workers))
 	end
 
 	local listed: string = NONE

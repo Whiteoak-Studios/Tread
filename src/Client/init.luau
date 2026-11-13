@@ -147,6 +147,11 @@ local function warnFrame(message: unknown)
 	warn(`The owner's prediction threw this frame, and the rest still drew: {debug.traceback(tostring(message), 2)}`)
 end
 
+-- Whether a value is a number that is neither infinite nor NaN
+local function finite(value: unknown): boolean
+	return type(value) == "number" and value > -math.huge and value < math.huge
+end
+
 --[[
     Tells every callback of a signal, each under its own xpcall, so one
     that throws is warned with its stack and stops neither the others nor
@@ -969,14 +974,16 @@ end
 --[[
     One rendered frame: the render clock, then the owner's tick and Move,
     the owner's own rig and its first-person copy out once its body starts, a
-    spectated target drawn from its feed, the clock and the platforms'
-    copies, then every drawn rig posed at its distance from the eye viewed,
-    a remote rider on its platform's copy, each other player outlined while
-    the client spectates, and the live players and NPCs drawn handed to the
-    owner's prediction to block against. Nothing in the walk over the drawn
-    rigs makes a table. While a playback runs, prediction, the render clock
-    and the clock still run on live data, unseen, no live rig is drawn and
-    no live body is blocked against, and the playback sets its track speed
+    spectated target drawn from its feed, the eye every getEye of the frame
+    gives, the clock and the platforms' copies, then every drawn rig posed
+    at its distance from the eye viewed, a remote one with its record's
+    head offset, a remote rider on its platform's copy, each other player
+    outlined while the client spectates, and the live players and NPCs
+    drawn handed to the owner's prediction to block against. Nothing in the
+    walk over the drawn rigs makes a table. While a playback runs,
+    prediction, the render clock and the clock still run on live data,
+    unseen, no live rig is drawn and no live body is blocked against, and
+    the playback sets its track speed
 --]]
 
 function Client._frame(self: Self, dt: number)
@@ -1024,6 +1031,7 @@ function Client._frame(self: Self, dt: number)
 
 	local rigs: Rigs.Rigs = self._rigs
 	local eye: vector = self._eye
+	local cone: number = self._limits.headCone
 	local bodies: { StepState } = self._bodies
 	table.clear(bodies)
 
@@ -1049,11 +1057,15 @@ function Client._frame(self: Self, dt: number)
 		self:_outline(slot, watching ~= nil and drawn.kind == "Player")
 
 		local state: StepState = self._states[slot]
-		local shown: boolean, pitch: number = Interpolate.pose(slot, state)
+		local shown: boolean, pitch: number, headYaw: number, headPitch: number = Interpolate.pose(slot, state)
 		if not shown or not Playback.ride(state) then
 			continue
 		end
 
+		-- The head offset turns the neck as the published eye adds it, held to the head cone as the owner's is
+		local turnYaw: number = math.rad(math.clamp(headYaw, -cone, cone))
+		local turnPitch: number = math.rad(math.clamp(headPitch, -cone, cone))
+		rigs:turn(slot, turnYaw, turnPitch)
 		rigs:pose(slot, state, vector.magnitude(state.position - eye), pitch)
 
 		if drawn.kind == "Player" or drawn.kind == "Npc" then
@@ -1066,9 +1078,11 @@ end
 --- target as its last render drew it, a spectated target's from its feed,
 --- drawn between its last two states and looking along its newest
 --- command's look, else the owner's own body as drawn this frame, or where
---- the eye was last drawn while there is none. Tread draws each frame in a
---- render step just ahead of Camera priority, so a camera bound at Camera
---- priority or later, or connected to PreRender, reads this frame's eye.
+--- the eye was last drawn while there is none. It gives what the frame
+--- found, with no cast of its own, so every call between two frames gives
+--- the same answer. Tread draws each frame in a render step just ahead of
+--- Camera priority, so a camera bound at Camera priority or later, or
+--- connected to PreRender, reads this frame's eye.
 --- @method getEye
 --- @within Client
 --- @return Vector3 -- The cleared eye
@@ -1082,11 +1096,39 @@ function Client.getEye(self: Self): (Vector3, Vector3)
 		return Engine.toVector3(eye), Engine.toVector3(look)
 	end
 
-	if self:_view() == nil and Predict.state() then
-		self._eye, self._look = Predict.eye()
+	return Engine.toVector3(self._eye), Engine.toVector3(self._look)
+end
+
+--- Kicks another character's drawn rig with a cosmetic recoil, as for each
+--- of its gunshots the game hears: the pitch and yaw are added to the
+--- rig's drawn aim within lod.aim and ease back to nothing over the
+--- duration, and a kick landing on one still easing adds to it. Nothing is
+--- sent, so the kick reaches no other client and no hit test. It does
+--- nothing for a slot with no rig drawn or for the local player's own,
+--- and errors on a value that is not a finite number or a duration not
+--- above 0.
+--- @method kick
+--- @within Client
+--- @param slot Slot -- The character's slot, as the spawn handed it
+--- @param pitch number -- Radians, up positive
+--- @param yaw number -- Radians off its facing, turning as a facing does
+--- @param duration number -- Seconds it eases back over
+
+function Client.kick(self: Self, slot: Slot, pitch: number, yaw: number, duration: number)
+	if type(slot) ~= "table" then
+		error(`client:kick takes the Slot a spawn handed, not a {typeof(slot)}`, 2)
+	elseif not (finite(pitch) and finite(yaw) and finite(duration)) then
+		error(`client:kick takes a finite pitch, yaw and duration, not {pitch}, {yaw} and {duration}`, 2)
+	elseif duration <= 0 then
+		error(`client:kick takes a duration above 0 seconds, not {duration}`, 2)
 	end
 
-	return Engine.toVector3(self._eye), Engine.toVector3(self._look)
+	-- A table naming the slot that its spawn didn't hand, as from a life before, finds no rig of its own, and the pool
+	-- refuses a rig out of Workspace and the local player's own
+	local id: number = slot.id
+	if self._rigged[id] == slot then
+		self._rigs:kick(id, pitch, yaw, duration)
+	end
 end
 
 --- The local character's state as drawn this frame, the same table until
@@ -1393,9 +1435,10 @@ end
 
 --- @class Client
 --- The client handle a game holds once Tread's client has started: the
---- eye, the state, the render time and distance, where a mantle would
---- end, the local player's own body on their screen, ladders, platforms,
---- a moderator's clips and the client's signals.
+--- eye, other characters' recoil kicks, the state, the render time and
+--- distance, where a mantle would end, the local player's own body on
+--- their screen, ladders, platforms, a moderator's clips and the client's
+--- signals.
 
 export type Client = Self
 type Self = typeof(setmetatable({} :: Fields, Client))

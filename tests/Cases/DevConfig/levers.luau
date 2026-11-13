@@ -11,7 +11,11 @@ local roblox: any = require("@lune/roblox") -- Its typedefs leave out the dataty
 
 local CONFIG: string = "dev/Server/Config/Tread.luau"
 local ATTRIBUTE: string = "TreadLeversOff"
-local OCCLUDERS: { string } = { "TestContent", "CityBlock", "Occluders" } -- The folders the settings take from Workspace
+-- The folders the settings take from Workspace, each a path below it
+local OCCLUDERS: { { string } } = {
+	{ "TestContent", "CityBlock", "Occluders" },
+	{ "TestContent", "Monuments", "Occluders" },
+}
 local OUT_OF_VIEW: { [string]: number } = { rate = 5, cone = 70, radius = 40 } -- Hz, degrees and studs
 
 return function (): (boolean, string | nil)
@@ -19,12 +23,18 @@ return function (): (boolean, string | nil)
 	local workspace: any = place.game:GetService("Workspace")
 	local Config: any = place.tread("Config")
 
-	local parent: any = workspace
-	for _, name: string in OCCLUDERS do
-		local folder: any = roblox.Instance.new("Folder")
-		folder.Name = name
-		folder.Parent = parent
-		parent = folder
+	for _, path: { string } in OCCLUDERS do
+		local parent: any = workspace
+		for _, name: string in path do
+			local folder: any = parent:FindFirstChild(name)
+			if not folder then
+				folder = roblox.Instance.new("Folder")
+				folder.Name = name
+				folder.Parent = parent
+			end
+
+			parent = folder
+		end
 	end
 
 	local absent: { [string]: any } = place.load(CONFIG)

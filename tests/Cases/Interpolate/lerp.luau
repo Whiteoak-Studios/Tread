@@ -1,7 +1,7 @@
 --[[
     Every value a pose draws between two records comes from Math.lerp, from
     the older sample's value to the newer's at the render time's fraction:
-    the position's axes, yaw, lean and pitch, six calls and no others
+    the position's axes, yaw, lean, pitch and head offset, eight and no others
 --]]
 
 --!strict
@@ -70,8 +70,8 @@ return function (): (boolean, string | nil)
 
 	if not drawn then
 		return false, "The slot drew nothing between its two records"
-	elseif #calls ~= 6 then
-		return false, `One pose made {#calls} lerp calls, not one for each of its six values`
+	elseif #calls ~= 8 then
+		return false, `One pose made {#calls} lerp calls, not one for each of its eight values`
 	end
 
 	for index: number, call: Call in calls do
@@ -80,7 +80,8 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- In the order the pose makes them: yaw in the record's whole steps of a turn, X, Y, Z, lean, pitch
+	-- In the order the pose makes them: yaw in the record's whole steps of a turn, X, Y, Z, lean, pitch, and the
+	-- head offset's yaw and pitch, none while the record's last byte holds its lean
 	local yawSteps: number = viewer.Constants.ANGLE_STEPS / (2 * math.pi)
 	local olderPitch: number = 40 / (PITCH_STEPS / (math.pi / 2))
 	local newerPitch: number = 80 / (PITCH_STEPS / (math.pi / 2))
@@ -91,6 +92,8 @@ return function (): (boolean, string | nil)
 		{ -4, -6 },
 		{ 32 * lean / LEAN_STEPS, 64 * lean / LEAN_STEPS },
 		{ olderPitch, newerPitch },
+		{ 0, 0 },
+		{ 0, 0 },
 	}
 
 	for index: number, pair: { number } in ends do

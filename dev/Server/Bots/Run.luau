@@ -1,7 +1,7 @@
 --[[
     One of the bot harness's scenarios on the dev game's server, seed by
-    seed: its floors, bots, NPCs and sleepers laid out, a warm-up, a window
-    of Tread's stats and the server's frames, and all it made removed after
+    seed after any calibration: its bodies laid out at any render distance,
+    a warm-up, a window of Tread's stats and frames, and all of it undone
 --]]
 
 --!strict
@@ -18,9 +18,11 @@ local Tread = require(Packages.Tread)
 local Volt = require(Packages.Volt)
 
 local Command = require(Packages.Tread.Codec.Command)
+local Relay = require(Packages.Tread.Server.Relay)
 local Tick = require(Packages.Tread.Server.Tick)
 
 local Bot = require(ServerScriptService.Server.Bots.Bot)
+local Calibration = require(ServerScriptService.Server.Calibration)
 local Config = require(ServerScriptService.Server.Bots.Config)
 local Fleet = require(ServerScriptService.Server.Bots.Fleet)
 local Game = require(ServerScriptService.Server.Game)
@@ -32,6 +34,7 @@ local PERCENTILES: { number } = require(ServerScriptService.Server.Bots.Config).
 local FPS: number = require(ServerScriptService.Server.Bots.Config).fps
 local TICK_STAGES: { string } = require(ServerScriptService.Server.Bots.Config).tick.stages
 local BESIDE: string = require(ServerScriptService.Server.Bots.Config).tick.beside
+local COUNTS: { string } = require(ServerScriptService.Server.Bots.Config).tick.counts
 local MOVED: number = require(ServerScriptService.Server.Bots.Config).moved
 local EVERY: number = require(ServerScriptService.Server.Bots.Config).cheats.every
 local HOLDS: { number } = require(ServerScriptService.Server.Bots.Config).cheats.holds
@@ -40,12 +43,14 @@ local DROPS: number = require(ServerScriptService.Server.Bots.Config).cheats.dro
 local FREEZE: number = require(ServerScriptService.Server.Bots.Config).cheats.freeze
 local BATCH: number = require(ServerScriptService.Server.Bots.Config).spawn.batch
 local LIFT: number = require(ServerScriptService.Server.Bots.Config).spawn.lift
+local TRIES: number = require(ServerScriptService.Server.Bots.Config).spawn.tries
 local PROBE: number = require(ServerScriptService.Server.Bots.Config).spawn.probe
 local THICKNESS: number = require(ServerScriptService.Server.Bots.Config).spawn.thickness
 local TILE: number = require(ServerScriptService.Server.Bots.Config).spawn.tile
 local SINK: number = require(ServerScriptService.Server.Bots.Config).spawn.sink
 local MARGIN: number = require(ServerScriptService.Server.Bots.Config).spawn.margin
 local SEED_BOUND: number = 2 ^ 31 - 2 -- The largest seed a bot's own generator is drawn
+local APART: number = 16807 -- Scales a spawn's redraw seed off the stream every bot's own generator walks
 local TURN: number = 2 * math.pi
 local MILLISECONDS: number = 1000 -- A second's, which stage times print in
 local PERCENT: number = 100 -- Turns a share into the number a pNN label shows
@@ -106,6 +111,7 @@ type Made = {
 	stopDriver: (() -> ())?, -- Takes the NPCs' driver off the bots' stage
 	beats: RBXScriptConnection?, -- The window's Heartbeat samples while it runs
 	probing: Probe?, -- The probe while it is started and not yet stopped
+	viewers: { Player }, -- The real players it set a render distance for, put back after
 }
 
 local Run = {}
@@ -139,6 +145,16 @@ local function castParams(testContent: Instance): RaycastParams
 	local params: RaycastParams = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Include
 	params.FilterDescendantsInstances = { testContent, Workspace.Terrain }
+	params.RespectCanCollide = true
+
+	return params
+end
+
+-- What a spawn's hull is tested against in the dev game's collision, the test content's colliding parts alone
+local function overlapParams(testContent: Instance): OverlapParams
+	local params: OverlapParams = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { testContent }
 	params.RespectCanCollide = true
 
 	return params
@@ -228,14 +244,46 @@ local function layFloors(
 	return folder, floored
 end
 
--- A seeded point of an area, on the ground there or at the area's height over nothing, facing a seeded way
-local function spawnPoint(area: Area, own: Seeded.Seeded, params: RaycastParams): CFrame
-	local x: number = area.center.X + own:number(-area.size.X / 2, area.size.X / 2)
-	local z: number = area.center.Z + own:number(-area.size.Y / 2, area.size.Y / 2)
-	local y: number = groundAt(x, z, area.center.Y, params) or area.center.Y
-	local yaw: number = own:number(0, TURN)
+--[[
+    A seeded point of an area, on the ground there or at the area's height
+    over nothing, facing a seeded way. Given a hull, it is drawn again while
+    that hull standing there meets a part's bounds or a body, and the last
+    of the configured tries is kept
+--]]
 
-	return CFrame.new(x, y + LIFT, z) * CFrame.Angles(0, yaw, 0)
+local function spawnPoint(
+	area: Area,
+	own: Seeded.Seeded,
+	params: RaycastParams,
+	hull: Vector3?,
+	overlap: OverlapParams
+): CFrame
+	local server: Tread.Server = Game.get()
+	local draws: Seeded.Seeded = own
+	local at: CFrame = CFrame.identity
+
+	for try: number = 1, TRIES do
+		local x: number = area.center.X + draws:number(-area.size.X / 2, area.size.X / 2)
+		local z: number = area.center.Z + draws:number(-area.size.Y / 2, area.size.Y / 2)
+		local y: number = (groundAt(x, z, area.center.Y, params) or area.center.Y) + LIFT
+		at = CFrame.new(x, y, z) * CFrame.Angles(0, draws:number(0, TURN), 0)
+
+		if not hull then
+			break
+		end
+
+		local center: CFrame = CFrame.new(x, y + hull.Y / 2, z)
+		if not server:overlaps(center, hull) and #Workspace:GetPartBoundsInBox(center, hull, overlap) == 0 then
+			break
+		end
+
+		-- A bot's own seed is the run generator's state, so its own next draws are later bots' spawns
+		if try == 1 then
+			draws = Seeded.new(own:integer(1, SEED_BOUND) * APART)
+		end
+	end
+
+	return at
 end
 
 -- Seconds as ticks, at least one
@@ -348,13 +396,25 @@ end
     Builds every group's bodies in order from the run's one seeded
     generator, each with a generator of its own, so a seed puts each body
     at the same start and gives it the same path and the same faults, a
-    batch a frame. A bot takes its group's team and any spectate
+    batch a frame. A bot or an NPC whose standing hull would meet test
+    content or a body already built draws its spawn again from a generator
+    its own seeds, which draws no other body's numbers. A bot takes its
+    group's team and any spectate
 --]]
 
-local function spawnAll(scenario: Scenario, seeded: Seeded.Seeded, offset: Vector3, made: Made, params: RaycastParams)
+local function spawnAll(
+	scenario: Scenario,
+	seeded: Seeded.Seeded,
+	offset: Vector3,
+	made: Made,
+	params: RaycastParams,
+	overlap: OverlapParams
+)
 	local context: Bot.Context = Fleet.start()
 	local server: Tread.Server, shared: Tread.Shared = Game.get()
 	local built: { [string]: { Fleet.Entry } } = {} -- Each bot group's entries in build order, for a spectate to watch
+	local width: number = 2 * shared.step.radius
+	local standing: Vector3 = Vector3.new(width, shared.step.standing, width)
 	local index: number = 0
 
 	for _, group: Group in scenario.groups do
@@ -363,6 +423,12 @@ local function spawnAll(scenario: Scenario, seeded: Seeded.Seeded, offset: Vecto
 		local speed: number = shared.step.walk
 		local entries: { Fleet.Entry } = {}
 		built[group.name] = entries
+
+		-- A sleeper's lying body blocks no one, so it keeps its first draw
+		local hull: Vector3? = standing
+		if group.kind == "sleeper" then
+			hull = nil
+		end
 
 		if group.crouch then
 			speed = shared.step.crouch
@@ -382,7 +448,7 @@ local function spawnAll(scenario: Scenario, seeded: Seeded.Seeded, offset: Vecto
 			index += 1
 
 			local own: Seeded.Seeded = Seeded.new(seeded:integer(1, SEED_BOUND))
-			local at: CFrame = spawnPoint(spawn, own, params)
+			local at: CFrame = spawnPoint(spawn, own, params, hull, overlap)
 
 			if group.kind == "npc" then
 				addNpc(group, at, roam, own, gait, made)
@@ -424,6 +490,52 @@ local function spawnAll(scenario: Scenario, seeded: Seeded.Seeded, offset: Vecto
 	end
 end
 
+--[[
+    Sets every viewer to a render distance as its client would, none when
+    it is nil: each bot's own client side sends it over View, and each real
+    player with a character is set on the path View's listener runs
+--]]
+
+local function setViewers(distance: number?, made: Made)
+	if not distance then
+		return
+	end
+
+	for _, entry: Fleet.Entry in Fleet.entries() do
+		entry.bot:view(distance)
+	end
+
+	for _, player: Player in Players:GetPlayers() do
+		if Game.characterOf(player) and not table.find(made.viewers, player) then
+			Relay.setDistance(player, distance)
+			table.insert(made.viewers, player)
+		end
+	end
+end
+
+--[[
+    Puts each real player the run set, and still in, back at the server's
+    radius, what a client has before its first View and what the dev
+    client's desktop draw distance sends. A bot's view goes with the bot
+--]]
+
+local function restoreViewers(made: Made, problems: { string })
+	local _, _, settings: Tread.ServerSettings = Game.get()
+
+	-- Whiteoak TODO: put each player back to the distance its client last sent once Tread's relay gives a viewer's
+	-- distance; until then a client set shorter, such as a phone or the dev place's render key, is sent the radius
+	for _, player: Player in made.viewers do
+		if player.Parent == nil then
+			continue
+		end
+
+		local restored: boolean, failure: any = pcall(Relay.setDistance, player, settings.relevancy.leave)
+		if not restored then
+			table.insert(problems, `{player.Name}'s render distance was not put back: {failure}`)
+		end
+	end
+end
+
 -- Steers an awake NPC by its program from where its body stands, as a bot's client side steers from its OwnerState
 local function steerNpc(driven: Driven, tick: number)
 	local steer: Programs.Steer? = driven.steer
@@ -448,11 +560,19 @@ end
 
 --[[
     The line a seed's warm-up starts on: the real players in, the relay's
-    two levers as the running server's settings hold them, the floors laid,
-    the NPCs awake and the sleepers made of those its groups ask for
+    two levers as the running server's settings hold them, any render
+    distance every viewer was set to, the floors laid, the NPCs awake and
+    the sleepers made of those its groups ask for
 --]]
 
-local function startLine(label: string, scenario: Scenario, offset: Vector3, floored: number, made: Made): string
+local function startLine(
+	label: string,
+	scenario: Scenario,
+	offset: Vector3,
+	floored: number,
+	made: Made,
+	distance: number?
+): string
 	local server: Tread.Server, _, settings: Tread.ServerSettings = Game.get()
 	local relay: { read changes: boolean? }? = settings.relay
 	local asked: number = 0
@@ -465,6 +585,10 @@ local function startLine(label: string, scenario: Scenario, offset: Vector3, flo
 
 	local real: string = `{#Players:GetPlayers()} real players in`
 	local levers: string = `outOfView {onOff(settings.tiers.outOfView)}, changes {onOff(relay and relay.changes)}`
+	if distance then
+		levers = `{levers}, every viewer's render distance {distance} studs`
+	end
+
 	local bodies: string =
 		`{floored} floors laid, {server:stats().npcs} NPCs awake, {#made.sleepers} sleepers made of {asked}`
 
@@ -552,19 +676,30 @@ local function tickLine(label: string, totals: { number }, samples: Samples): st
 	return table.concat(parts, SEPARATOR)
 end
 
+-- The configured counts a tick over the window, each read's change over the ticks that read ran
+local function countsLine(label: string, perTick: Samples): string
+	local parts: { string } = {}
+	for _, name: string in COUNTS do
+		table.insert(parts, `{name} {spread(perTick[name] or {}, FIGURE)}`)
+	end
+
+	return `{label} counts a tick, p50/p95/p99 over the reads: {table.concat(parts, SEPARATOR)}`
+end
+
 --[[
     The window: Tread's stats read once each interval with the real player
     count and each real player's bytes over the last second beside it, each
-    read printed as it comes, the server's frames and every tick's summed
-    stages taken beside, their two lines printed after, and the percentiles
-    of every stats figure, with every figure's samples. It ends on its own
-    deadline
+    read printed as it comes, the server's frames, every tick's summed
+    stages and the counts a tick taken beside, their lines printed after,
+    and the percentiles of every stats figure, with every figure's samples.
+    It ends on its own deadline
 --]]
 
 local function window(label: string, scenario: Scenario, timing: Timing, made: Made): (string, Samples)
 	local server: Tread.Server = Game.get()
 	local Network = require(Packages.Tread.Network.Server) -- Tread's own scope, which each viewer's bytes are counted on
 	local samples: Samples = {}
+	local perTick: Samples = {}
 	local sampled: Sampled = { frames = {}, heartbeatTimes = {}, physicsTimes = {}, dataSend = {} }
 	local totals: { number } = {}
 	local counted: number = Tick.counts()
@@ -607,6 +742,17 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 			push(samples, `{name}P95Ms`, times.p95 * MILLISECONDS)
 		end
 
+		-- A read whose ticks all dropped ran none to count over
+		local ticks: any = stats.ticks
+		if type(ticks) == "number" and ticks > 0 then
+			for _, name: string in COUNTS do
+				local count: any = stats[name]
+				if type(count) == "number" then
+					push(perTick, name, count / ticks)
+				end
+			end
+		end
+
 		-- The ticks run since the last read, each one's stages summed from their rings
 		local ran: number = Tick.counts()
 		for _, total: number in Run.tickTotals(Tick.stages(), ran - counted) do
@@ -633,6 +779,7 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 
 	print(serverLine(label, sampled, elapsed))
 	print(tickLine(label, totals, samples))
+	print(countsLine(label, perTick))
 
 	return `{label} summary over {second} reads, p50/p95/p99: {summary(samples)}`, samples
 end
@@ -814,12 +961,21 @@ local function removeAll(server: Tread.Server, made: Made, problems: { string })
 end
 
 --[[
-    One seeded run: the layout, the warm-up, the window with any probe
-    beside it, and then the removal of everything it made, checked against
-    what the handle lists. A probe that started is stopped whatever happened
+    One seeded run: the layout with every viewer at any render distance
+    given, the warm-up, the window with any probe beside it, and then the
+    removal of everything it made, checked against what the handle lists,
+    and the real players put back. A probe that started is stopped whatever
+    happened
 --]]
 
-local function runSeed(name: string, scenario: Scenario, seed: number, timing: Timing, probe: Probe?): (boolean, string)
+local function runSeed(
+	name: string,
+	scenario: Scenario,
+	seed: number,
+	timing: Timing,
+	probe: Probe?,
+	distance: number?
+): (boolean, string)
 	local label: string = `Bots {name} seed {seed}`
 	local server: Tread.Server = Game.get()
 	local testContent: Instance? = Workspace:FindFirstChild("TestContent")
@@ -830,6 +986,7 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 	end
 
 	local params: RaycastParams = castParams(testContent)
+	local overlap: OverlapParams = overlapParams(testContent)
 	local seeded: Seeded.Seeded = Seeded.new(seed)
 	local offset: Vector3 = Vector3.zero
 	if scenario.follow then
@@ -846,6 +1003,7 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 		stopDriver = nil,
 		beats = nil,
 		probing = nil,
+		viewers = {},
 	}
 
 	local problems: { string } = {}
@@ -875,10 +1033,11 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 		made.floors = folder
 
 		if not scenario.storm then
-			spawnAll(scenario, seeded, offset, made, params)
+			spawnAll(scenario, seeded, offset, made, params, overlap)
+			setViewers(distance, made)
 		end
 
-		print(startLine(label, scenario, offset, floored, made))
+		print(startLine(label, scenario, offset, floored, made, distance))
 		task.wait(timing.warmup)
 
 		-- The read the window's first change counts from
@@ -890,7 +1049,8 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 		end
 
 		if scenario.storm then
-			spawnAll(scenario, seeded, offset, made, params)
+			spawnAll(scenario, seeded, offset, made, params, overlap)
+			setViewers(distance, made)
 		end
 
 		local line: string, samples: Samples = window(label, scenario, timing, made)
@@ -929,6 +1089,7 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 		stopReports()
 	end
 
+	restoreViewers(made, problems)
 	removeAll(server, made, problems)
 
 	local floors: Folder? = made.floors
@@ -944,23 +1105,38 @@ local function runSeed(name: string, scenario: Scenario, seed: number, timing: T
 end
 
 --[[
-    Runs a scenario for each of the timing's seeds in turn, a probe beside
-    each window when one is given, and gives whether every run drove and
+    Runs a scenario for each of the timing's seeds in turn, after the
+    server's speed calibration, a probe beside each window and every viewer
+    at a render distance when given, and gives whether every run drove and
     cleaned up, with a line for each. Every read, summary and probe's line
-    prints as it comes, for a run longer than one call
+    prints as it comes
 --]]
 
-function Run.run(name: string, timing: Timing, probe: Probe?): (boolean, string)
+function Run.run(name: string, timing: Timing, probe: Probe?, distance: number?): (boolean, string)
 	local scenario: Scenario? = SCENARIOS[name]
 	if not scenario then
 		return false, `Bots {name}: no scenario has that name`
 	end
 
+	-- A run at a render distance is named for it too, in one word, so the report still drops its per-second lines
+	local run: string = name
+	if distance then
+		run = `{name}@{distance}`
+	end
+
+	-- Before the first load, so it times nothing a load does
+	local calibrated: boolean, calibration: string = Calibration.run()
+	if not calibrated then
+		return false, `Bots {run}: {calibration}`
+	end
+
+	print(`Bots {run} calibration: {calibration}`)
+
 	local passed: boolean = true
 	local lines: { string } = {}
 
 	for _, seed: number in timing.seeds do
-		local ok: boolean, line: string = runSeed(name, scenario, seed, timing, probe)
+		local ok: boolean, line: string = runSeed(run, scenario, seed, timing, probe, distance)
 		passed = passed and ok
 		table.insert(lines, line)
 	end

@@ -15,6 +15,7 @@ local Animate = require(script.Animate)
 local Config = require(script.Parent.Parent.Config)
 local Constants = require(script.Parent.Parent.Constants)
 local FirstPerson = require(script.FirstPerson)
+local Math = require(script.Parent.Parent.Step.Math)
 local Ragdoll = require(script.Ragdoll)
 local State = require(script.Parent.Parent.Step.State)
 
@@ -83,6 +84,9 @@ export type Settings = {
 
 export type Marker = (slot: number, marker: string, value: string) -> ()
 
+-- One cosmetic recoil kick on a drawn rig's aim, in radians, eased out over its seconds from its os.clock start
+type Kick = { pitch: number, yaw: number, started: number, duration: number }
+
 type Entry = {
 	rig: Model,
 	root: BasePart,
@@ -95,6 +99,9 @@ type Entry = {
 	facing: number,
 	animated: Animated?, -- Its tracks, from its first draw until it ragdolls
 	body: Ragdoll.Body?, -- Its ragdoll, once it dies
+	kicks: { Kick }, -- The recoil kicks on its aim, still easing or not yet dropped
+	headYaw: number, -- Its head offset, radians, as turn last gave it
+	headPitch: number,
 }
 
 type Fields = {
@@ -248,12 +255,49 @@ local function restyle(settings: Settings, rig: Model, outfit: Outfit, copy: boo
 	settings.dress(rig, outfit, copy)
 end
 
--- The aim and lean layer and the planted legs of one rig, if it is drawn
+-- The aim, lean and head layer and the planted legs of one rig, if it is drawn
 local function layer(entry: Entry)
 	local animated: Animated? = entry.animated
 	if animated and entry.drawn then
 		Animate.layer(animated)
 	end
+end
+
+--[[
+    The recoil a rig's kicks put on its aim now, in radians of pitch and
+    yaw: each eased from its whole size to nothing over its duration through
+    the one lerp, summed, with each one past its duration dropped
+--]]
+
+local function recoil(kicks: { Kick }): (number, number)
+	if #kicks == 0 then
+		return 0, 0
+	end
+
+	local now: number = os.clock()
+	local pitch: number = 0
+	local yaw: number = 0
+
+	for index: number = #kicks, 1, -1 do
+		local kick: Kick = kicks[index]
+		local eased: number = (now - kick.started) / kick.duration
+
+		if eased >= 1 then
+			table.remove(kicks, index)
+		else
+			pitch += Math.lerp(kick.pitch, 0, eased)
+			yaw += Math.lerp(kick.yaw, 0, eased)
+		end
+	end
+
+	return pitch, yaw
+end
+
+-- Takes every kick and the head offset off a rig, as a body or a pooled rig holds none
+local function settle(entry: Entry)
+	table.clear(entry.kicks)
+	entry.headYaw = 0
+	entry.headPitch = 0
 end
 
 --[[
@@ -438,6 +482,9 @@ function Rigs._build(self: Self): Entry
 		facing = 0,
 		animated = nil,
 		body = nil,
+		kicks = {},
+		headYaw = 0,
+		headPitch = 0,
 	}
 	table.insert(self._rigs, entry)
 
@@ -559,6 +606,7 @@ function Rigs._put(self: Self, entry: Entry)
 		entry.holding = false
 	end
 	settings.undress(entry.rig)
+	settle(entry)
 
 	local body: Ragdoll.Body? = entry.body
 	if body then
@@ -590,14 +638,15 @@ end
 --[[
     Poses a slot's rig from a step state at its distance from the viewer:
     out of Workspace past the draw distance, and inside it placed by its
-    root, playing the state's track, with its lean, its aim within lod.aim,
-    full detail within lod.full and its feet planted within lod.footIk. A
+    root, playing the state's track, with its lean, its aim and the recoil
+    kicks still easing on it within lod.aim, full detail and its head
+    offset within lod.full and its feet planted within lod.footIk. A
     ragdoll is left to its physics. The local player's own first-person
     copy is posed from the same state firstPerson.back studs behind where
     its world rig stands, along its facing, at full detail, leaning with no
     aim pitch. Past a rig's first draw it makes no table, closure or string;
-    a move, a new aim or lean and a planted foot's cast make the engine's
-    own CFrames and results
+    a move, a new aim, lean or head offset and a planted foot's cast make
+    the engine's own CFrames and results
 
     @ distance | studs from the viewer's eye to the rig
     @ pitch | the character's aim pitch, radians, up positive
@@ -682,10 +731,61 @@ function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pi
 		collision = world.collision
 	end
 
+	-- The aim, with the kicks still easing on it, shows within lod.aim and the head offset within lod.full
+	local aimPitch: number = 0
+	local aimYaw: number = 0
+	if distance <= lod.aim then
+		local kickPitch: number, kickYaw: number = recoil(entry.kicks)
+		aimPitch = pitch + kickPitch
+		aimYaw = kickYaw
+	end
+
+	local turnYaw: number = 0
+	local turnPitch: number = 0
+	if full then
+		turnYaw = entry.headYaw
+		turnPitch = entry.headPitch
+	end
+
 	Animate.detail(animated, full)
 	Animate.pose(animated, state, full, self._speed)
-	Animate.aim(animated, distance <= lod.aim and pitch or 0, state.lean)
+	Animate.aim(animated, aimPitch, state.lean, aimYaw, turnYaw, turnPitch)
 	Animate.plant(animated, entry.root, position.y, self._rootHeight, collision, planting, moved)
+end
+
+--[[
+    Kicks a slot's drawn rig with a cosmetic recoil: the pitch and yaw join
+    its drawn aim from its next pose and ease back to nothing over the
+    duration, a kick on one still easing adding to it. A rig out of
+    Workspace, a ragdoll and the local player's own take none
+
+    @ yaw | radians off the facing, turning as a facing does
+    @ duration | seconds, which the client handle has checked are above 0
+--]]
+
+function Rigs.kick(self: Self, slot: number, pitch: number, yaw: number, duration: number)
+	local entry: Entry = self:_entry(slot, "kick")
+	if not entry.drawn or entry.body or slot == self._own then
+		return
+	end
+
+	-- The kicks eased out go first, so a rig kicked while it is not posed holds only those still easing
+	recoil(entry.kicks)
+	table.insert(entry.kicks, { pitch = pitch, yaw = yaw, started = os.clock(), duration = duration })
+end
+
+--[[
+    Turns a slot's rig's head by its head offset on top of its aim, drawn
+    within lod.full from its next pose, a yaw and pitch of 0 for none
+
+    @ headYaw | radians, already held to the head cone, turning as a facing
+    does, and then the pitch, up positive
+--]]
+
+function Rigs.turn(self: Self, slot: number, headYaw: number, headPitch: number)
+	local entry: Entry = self:_entry(slot, "turn")
+	entry.headYaw = headYaw
+	entry.headPitch = headPitch
 end
 
 --[[
@@ -765,7 +865,7 @@ function Rigs._read(self: Self, id: string, animation: Animation)
 	end)
 end
 
--- The aim and lean layer and the planted legs of every drawn rig, the copy's included, at each simulation step
+-- The aim, lean and head layer and the planted legs of every drawn rig, the copy's included, at each simulation step
 function Rigs._layer(self: Self)
 	for _, entry: Entry in self._slots do
 		layer(entry)
@@ -870,7 +970,7 @@ end
 
 --[[
     Keys a dying slot's rig to its body's slot, a body no longer the local
-    player's own, the spectated target or outlined
+    player's own, the spectated target or outlined, with no kick or head offset
 --]]
 
 function Rigs._rekey(self: Self, entry: Entry, slot: number, body: number)
@@ -891,6 +991,7 @@ function Rigs._rekey(self: Self, entry: Entry, slot: number, body: number)
 	self._slots[slot] = nil
 	self._slots[body] = entry
 	entry.slot = body
+	settle(entry)
 end
 
 --[[

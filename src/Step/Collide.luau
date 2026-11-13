@@ -8,6 +8,7 @@
 --!native
 local Constants = require(script.Parent.Parent.Constants)
 local Hulls = require(script.Parent.Hulls)
+local Math = require(script.Parent.Math)
 local State = require(script.Parent.State)
 
 local SKIN: number = Constants.SKIN
@@ -399,20 +400,28 @@ function Collide.clear(center: vector, size: vector, world: World): boolean
 	return true
 end
 
--- Whether a body's hull is clear with its feet at x, y, z, of the world and of the other live hulls, leaving it there
-local function settles(state: State, world: World, size: vector, half: number, x: number, y: number, z: number): boolean
-	state.position = vector.create(x, y, z)
+--[[
+    Whether a body's hull is clear, of the world and of the other live hulls,
+    with its feet at x, y, z rounded to the quantum, leaving it there. The
+    rounded spot is tested, since the end-of-step rounding would otherwise
+    carry a hull beside a face turned off the axes back into it
+--]]
 
-	return Collide.clear(vector.create(x, y + half, z), size, world) and not Hulls.block(state, world)
+local function settles(state: State, world: World, size: vector, half: number, x: number, y: number, z: number): boolean
+	local feet: vector = vector.create(Math.quantize(x), Math.quantize(y), Math.quantize(z))
+	state.position = feet
+
+	return Collide.clear(vector.create(feet.x, feet.y + half, feet.z), size, world) and not Hulls.block(state, world)
 end
 
 --[[
-    Finds a body inside geometry and moves it to the first clear spot: up by
-    how far it sank, then at each growing distance up, along the four axes
-    and along the four diagonals. The rest height is checked every time,
-    and the exact overlap query when exact is set. Gives back nil when the
-    body is clear or was moved clear, and when no spot is clear, leaves it
-    where it was and gives how far it sank, 0 when it sank none
+    Finds a body inside geometry and moves it to the first clear spot on the
+    quantum: up by how far it sank, then at each growing distance up, along
+    the four axes and along the four diagonals. The rest height is checked
+    every time, and the exact overlap query when exact is set. Gives back
+    nil when the body is clear or was moved clear, and when no spot is
+    clear, leaves it where it was and gives how far it sank, 0 when it sank
+    none
 --]]
 
 function Collide.depenetrate(state: State, world: World, exact: boolean): number?

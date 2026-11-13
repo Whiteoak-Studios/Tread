@@ -2,8 +2,8 @@
     While the client spectates, the target's rig comes out at its first
     feed, dressed in its look and handed to the pool as the watched rig,
     and is drawn between its last two feed states; getEye gives the
-    target's cleared eye and its newest feed look, and the spectate's end
-    puts the rig away and gives the owner's eye back
+    target's cleared eye and its newest feed look as the frame drew them,
+    and the spectate's end puts the rig away, the next frame the owner's eye
 --]]
 
 --!strict
@@ -136,10 +136,11 @@ return function (): (boolean, string | nil)
 		return false, problem
 	end
 
-	-- 2) A second feed draws it between the two over the tick between them, and a straggler changes nothing
+	-- 2) A second feed draws it between the two over the tick between them, and a straggler changes nothing. Until
+	-- the next frame the eye stays as the last one drew it
 	local secondLook: vector = Public.look(-0.4, 0, 0, 0, shared.step.headCone)
 	feed(SECOND_AT, FEED_TICK + 1, -0.4, 0)
-	problem = eyes(FIRST_AT, secondLook)
+	problem = eyes(FIRST_AT, firstLook)
 	if problem then
 		return false, `On the second feed's arrival: {problem}`
 	end
@@ -160,13 +161,14 @@ return function (): (boolean, string | nil)
 		return false, "Later feeds took another rig out for the target"
 	end
 
-	-- 3) The spectate's end puts the target's rig away and gives the owner's eye back
+	-- 3) The spectate's end puts the target's rig away, and the next frame gives the owner's eye back
 	rig.send("Spectate", nil, END)
 	local released: any = pool.of("release")[1]
 	if released == nil or released.slot ~= TARGET then
 		return false, "The spectate's end didn't put the target's rig away"
 	end
 
+	rig.frames(1)
 	problem = owned()
 	if problem then
 		return false, `After the spectate's end: {problem}`

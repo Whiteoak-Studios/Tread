@@ -520,6 +520,8 @@ function Characters.start(context: Context)
 	local blocked: (origin: vector, direction: vector) -> boolean = Engine.occlusion(server.antiEsp.include)
 
 	local world: World = World.new(shared.step, shared.rates.simulation, collision, shared.water, shared.rules, true)
+	Hulls.createGrid(world)
+
 	local serverFields: { [string]: Entry } = {}
 	for _, entry: Entry in layout.server.entries do
 		serverFields[entry.name] = entry
@@ -553,9 +555,10 @@ function Characters.start(context: Context)
 	Teleport.start({ shared = shared, server = server }, world)
 	AntiEsp.start({ shared = shared, server = server }, world, States, blocked)
 
-	-- Connected before any game callback can be, and lives as long as the server, so a getState read in a game's
-	-- callback refills from the landed body
+	-- Connected before any game callback can be, and lives as long as the server, so a game's callback finds the
+	-- landed body filed in the hull grid, and a getState read refills from it
 	Teleport.onTeleported(function (character: Self)
+		Hulls.moved(world, States[character._slot])
 		Versions[character._slot] += 1
 		AntiEsp.moved(character._slot)
 	end)
@@ -674,6 +677,7 @@ function Characters.create(key: Key, at: CFrame): Self
 	fillBlocks(state, setup.layout)
 
 	-- Before the slot is taken, so a game collision function that throws here holds no slot
+	Hulls.refresh(world)
 	local stuck: number? = Collide.depenetrate(state, world, true)
 
 	local slot: number?, generation: number? = Slots.take("Player")
@@ -832,6 +836,9 @@ function Characters.overlaps(cframe: CFrame, size: Vector3): boolean
 	local setup: Setup = running("server:overlaps")
 	expect(cframe, "CFrame", "server:overlaps", "the box's CFrame")
 	expect(size, "Vector3", "server:overlaps", "the box's size")
+
+	-- A game's call may come from inside a step, whose body is filed again only once the step ends
+	Hulls.refresh(setup.world)
 
 	return Hulls.overlaps(Engine.box(cframe, size), setup.world)
 end
@@ -1272,6 +1279,8 @@ function Characters.decode(tick: number)
 		end
 	end
 
+	-- Filed afresh before the landings, and each landing again as it lands, so each depenetrates against the ones before
+	Hulls.refresh(world)
 	Teleport.run(tick)
 end
 
@@ -1298,6 +1307,7 @@ local function stepCharacter(character: Self, tick: number, wire: number, setup:
 	SteppingState = state
 	local speed: number, stuck: number? = Step.advance(state, command, setup.world)
 	SteppingState = nil
+	Hulls.moved(setup.world, state)
 
 	keepLook(slot, command)
 	Spectate.stepped(character.player, command)
@@ -1340,6 +1350,7 @@ function Characters.simulate(tick: number)
 	local wire: number = tick % WRAP
 	setup.world.tick = wire
 	setup.world.clock = tick
+	Hulls.refresh(setup.world)
 
 	local list: { Self } = CharacterList
 	local count: number = #list
@@ -1356,6 +1367,7 @@ function Characters.simulate(tick: number)
 				if state then
 					State.copy(Before, state)
 					SteppingState = nil
+					Hulls.moved(setup.world, state)
 				end
 
 				Reports.fire(character.player, "stage", SIMULATE)
@@ -1691,7 +1703,9 @@ function Character.setMode(self: Self, mode: MoveMode)
 	state.moveMode = mode
 
 	if previous ~= "Walk" and mode == "Walk" then
+		Hulls.refresh(setup.world)
 		local stuck: number? = Collide.depenetrate(state, setup.world, true)
+		Hulls.moved(setup.world, state)
 		Range.set(slot, state.position, self.player.Name)
 
 		if stuck then
@@ -2087,7 +2101,10 @@ function Sleeper.wake(self: SleeperSelf, key: Key): Self
 	local character: Self = enlist(key, player, slot, self._generation, state, setup)
 
 	-- The step's own depenetration runs at its next Walk step, so a game collision function that throws only warns
+	Hulls.refresh(setup.world)
 	local cleared: boolean, stuck: any = pcall(Collide.depenetrate, state, setup.world, true)
+	Hulls.moved(setup.world, state)
+
 	if not cleared then
 		warn(`The woken character in slot {slot} wasn't depenetrated, since the collision threw: {stuck}`)
 	elseif stuck then

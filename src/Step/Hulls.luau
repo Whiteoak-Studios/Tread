@@ -1,7 +1,7 @@
 --[[
-    The hull tests between bodies: a box swept against the other live hulls,
-    whether a hull overlaps one where it stands, and an oriented box against
-    every live hull, all on the axis-aligned box the hull radius gives
+    The hull tests between bodies, a box swept against the other live hulls,
+    a hull where it stands and an oriented box, on the box the hull radius
+    gives, and the grid of hull positions a server's world keeps for them
 --]]
 
 --!strict
@@ -9,9 +9,14 @@
 local Constants = require(script.Parent.Parent.Constants)
 local State = require(script.Parent.State)
 
-local REJECT_MARGIN: number = Constants.SKIN -- Studs a sweep's bounds reach past its slab tests, far over rounding
+local REJECT_MARGIN: number = Constants.SKIN -- Studs a test's bounds reach past what it tests, far over rounding
+local SLOTS: number = Constants.SLOTS -- The most bodies a grid files, one a slot
+local CELL_WIDTHS: number = 1 -- Hull widths a grid cell spans on X and Z, so a hull's own bounds touch 2 or 3 each way
+local ACROSS: number = 64 -- Buckets along each axis the cells tile, a power of 2 so a cell's wrap is exact anywhere
+local U16_BYTES: number = 2
 
 type Box = State.Box
+type Grid = State.Grid
 type Settings = State.Settings
 type State = State.State
 type World = State.World
@@ -68,12 +73,221 @@ function Hulls.slab(gap: number, extent: number, move: number): (number, number)
 	return near, far
 end
 
+-- The bucket a body's cell is filed in, its column and row each wrapped across the buckets
+local function bucketOf(grid: Grid, state: State): number
+	local at: vector = state.position
+	local x: number, z: number = at.x, at.z
+
+	-- A value less itself is 0 only when the value is finite
+	if not (x - x == 0 and z - z == 0) then
+		error(`The hull grid files a body only at a finite position, and got {at}`)
+	end
+
+	local size: number = grid.size
+
+	return (math.floor(x / size) % ACROSS) * ACROSS + math.floor(z / size) % ACROSS
+end
+
+-- Files a place at the head of a bucket's list
+local function file(grid: Grid, place: number, bucket: number)
+	local heads: buffer = grid.heads
+	local preceding: buffer = grid.preceding
+	local first: number = buffer.readu16(heads, bucket * U16_BYTES)
+
+	buffer.writeu16(grid.following, place * U16_BYTES, first)
+	buffer.writeu16(preceding, place * U16_BYTES, 0)
+	if first ~= 0 then
+		buffer.writeu16(preceding, first * U16_BYTES, place)
+	end
+
+	buffer.writeu16(heads, bucket * U16_BYTES, place)
+	buffer.writeu16(grid.buckets, place * U16_BYTES, bucket)
+end
+
+-- Moves a filed place to the bucket its body's position lies in now, when that is another
+local function move(grid: Grid, place: number, state: State)
+	local bucket: number = bucketOf(grid, state)
+	local filed: number = buffer.readu16(grid.buckets, place * U16_BYTES)
+	if bucket == filed then
+		return
+	end
+
+	local following: buffer = grid.following
+	local preceding: buffer = grid.preceding
+	local before: number = buffer.readu16(preceding, place * U16_BYTES)
+	local after: number = buffer.readu16(following, place * U16_BYTES)
+
+	if before == 0 then
+		buffer.writeu16(grid.heads, filed * U16_BYTES, after)
+	else
+		buffer.writeu16(following, before * U16_BYTES, after)
+	end
+
+	if after ~= 0 then
+		buffer.writeu16(preceding, after * U16_BYTES, before)
+	end
+
+	file(grid, place, bucket)
+end
+
+-- Files every body of a list afresh, each by its place in it
+local function refile(grid: Grid, bodies: { State })
+	local count: number = #bodies
+	if not (count <= SLOTS) then
+		error(`The hull grid files at most {SLOTS} bodies, and the world's list holds {count}`)
+	end
+
+	local places: { [State]: number } = grid.places
+	buffer.fill(grid.heads, 0, 0)
+	table.clear(places)
+
+	for place: number = 1, count do
+		local state: State = bodies[place]
+		places[state] = place
+		file(grid, place, bucketOf(grid, state))
+	end
+
+	grid.bodies = bodies
+	grid.count = count
+end
+
+--[[
+    Gives a world the grid of hull positions its hull tests read in place of
+    every body, filed from the world's list now and from each new list
+    World.setBodies hands it at the next test
+--]]
+
+function Hulls.createGrid(world: World)
+	local radius: number = world.settings.radius
+	local size: number = CELL_WIDTHS * (radius + radius)
+	if not (size > 0 and size < math.huge) then
+		error(`A hull grid's cells need a finite hull radius above 0, and got {radius}`)
+	end
+
+	local grid: Grid = {
+		size = size,
+		bodies = world.bodies,
+		count = 0,
+		places = {},
+		heads = buffer.create(ACROSS * ACROSS * U16_BYTES),
+		following = buffer.create((SLOTS + 1) * U16_BYTES),
+		preceding = buffer.create((SLOTS + 1) * U16_BYTES),
+		buckets = buffer.create((SLOTS + 1) * U16_BYTES),
+		found = table.create(SLOTS, 0),
+	}
+
+	refile(grid, world.bodies)
+	world.grid = grid
+end
+
+--[[
+    Files every body again where its position lies now, for a point after
+    which any code may have moved one: a tick stage's start, or a test a
+    game's call makes. A world with no grid is left as it is
+--]]
+
+function Hulls.refresh(world: World)
+	local grid: Grid? = world.grid
+	if not grid then
+		return
+	end
+
+	local bodies: { State } = world.bodies
+	if grid.bodies ~= bodies then
+		refile(grid, bodies)
+
+		return
+	end
+
+	for place: number = 1, grid.count do
+		move(grid, place, bodies[place])
+	end
+end
+
+--[[
+    Files one body again where its position lies now, after its step or a
+    move outside one. A body the world's list doesn't hold, or a world with
+    no grid, is left as it is
+--]]
+
+function Hulls.moved(world: World, state: State)
+	local grid: Grid? = world.grid
+	if not grid then
+		return
+	end
+
+	if grid.bodies ~= world.bodies then
+		refile(grid, world.bodies)
+
+		return
+	end
+
+	local place: number? = grid.places[state]
+	if place then
+		move(grid, place, state)
+	end
+end
+
+--[[
+    The places of the bodies filed in the cells a box on X and Z touches,
+    in the grid's found list, and how many. Nil and the list's length for a
+    world with no grid or a box over more cells than the list holds bodies,
+    a NaN or endless bound among them, so the test walks the whole list
+--]]
+
+local function gather(world: World, lowX: number, highX: number, lowZ: number, highZ: number): ({ number }?, number)
+	local bodies: { State } = world.bodies
+	local grid: Grid? = world.grid
+	if not grid then
+		return nil, #bodies
+	end
+
+	if grid.bodies ~= bodies then
+		refile(grid, bodies)
+	end
+
+	local size: number = grid.size
+	local firstColumn: number = math.floor(lowX / size)
+	local firstRow: number = math.floor(lowZ / size)
+	local columns: number = math.floor(highX / size) - firstColumn + 1
+	local rows: number = math.floor(highZ / size) - firstRow + 1
+	if not (columns * rows <= grid.count) then
+		return nil, grid.count
+	end
+
+	-- Past a full wrap of the buckets every one is already visited, so none is visited twice
+	columns = math.min(columns, ACROSS)
+	rows = math.min(rows, ACROSS)
+
+	local heads: buffer = grid.heads
+	local following: buffer = grid.following
+	local found: { number } = grid.found
+	local count: number = 0
+
+	for column: number = 0, columns - 1 do
+		local start: number = ((firstColumn + column) % ACROSS) * ACROSS
+
+		for row: number = 0, rows - 1 do
+			local place: number = buffer.readu16(heads, (start + (firstRow + row) % ACROSS) * U16_BYTES)
+
+			while place ~= 0 do
+				count += 1
+				found[count] = place
+				place = buffer.readu16(following, place * U16_BYTES)
+			end
+		end
+	end
+
+	return found, count
+end
+
 --[[
     Sweeps a box from center along direction against the hulls of the other
     live bodies, and gives the distance to the nearest it meets, math.huge
-    for none, the normal of the face it meets and that body. As an engine
-    cast ignores a part it starts inside, a hull the box starts in is
-    skipped, and a body that walks in no mode meets none
+    for none, the normal of the face it meets and that body, the first in
+    the world's list of those it meets at that distance. As an engine cast
+    ignores a part it starts inside, a hull the box starts in is skipped,
+    and a body that walks in no mode meets none
 --]]
 
 function Hulls.sweep(
@@ -86,6 +300,7 @@ function Hulls.sweep(
 	local nearest: number = math.huge
 	local normal: vector = vector.zero
 	local body: State? = nil
+	local bodyPlace: number = 0 -- Its place in the world's list, 0 before any
 
 	local length: number = math.sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z)
 	if state.moveMode ~= "Walk" or length == 0 then
@@ -105,10 +320,16 @@ function Hulls.sweep(
 	local lowZ: number = math.min(center.z, endZ) - halfZ - REJECT_MARGIN
 	local highZ: number = math.max(center.z, endZ) + halfZ + REJECT_MARGIN
 
-	-- Whiteoak TODO: each cast walks every live hull the world holds, passing one outside those bounds before any slab
-	-- test, so a tick's walks grow with the square of the bodies; a uniform grid of hull positions, which each step
-	-- updates as its body moves, narrows each walk to the nearby ones
-	for _, other: State in world.bodies do
+	local bodies: { State } = world.bodies
+	local found: { number }?, count: number = gather(world, lowX, highX, lowZ, highZ)
+
+	for visit: number = 1, count do
+		local place: number = visit
+		if found then
+			place = found[visit]
+		end
+
+		local other: State = bodies[place]
 		local at: vector = other.position
 		if at.x < lowX or at.x > highX or at.z < lowZ or at.z > highZ then
 			continue
@@ -123,10 +344,19 @@ function Hulls.sweep(
 			local enterZ: number, exitZ: number = Hulls.slab(at.z - center.z, halfZ, direction.z)
 			local enter: number = math.max(enterX, enterY, enterZ)
 			local exit: number = math.min(exitX, exitY, exitZ)
+			local distance: number = enter * length
 
-			if enter >= 0 and enter < exit and enter <= 1 and enter * length < nearest then
-				nearest = enter * length
+			-- A tie goes to the body first in the list, as a walk in the list's order keeps it, whatever order the
+			-- cells give
+			if
+				enter >= 0
+				and enter < exit
+				and enter <= 1
+				and (distance < nearest or (distance == nearest and place < bodyPlace))
+			then
+				nearest = distance
 				body = other
+				bodyPlace = place
 
 				-- The face it enters through, which faces against the move on the axis it enters last
 				if enter == enterX then
@@ -159,8 +389,18 @@ function Hulls.block(state: State, world: World): boolean
 	local feet: vector = state.position
 	local top: number = feet.y + Hulls.height(state, settings)
 
-	for _, other: State in world.bodies do
+	local span: number = reach + REJECT_MARGIN
+	local bodies: { State } = world.bodies
+	local found: { number }?, count: number = gather(world, feet.x - span, feet.x + span, feet.z - span, feet.z + span)
+
+	for visit: number = 1, count do
+		local place: number = visit
+		if found then
+			place = found[visit]
+		end
+
 		-- The cheap compares first, so a hull apart on X or Z is passed before its mode or posture is read
+		local other: State = bodies[place]
 		local at: vector = other.position
 		if math.abs(at.x - feet.x) >= reach or math.abs(at.z - feet.z) >= reach then
 			continue
@@ -230,12 +470,25 @@ function Hulls.overlaps(box: Box, world: World): boolean
 		+ boxHalf.y * math.abs(boxUp.z)
 		+ boxHalf.z * math.abs(boxLook.z)
 
-	for _, other: State in world.bodies do
+	local center: vector = box.center
+	local spanX: number = reachX + radius + REJECT_MARGIN
+	local spanZ: number = reachZ + radius + REJECT_MARGIN
+	local bodies: { State } = world.bodies
+	local found: { number }?, count: number =
+		gather(world, center.x - spanX, center.x + spanX, center.z - spanZ, center.z + spanZ)
+
+	for visit: number = 1, count do
+		local place: number = visit
+		if found then
+			place = found[visit]
+		end
+
+		local other: State = bodies[place]
 		if other.moveMode == "Walk" then
 			local half: number = Hulls.height(other, settings) / 2
 			local at: vector = other.position
 			hullHalf = vector.create(radius, half, radius)
-			offset = vector.create(at.x, at.y + half, at.z) - box.center
+			offset = vector.create(at.x, at.y + half, at.z) - center
 
 			-- The world's axes first, then the box's, then each crossed pair
 			local apart: boolean = math.abs(offset.x) >= reachX + radius

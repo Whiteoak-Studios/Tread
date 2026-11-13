@@ -153,24 +153,37 @@ type OutOfView = {
 	wide: boolean,
 }
 
--- Where this run's bodies stand: a list of slots for each square cell of the play area, row by row, each in the
--- order the states were walked, so a viewer's turn visits the cells its distance spans in place of every body
-type Grid = {
+-- One kind's bodies this run: a list of slots for each square cell of the play area, row by row, each in the order the
+-- states were walked, and the cells the turn whose view it is reaches
+type Cells = {
+	radius: number, -- The farthest the kind is relevant, which a view's distance caps
 	size: number, -- A cell's side in studs
 	across: number, -- The cells along each side
 	heads: buffer, -- u16 by cell: its list's first slot plus 1, 0 for none
 	tails: buffer, -- u16 by cell: its list's last slot
-	following: buffer, -- u16 by slot: the next slot in its cell's list plus 1, 0 at the end
-	columns: buffer, -- u16 by slot: its cell's column this run
-	rows: buffer, -- u16 by slot: and its row
-	orders: buffer, -- u16 by slot: its place from 1 in this run's walk of the states
-	walk: buffer, -- u16 by place: the slot at it
-	count: number, -- The bodies this run filed
 	westmost: number, -- The lowest column holding a body this run, across while none does
 	eastmost: number, -- The highest, -1 while none does
 	southmost: number, -- And the same for the rows
 	northmost: number,
+	west: number, -- The lowest column the turn reaches, held to the kind's own, so a kind with no body reaches none
+	east: number,
+	south: number, -- And the same for the rows
+	north: number,
+}
+
+-- Where this run's bodies stand: each kind's in cells of its own, so a viewer's turn visits the cells each kind's reach
+-- spans in place of every body
+type Grid = {
+	cells: { Cells }, -- Each kind's, by its code plus 1, made at start
+	following: buffer, -- u16 by slot: the next slot in its cell's list plus 1, 0 at the end
+	columns: buffer, -- u16 by slot: its cell's column this run, in its kind's cells
+	rows: buffer, -- u16 by slot: and its row
+	orders: buffer, -- u16 by slot: its place from 1 in this run's walk of the states
+	walk: buffer, -- u16 by place: the slot at it
+	positions: buffer, -- f32 x, y and z by slot, 12 B a slot: where it stood this run, exactly, since a vector is f32
+	count: number, -- The bodies this run filed
 	visits: { number }, -- A turn's slots to visit, each as its place times SLOTS plus the slot
+	visited: number, -- The bodies the turns have gathered since start
 }
 
 -- What a watched target's withheld block keeps for each slot, by slot in buffers
@@ -264,21 +277,16 @@ local Radii: { enter: number, leave: number, sleepers: number, npcs: number, gri
 	sleepers = 0,
 	npcs = 0,
 	grid = {
-		size = 0,
-		across = 0,
-		heads = buffer.create(0),
-		tails = buffer.create(0),
+		cells = {},
 		following = buffer.create(SLOTS * 2),
 		columns = buffer.create(SLOTS * 2),
 		rows = buffer.create(SLOTS * 2),
 		orders = buffer.create(SLOTS * 2),
 		walk = buffer.create((SLOTS + 1) * 2),
+		positions = buffer.create(SLOTS * 12),
 		count = 0,
-		westmost = 0,
-		eastmost = -1,
-		southmost = 0,
-		northmost = -1,
 		visits = {},
+		visited = 0,
 	},
 }
 local NearEnterSquared: number = 0
@@ -383,8 +391,7 @@ local Out: Block.Block = Block.new()
 local Open: boolean = false
 local Filled: number = 0 -- The open block's bytes
 local Spent: number = 0 -- The viewer's bytes this tick, framing included
-local HardRoom: number = 0 -- The bytes it may take this tick for what is owed, and for the rest
-local SoftRoom: number = 0
+local Used: number? = nil -- Volt's count of its bytes over the last second, nil until its turn first needs room
 
 -- Whiteoak TODO: Volt sends a buffer field whole, so each block goes in a buffer of its exact length, kept here
 -- once per length and reused, at most 889 buffers and Volt's copy of each block, and more for the taps' expanded
@@ -475,16 +482,39 @@ function Relay.start(
 	Keyed.gravity = shared.step.gravity
 	Limits = { lean = shared.step.lean, headCone = shared.step.headCone }
 
-	-- The grid's cells are relevancy.leave across, the farthest any viewer reaches, and never so small that the play
-	-- area holds more of them than there are slots
+	-- Each kind's cells are as wide as its reach, so more turns cover every occupied cell and skip the sort, but the
+	-- sleepers' are half sleepers.radius, as the bodies their narrower cells skip outweigh that sort. None is so
+	-- small that the play area holds more of them than there are slots
 	local bound: number = Constants.PLAY_BOUND
-	local size: number = math.max(server.relevancy.leave, 2 * bound / math.sqrt(SLOTS))
-	local across: number = math.ceil(2 * bound / size)
+	local smallest: number = 2 * bound / math.sqrt(SLOTS)
 	local grid: Grid = Radii.grid
-	grid.size = size
-	grid.across = across
-	grid.heads = buffer.create(across * across * 2)
-	grid.tails = buffer.create(across * across * 2)
+
+	for index: number, kind: Block.Kind in Block.KINDS do
+		local radius: number = server.relevancy.leave
+		if kind == "Npc" then
+			radius = server.npcs.range
+		elseif kind == "Sleeper" then
+			radius = server.sleepers.radius
+		end
+
+		local size: number = math.max(kind == "Sleeper" and radius / 2 or radius, smallest)
+		local across: number = math.ceil(2 * bound / size)
+		grid.cells[index] = {
+			radius = radius,
+			size = size,
+			across = across,
+			heads = buffer.create(across * across * 2),
+			tails = buffer.create(across * across * 2),
+			westmost = across,
+			eastmost = -1,
+			southmost = across,
+			northmost = -1,
+			west = 0,
+			east = -1,
+			south = 0,
+			north = -1,
+		}
+	end
 
 	RelayRate = shared.rates.relay
 	StillRuns = STILL_SECONDS * RelayRate
@@ -1166,18 +1196,24 @@ end
 --[[
     Makes room for an entry of bytes in a section holding count entries:
     in the open block, or a fresh one when it would pass 896 B or its count,
-    so long as the viewer's tick stays inside room. False leaves both as
-    they were
+    so long as the viewer's tick stays inside its room under a budget in
+    bytes a second, Hard for what is owed and Soft for the rest. False
+    leaves both as they were
 --]]
 
-local function fits(view: View, bytes: number, count: number, room: number): boolean
+local function fits(view: View, bytes: number, count: number, budget: number): boolean
 	local fresh: boolean = not Open or Filled + bytes > BLOCK_BYTES or count >= SECTION_LIMIT
 	local cost: number = bytes
 	if fresh then
 		cost += HEADER_BYTES + FRAME_BYTES
 	end
 
-	if Spent + cost > room then
+	-- A tick's room is its share of the budget and never more than the last second left, Volt's count of which is
+	-- read the first time the turn needs room
+	local used: number = Used or Traffic(view.key)
+	Used = used
+
+	if Spent + cost > math.min(budget / RelayRate, budget - used) then
 		return false
 	end
 
@@ -1365,7 +1401,7 @@ local function writeRecord(view: View, slot: number, base: number)
 end
 
 local function addHide(view: View, slot: number)
-	if not fits(view, HIDE_BYTES, Out.hideCount, HardRoom) then
+	if not fits(view, HIDE_BYTES, Out.hideCount, Hard) then
 		return
 	end
 
@@ -1392,7 +1428,7 @@ local function addReveal(view: View, slot: number)
 		bytes += lookBytes(slot, flags)
 	end
 
-	if not fits(view, bytes, math.max(Out.revealCount, Out.lookCount), HardRoom) then
+	if not fits(view, bytes, math.max(Out.revealCount, Out.lookCount), Hard) then
 		return
 	end
 
@@ -1417,13 +1453,13 @@ end
 
 local function addLook(view: View, slot: number)
 	local flags: number = buffer.readu16(view.flags, slot * 2)
-	if fits(view, lookBytes(slot, flags), Out.lookCount, HardRoom) then
+	if fits(view, lookBytes(slot, flags), Out.lookCount, Hard) then
 		buffer.writeu16(view.flags, slot * 2, writeLook(view, slot, flags))
 	end
 end
 
 local function addFootstep(view: View, offset: number)
-	if not fits(view, FOOTSTEP_BYTES, Out.footstepCount, HardRoom) then
+	if not fits(view, FOOTSTEP_BYTES, Out.footstepCount, Hard) then
 		return
 	end
 
@@ -1447,14 +1483,18 @@ local function trim<T>(list: { T }, count: number)
 end
 
 --[[
-    Places a list's records inside room, highest in the queue first when
-    they can't all fit, each whole or as its change, prepared first so the
-    sort knows their sizes, and stops at the first that doesn't fit. Those
-    left keep at most one tier tick owed
+    Places a list's records inside the tick's room under a budget, as fits
+    finds it, highest in the queue first when they can't all fit, each whole
+    or as its change, prepared first so the sort knows their sizes, and
+    stops at the first that doesn't fit. Those left keep at most one tier
+    tick owed. An empty list needs no room
 --]]
 
-local function placeRecords(view: View, list: { number }, count: number, room: number)
+local function placeRecords(view: View, list: { number }, count: number, budget: number)
 	trim(list, count)
+	if count == 0 then
+		return
+	end
 
 	local on: boolean = Deltas.on
 	local baseRuns: buffer = view.baseRuns
@@ -1520,6 +1560,10 @@ local function placeRecords(view: View, list: { number }, count: number, room: n
 		end
 	end
 
+	local used: number = Used or Traffic(view.key)
+	local room: number = math.min(budget / RelayRate, budget - used)
+	Used = used
+
 	local blocks: number = wholes // Constants.MAX_RELAY_RECORDS + changeBytes // (BLOCK_BYTES - HEADER_BYTES) + 1
 	if Spent + wholes * RECORD_BYTES + changeBytes + blocks * (HEADER_BYTES + FRAME_BYTES) > room then
 		table.sort(list, ahead)
@@ -1550,7 +1594,7 @@ local function placeRecords(view: View, list: { number }, count: number, room: n
 		if Open and Filled + bytes <= BLOCK_BYTES and Spent + bytes <= room then
 			Filled += bytes
 			Spent += bytes
-		elseif not fits(view, bytes, 0, room) then
+		elseif not fits(view, bytes, 0, budget) then
 			RecordsCut += count - index + 1
 			break
 		end
@@ -1632,83 +1676,125 @@ end
 
 --[[
     Every other present body against the viewer that the run could change:
-    those in the cells its distance spans, and each it holds anything for
-    elsewhere. Any other holds nothing and is out of every radius, so it
-    stays as it is. Each gets its relevancy and tier by its kind, a player
-    and a body entering at the inner radius and leaving past the outer, and
-    one holding nothing out of range is done; the rest, in the order the
-    states were walked, get whether anti-ESP hides them, which leaves them
-    culled, and the stretch that follows. Invisible bodies are wanted by no
-    one and never culled
+    those in the cells its kind's reach spans, the lesser of the kind's
+    radius and the viewer's distance, and each it holds anything for
+    elsewhere. Any other holds nothing and is out of its kind's reach, where
+    it can't be wanted, so it stays as it is. Each gets its relevancy and
+    tier by its kind, a player and a body entering at the inner radius and
+    leaving past the outer, and one holding nothing out of range is done;
+    the rest, in the order the states were walked, get whether anti-ESP
+    hides them, which leaves them culled, and the stretch that follows.
+    Invisible bodies are wanted by no one and never culled
 --]]
 
-local function consider(view: View, viewer: Viewer, states: { [number]: State }, own: number?)
+local function consider(view: View, viewer: Viewer, own: number?)
 	local origin: vector = viewer.position
+	local distance: number = view.distance
 	local grid: Grid = Radii.grid
-	local size: number = grid.size
-	local across: number = grid.across
 	local bound: number = Constants.PLAY_BOUND
 
-	-- f32 rounding moves an offset by under a millionth of its length, so the cells reach that much past the
-	-- distance, and no body found inside it lies outside them
+	-- f32 rounding moves an offset by under a millionth of its length, so the cells reach that much past each kind's
+	-- reach, and no body found inside it lies outside them
 	local slack: number = 2 ^ -20
-	local reach: number = view.distance * (1 + slack)
-	local west: number = (origin.x - reach + bound) // size
-	local east: number = (origin.x + reach + bound) // size
-	local south: number = (origin.z - reach + bound) // size
-	local north: number = (origin.z + reach + bound) // size
+	local covered: boolean = true
 
-	-- Held to the grid's edges as each body was, a NaN to its first cell
-	west = west >= 0 and math.min(west, across - 1) or 0
-	east = east >= 0 and math.min(east, across - 1) or 0
-	south = south >= 0 and math.min(south, across - 1) or 0
-	north = north >= 0 and math.min(north, across - 1) or 0
+	for _, cells: Cells in grid.cells do
+		-- A kind with no body this run keeps the empty reach the run gave it
+		if cells.eastmost < 0 then
+			continue
+		end
 
-	-- Cells that span every cell holding a body hold every body, which then go in the walk's own order
+		local size: number = cells.size
+		local last: number = cells.across - 1
+		local reach: number = math.min(cells.radius, distance) * (1 + slack)
+		local west: number = (origin.x - reach + bound) // size
+		local east: number = (origin.x + reach + bound) // size
+		local south: number = (origin.z - reach + bound) // size
+		local north: number = (origin.z + reach + bound) // size
+
+		-- Held to the grid's edges as each body was, a NaN to its first cell
+		west = west >= 0 and math.min(west, last) or 0
+		east = east >= 0 and math.min(east, last) or 0
+		south = south >= 0 and math.min(south, last) or 0
+		north = north >= 0 and math.min(north, last) or 0
+
+		local westmost: number, eastmost: number = cells.westmost, cells.eastmost
+		local southmost: number, northmost: number = cells.southmost, cells.northmost
+		if west > westmost or east < eastmost or south > southmost or north < northmost then
+			covered = false
+		end
+
+		-- And to the cells holding the kind's bodies, which every body of it lies in, so a kind with none gathers none
+		cells.west = math.max(west, westmost)
+		cells.east = math.min(east, eastmost)
+		cells.south = math.max(south, southmost)
+		cells.north = math.min(north, northmost)
+	end
+
+	-- Cells that span every cell holding a body of each kind hold every body, which then go in the walk's own order
 	local walkOrder: buffer = grid.walk
-	local covered: boolean = west <= grid.westmost
-		and east >= grid.eastmost
-		and south <= grid.southmost
-		and north >= grid.northmost
 	local visits: { number } = grid.visits
 	local count: number = grid.count
 
 	if not covered then
 		-- The cells' bodies, each as its place in the walk of the states times SLOTS plus its slot, in the walk's
 		-- order within each cell
+		local following: buffer = grid.following
+		local orders: buffer = grid.orders
 		count = 0
 
-		for row: number = south, north do
-			for column: number = west, east do
-				local entry: number = buffer.readu16(grid.heads, (row * across + column) * 2)
-				while entry ~= 0 do
-					local slot: number = entry - 1
-					count += 1
-					visits[count] = buffer.readu16(grid.orders, slot * 2) * SLOTS + slot
-					entry = buffer.readu16(grid.following, slot * 2)
+		for _, cells: Cells in grid.cells do
+			local heads: buffer = cells.heads
+			local across: number = cells.across
+
+			for row: number = cells.south, cells.north do
+				for column: number = cells.west, cells.east do
+					local entry: number = buffer.readu16(heads, (row * across + column) * 2)
+					while entry ~= 0 do
+						local slot: number = entry - 1
+						count += 1
+						visits[count] = buffer.readu16(orders, slot * 2) * SLOTS + slot
+						entry = buffer.readu16(following, slot * 2)
+					end
 				end
 			end
 		end
 
-		-- And each slot it holds anything for outside them, which lies inside no radius
-		for _, slot: number in view.tracked do
-			local column: number = buffer.readu16(grid.columns, slot * 2)
-			local row: number = buffer.readu16(grid.rows, slot * 2)
+		-- And each slot it holds anything for outside its kind's cells, which lies outside its kind's reach. Most are
+		-- players, whose cells are read once
+		local players: Cells = grid.cells[PLAYER + 1]
+		local west: number, east: number, south: number, north: number =
+			players.west, players.east, players.south, players.north
 
-			if
-				buffer.readu32(Present, slot * 4) == Run
-				and not (column >= west and column <= east and row >= south and row <= north)
-			then
-				count += 1
-				visits[count] = buffer.readu16(grid.orders, slot * 2) * SLOTS + slot
+		for _, slot: number in view.tracked do
+			if buffer.readu32(Present, slot * 4) == Run then
+				local column: number = buffer.readu16(grid.columns, slot * 2)
+				local row: number = buffer.readu16(grid.rows, slot * 2)
+				local kind: number = buffer.readu8(Kinds, slot)
+				local inside: boolean
+
+				if kind == PLAYER then
+					inside = column >= west and column <= east and row >= south and row <= north
+				else
+					local cells: Cells = grid.cells[kind + 1]
+					inside = column >= cells.west and column <= cells.east and row >= cells.south and row <= cells.north
+				end
+
+				if not inside then
+					count += 1
+					visits[count] = buffer.readu16(orders, slot * 2) * SLOTS + slot
+				end
 			end
 		end
 	end
+
+	grid.visited += count
 
 	-- Out of range and holding nothing is all the rest would leave a pair, so only the others stay listed. SLOTS is a
 	-- power of two, so a visit's slot is its low bits
 	local viewFlags: buffer = view.flags
 	local kinds: buffer = Kinds
+	local positions: buffer = grid.positions
 	local slotBits: number = SLOTS - 1
 	local listed: number = 0
 	local ordered: boolean = true
@@ -1728,7 +1814,12 @@ local function consider(view: View, viewer: Viewer, states: { [number]: State },
 			continue
 		end
 
-		local offset: vector = states[slot].position - origin
+		local at: number = slot * 12
+		local offset: vector = vector.create(
+			buffer.readf32(positions, at),
+			buffer.readf32(positions, at + 4),
+			buffer.readf32(positions, at + 8)
+		) - origin
 		local squared: number = vector.dot(offset, offset)
 		local kept: number = buffer.readu16(viewFlags, slot * 2)
 		local kind: number = buffer.readu8(kinds, slot)
@@ -1868,12 +1959,12 @@ end
 
 local function schedule(
 	view: View,
-	states: { [number]: State },
 	own: number?,
 	origin: vector,
 	looking: vector?
 ): (number, number, number, number, number)
 	local hides: number, reveals: number, restyles: number, floors: number, fills: number = 0, 0, 0, 0, 0
+	local positions: buffer = Radii.grid.positions
 	local tracked: { number } = view.tracked
 	local viewFlags: buffer = view.flags
 	local shotUntil: buffer = view.shotUntil
@@ -1926,13 +2017,17 @@ local function schedule(
 			continue
 		end
 
-		local state: State? = states[slot]
 		local kind: number = buffer.readu8(Kinds, slot)
-		if not state or (kind ~= PLAYER and kind ~= NPC) then
+		if kind ~= PLAYER and kind ~= NPC then
 			continue
 		end
 
-		local offset: vector = state.position - origin
+		local at: number = slot * 12
+		local offset: vector = vector.create(
+			buffer.readf32(positions, at),
+			buffer.readf32(positions, at + 4),
+			buffer.readf32(positions, at + 8)
+		) - origin
 		local near: boolean = bit32.btest(flags, NEAR)
 		local aimRate: number
 		local floorRate: number
@@ -2166,7 +2261,7 @@ local function withhold(view: View, states: { [number]: State })
 
 	-- A look entry rides beside a copy, whose acknowledgment clears it, so a run that has sent the target nothing
 	-- sends it an empty block, inside its hard room
-	if looks > 0 and not Copied and fits(view, 0, 0, HardRoom) then
+	if looks > 0 and not Copied and fits(view, 0, 0, Hard) then
 		flush()
 	end
 
@@ -2462,7 +2557,7 @@ local function turn(viewer: Viewer, states: { [number]: State })
 	end
 
 	claim(view, own)
-	consider(view, viewer, states, own)
+	consider(view, viewer, own)
 
 	-- Where the view cone looks while the viewer has a body: its newest look with the out-of-view rate, until its
 	-- first one its body's facing, and without the rate always its facing
@@ -2479,11 +2574,10 @@ local function turn(viewer: Viewer, states: { [number]: State })
 	end
 
 	local hides: number, reveals: number, restyles: number, floors: number, fills: number =
-		schedule(view, states, own, origin, looking)
+		schedule(view, own, origin, looking)
 
-	local used: number = Traffic(key)
-	HardRoom = math.min(Hard / RelayRate, Hard - used)
-	SoftRoom = math.min(Soft / RelayRate, Soft - used)
+	-- Its traffic is read the first time it needs room, so a viewer with nothing due makes no read
+	Used = nil
 	Spent = 0
 
 	for index: number = 1, hides do
@@ -2512,8 +2606,8 @@ local function turn(viewer: Viewer, states: { [number]: State })
 		end
 	end
 
-	placeRecords(view, Floors, floors, HardRoom)
-	placeRecords(view, Fills, fills, SoftRoom)
+	placeRecords(view, Floors, floors, Hard)
+	placeRecords(view, Fills, fills, Soft)
 	flush()
 
 	if view.watcherCount > 0 then
@@ -2554,14 +2648,22 @@ function Relay.run(
 		buffer.writeu16(Deltas.ticks, plane * 2, TickWire)
 	end
 
-	-- Each body is filed in its cell's list, numbered in the order the states are walked, which each turn keeps
+	-- Each body is filed in its cell's list in its kind's cells, numbered in the order the states are walked, which each
+	-- turn keeps
 	local grid: Grid = Radii.grid
-	local size: number = grid.size
-	local across: number = grid.across
+	local positions: buffer = grid.positions
 	local bound: number = Constants.PLAY_BOUND
 	local order: number = 0
-	local westmost: number, eastmost: number, southmost: number, northmost: number = across, -1, across, -1
-	buffer.fill(grid.heads, 0, 0)
+
+	for _, cells: Cells in grid.cells do
+		buffer.fill(cells.heads, 0, 0)
+		cells.westmost = cells.across
+		cells.eastmost = -1
+		cells.southmost = cells.across
+		cells.northmost = -1
+		cells.east = -1
+		cells.north = -1
+	end
 
 	for slot: number, state: State in states do
 		local generation: number, entry: Slots.Entry? = Slots.get(slot)
@@ -2582,39 +2684,55 @@ function Relay.run(
 			walk(slot, state, generation)
 		end
 
-		-- Held to the grid's edges, and a NaN place to its first cell, since a turn finds that inside no radius
+		-- Its place where every turn reads it, held to the grid's edges, and a NaN place to its first cell, since a turn
+		-- finds that inside no radius
 		local position: vector = state.position
+		local at: number = slot * 12
+		buffer.writef32(positions, at, position.x)
+		buffer.writef32(positions, at + 4, position.y)
+		buffer.writef32(positions, at + 8, position.z)
+
+		local cells: Cells = grid.cells[kind + 1]
+		local size: number = cells.size
+		local across: number = cells.across
 		local column: number = (position.x + bound) // size
 		local row: number = (position.z + bound) // size
 		column = column >= 0 and math.min(column, across - 1) or 0
 		row = row >= 0 and math.min(row, across - 1) or 0
 
 		local cell: number = (row * across + column) * 2
-		if buffer.readu16(grid.heads, cell) == 0 then
-			buffer.writeu16(grid.heads, cell, slot + 1)
+		if buffer.readu16(cells.heads, cell) == 0 then
+			buffer.writeu16(cells.heads, cell, slot + 1)
 		else
-			buffer.writeu16(grid.following, buffer.readu16(grid.tails, cell) * 2, slot + 1)
+			buffer.writeu16(grid.following, buffer.readu16(cells.tails, cell) * 2, slot + 1)
 		end
 
 		order += 1
-		buffer.writeu16(grid.tails, cell, slot)
+		buffer.writeu16(cells.tails, cell, slot)
 		buffer.writeu16(grid.following, slot * 2, 0)
 		buffer.writeu16(grid.columns, slot * 2, column)
 		buffer.writeu16(grid.rows, slot * 2, row)
 		buffer.writeu16(grid.orders, slot * 2, order)
 		buffer.writeu16(grid.walk, order * 2, slot)
 
-		westmost = math.min(westmost, column)
-		eastmost = math.max(eastmost, column)
-		southmost = math.min(southmost, row)
-		northmost = math.max(northmost, row)
+		if column < cells.westmost then
+			cells.westmost = column
+		end
+
+		if column > cells.eastmost then
+			cells.eastmost = column
+		end
+
+		if row < cells.southmost then
+			cells.southmost = row
+		end
+
+		if row > cells.northmost then
+			cells.northmost = row
+		end
 	end
 
 	grid.count = order
-	grid.westmost = westmost
-	grid.eastmost = eastmost
-	grid.southmost = southmost
-	grid.northmost = northmost
 
 	-- Every viewer's view, and which of them run their own this run
 	for _, viewer: Viewer in viewers do
@@ -2969,11 +3087,12 @@ end
 
 --[[
     The running totals since start of the records the tier ticks placed in
-    a viewer's blocks, and of those the viewer's room left out
+    a viewer's blocks, of those the viewer's room left out, and of the
+    bodies the viewers' turns gathered to measure
 --]]
 
-function Relay.counts(): (number, number)
-	return RecordsSent, RecordsCut
+function Relay.counts(): (number, number, number)
+	return RecordsSent, RecordsCut, Radii.grid.visited
 end
 
 return Relay

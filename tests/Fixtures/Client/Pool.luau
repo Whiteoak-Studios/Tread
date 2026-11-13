@@ -75,6 +75,10 @@ function Pool.new(): Pool
 		})
 	end
 
+	function rigs.turn(_: any, slot: number, headYaw: number, headPitch: number)
+		record({ member = "turn", slot = slot, headYaw = headYaw, headPitch = headPitch, rig = entry(slot, "turn") })
+	end
+
 	function rigs.ragdoll(_: any, slot: number, body: number, push: vector?)
 		local rig: any = entry(slot, "ragdoll")
 		if body ~= slot and slots[body] then

@@ -46,6 +46,13 @@ type Heartbeat = {
 	Wait: (self: Heartbeat) -> number,
 }
 
+-- The overlap queries made of every environment's Workspace, and the latest one's part and params
+type PartsInPart = {
+	calls: number,
+	part: any,
+	params: any,
+}
+
 -- Each file's text, read once a run, since no file changes while the suite runs
 local Sources: { [string]: string } = {}
 
@@ -54,7 +61,19 @@ local Sources: { [string]: string } = {}
 -- RunService, so a finished environment can be collected, once a run's memory shows the cost
 local Heartbeats: { [any]: Heartbeat } = {}
 
+-- Lune has no overlap query, so OverlapParams is a plain table of the filter the stand-in below is handed
+local OverlapParams: { new: () -> { [string]: any } } = {
+	new = function (): { [string]: any }
+		return {}
+	end,
+}
+
+local PartsInPart: PartsInPart = { calls = 0, part = nil, params = nil }
+
 local Environment = {}
+
+-- What a case reads to learn that code asked the engine's overlap query, and with what
+Environment.partsInPart = PartsInPart
 
 assert(fs.isFile(PROMISE_LINK), `{PROMISE_LINK} is missing; run wally install`)
 
@@ -66,6 +85,15 @@ local promiseSource: string = `Packages/_Index/{installed}/{alias}/{PROMISE_FILE
 -- Lune's RunService has no signals, so each environment's answers Heartbeat with a fake of its own
 roblox.implementProperty("RunService", "Heartbeat", function (runService: any): Heartbeat
 	return Heartbeats[runService]
+end)
+
+-- Lune's Workspace has no GetPartsInPart, so each environment's finds no part, keeping the call for a case to read
+roblox.implementMethod("Workspace", "GetPartsInPart", function (_: any, part: any, params: any): { any }
+	PartsInPart.calls += 1
+	PartsInPart.part = part
+	PartsInPart.params = params
+
+	return {}
 end)
 
 --[[
@@ -292,6 +320,8 @@ function Environment.load(path: string, overrides: { [string]: any }?): any
 			state.globals[name] = value
 		end
 	end
+
+	state.globals.OverlapParams = OverlapParams
 
 	Heartbeats[dataModel:GetService("RunService")] = heartbeat()
 

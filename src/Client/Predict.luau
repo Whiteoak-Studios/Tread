@@ -376,7 +376,8 @@ function Predict.frame(dt: number)
 		tick(run)
 	end
 
-	local share: number = math.min(run.settings.smoothing.decay * dt, 1)
+	-- The share this frame's own time takes off, so the offset shrinks at the same rate whatever the frame rate
+	local share: number = 1 - math.exp(-run.settings.smoothing.decay * dt)
 	Correction = vector.create(
 		Math.lerp(Correction.x, 0, share),
 		Math.lerp(Correction.y, 0, share),

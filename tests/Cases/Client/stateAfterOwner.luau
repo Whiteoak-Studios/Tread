@@ -1,7 +1,7 @@
 --[[
     The local character's state is nil until the first OwnerState of its
     own slot, then filled from it on Vector3 and CFrame, with getEye giving
-    the same eye and look
+    the same eye and look once a frame draws it
 --]]
 
 --!strict
@@ -56,6 +56,8 @@ return function (): (boolean, string | nil)
 		return false, `The hull's center {state.hullCenter} sits no higher than the feet {state.root}`
 	end
 
+	-- A frame of no time finds the body's eye without moving it, and getEye gives what the frame found
+	rig.frames(1, 0)
 	local drawnEye: Vector3, drawnLook: Vector3 = handle:getEye()
 	if drawnEye ~= state.eye or drawnLook ~= state.look then
 		return false,

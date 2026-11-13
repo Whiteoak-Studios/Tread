@@ -1,7 +1,7 @@
 --[[
     What a drawn rig plays: one track per locomotion state, loaded once, the
-    one a step state picks, the aim and lean layer, feet planted by each
-    leg's own bend while it stands still, and the markers its tracks reach
+    one a step state picks, the aim, lean and head layer, feet planted by
+    each leg's own bend while it is still, and the markers its tracks reach
 --]]
 
 --!strict
@@ -107,11 +107,17 @@ export type Animated = {
 	land: AnimationTrack,
 	lands: number?, -- The land counter the last pose saw, nil before the first
 	waist: AnimationConstraint, -- The joint the aim and lean layer turns
+	neck: AnimationConstraint, -- The joint the head offset turns, on top of the aim
 	root: AnimationConstraint, -- The joint the legs hang from, whose pose they read at each step
 	pitch: number, -- Radians
+	yaw: number, -- Radians off the facing, a recoil kick's
 	lean: number, -- Degrees
-	tilt: CFrame, -- The layer both make
+	tilt: CFrame, -- The layer the three make
 	tilted: boolean, -- Whether the layer turns anything
+	headYaw: number, -- The head offset, radians
+	headPitch: number,
+	turn: CFrame, -- The neck's layer the head offset makes
+	turned: boolean, -- Whether it turns anything
 	detailed: boolean, -- Whether the Animator is asked to evaluate at full fidelity
 	planted: boolean, -- Whether the feet are planted
 	legs: { Leg },
@@ -379,11 +385,17 @@ function Animate.load(
 		land = land,
 		lands = nil,
 		waist = joints.Waist,
+		neck = joints.Neck,
 		root = joints[ROOT],
 		pitch = 0,
+		yaw = 0,
 		lean = 0,
 		tilt = CFrame.identity,
 		tilted = false,
+		headYaw = 0,
+		headPitch = 0,
+		turn = CFrame.identity,
+		turned = false,
 		detailed = false,
 		planted = false,
 		legs = Animate.legs(joints, places),
@@ -521,20 +533,30 @@ function Animate.detail(animated: Animated, full: boolean)
 end
 
 --[[
-    Sets the layer the waist takes each step: the aim's pitch turning the
-    upper body up or down, and the lean tilting it sideways, a positive
-    lean to the right
+    Sets the layers the waist and the neck take each step: the aim's yaw
+    and pitch turning the upper body as a look turns, and the lean tilting
+    it sideways, a positive lean to the right, then the head offset turning
+    the head the same way on top of them, each made only on a change
+
+    @ yaw | radians off the facing, turning the way a facing does
+    @ headYaw | the head offset, radians, as the published eye adds it
 --]]
 
-function Animate.aim(animated: Animated, pitch: number, lean: number)
-	if pitch == animated.pitch and lean == animated.lean then
-		return
+function Animate.aim(animated: Animated, pitch: number, lean: number, yaw: number, headYaw: number, headPitch: number)
+	if pitch ~= animated.pitch or lean ~= animated.lean or yaw ~= animated.yaw then
+		animated.pitch = pitch
+		animated.yaw = yaw
+		animated.lean = lean
+		animated.tilt = CFrame.fromEulerAnglesYXZ(pitch, yaw, -math.rad(lean))
+		animated.tilted = pitch ~= 0 or lean ~= 0 or yaw ~= 0
 	end
 
-	animated.pitch = pitch
-	animated.lean = lean
-	animated.tilt = CFrame.Angles(pitch, 0, -math.rad(lean))
-	animated.tilted = pitch ~= 0 or lean ~= 0
+	if headYaw ~= animated.headYaw or headPitch ~= animated.headPitch then
+		animated.headYaw = headYaw
+		animated.headPitch = headPitch
+		animated.turn = CFrame.fromEulerAnglesYXZ(headPitch, headYaw, 0)
+		animated.turned = headYaw ~= 0 or headPitch ~= 0
+	end
 end
 
 --[[
@@ -633,21 +655,27 @@ end
 
 --[[
     Writes the layer over the pose the Animator just wrote: the waist's
-    tilt on top of it, and each planted leg bent to its target. It runs in
-    PreSimulation at every simulation step, since the Animator rewrites
-    each Transform at every step, and the frame's last step's write is the
-    one drawn. A throttled Animator leaves the last step's Transforms,
-    layer and all, so writing them again would stack the tilt
+    tilt and the neck's turn on top of it, and each planted leg bent to its
+    target. It runs in PreSimulation at every simulation step, since the
+    Animator rewrites each Transform at every step, and the frame's last
+    step's write is the one drawn. A throttled Animator leaves the last
+    step's Transforms, layer and all, so writing them again would stack it
 --]]
 
 function Animate.layer(animated: Animated)
-	if not (animated.tilted or animated.planted) or animated.animator.EvaluationThrottled then
+	local layered: boolean = animated.tilted or animated.turned or animated.planted
+	if not layered or animated.animator.EvaluationThrottled then
 		return
 	end
 
 	if animated.tilted then
 		local waist: AnimationConstraint = animated.waist
 		waist.Transform = animated.tilt * waist.Transform
+	end
+
+	if animated.turned then
+		local neck: AnimationConstraint = animated.neck
+		neck.Transform = animated.turn * neck.Transform
 	end
 
 	if not animated.planted then

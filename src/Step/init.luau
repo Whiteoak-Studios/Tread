@@ -727,13 +727,45 @@ local function quantize(state: State, settings: Settings)
 end
 
 --[[
+    A walking body that moved, checked where the rounding left it, since the
+    rounding can carry its hull across a face it ended a fraction of a
+    quantum from and every later cast ignores a part the hull starts inside.
+    A hull the exact overlap query finds inside is depenetrated to a spot on
+    the quantum. Gives back how far it sank when no spot was clear
+--]]
+
+local function settle(state: State, world: World): number?
+	local settings: Settings = world.settings
+	local height: number = Hulls.height(state, settings)
+	local width: number = settings.radius + settings.radius
+	local feet: vector = state.position
+	local center: vector = vector.create(feet.x, feet.y + height / 2, feet.z)
+
+	if not world.collision.overlap(center, vector.create(width, height, width)) then
+		return nil
+	end
+
+	local sank: number? = Collide.depenetrate(state, world, true)
+	local y: number = state.position.y
+	state.apex = math.max(state.apex, y)
+
+	-- A spot up from the ground is still where the body last stood, which a mantle counts from
+	if state.grounded then
+		state.groundHeight = y
+	end
+
+	return sank
+end
+
+--[[
     Moves a body one tick in place from its command and the world, under
     the gravity the world gives its tick, the same on every realm,
     allocating nothing: a tick off the slide's cooldown, its look, then its
     move mode's move, the eye eased, the water level, and the whole state
-    rounded to OwnerState's precisions. The command's head offset is clamped
-    to the game's cone in place, and a move mode other than walking ends a
-    mantle, a slide and a ride.
+    rounded to OwnerState's precisions, then a walking body that moved
+    settled out of any part the rounding carried it into. The command's
+    head offset is clamped to the game's cone in place, and a move mode
+    other than walking ends a mantle, a slide and a ride.
     Gives back the speed the body landed at, 0 for no landing that counted,
     and how far it sank when depenetration found no clear spot, nil when it
     is clear
@@ -745,6 +777,7 @@ function Step.advance(state: State, command: Command, world: World): (number, nu
 	local settings: Settings = world.settings
 	local moveMode: MoveMode = state.moveMode
 	local stuck: number? = nil
+	local start: vector = state.position
 
 	state.command = command.number
 	state.tick = world.tick
@@ -789,6 +822,11 @@ function Step.advance(state: State, command: Command, world: World): (number, nu
 	end
 
 	quantize(state, settings)
+
+	-- The start and the rounded end are what an owner's replay shares with the server, so every realm settles alike
+	if moveMode == "Walk" and state.position ~= start then
+		stuck = settle(state, world) or stuck
+	end
 
 	return landed, stuck
 end

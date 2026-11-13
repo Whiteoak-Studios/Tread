@@ -11,6 +11,7 @@ Npc.__index = Npc
 
 local Collide = require(script.Parent.Parent.Step.Collide)
 local Constants = require(script.Parent.Parent.Constants)
+local Hulls = require(script.Parent.Parent.Step.Hulls)
 local Math = require(script.Parent.Parent.Step.Math)
 local Range = require(script.Parent.Range)
 local Reports = require(script.Parent.Reports)
@@ -158,6 +159,7 @@ function Npcs.create(position: vector, facing: number): Npc
 	state.npc = true
 
 	-- Before the slot is taken, so a game collision function that throws here holds no slot
+	Hulls.refresh(world)
 	local stuck: number? = Collide.depenetrate(state, world, true)
 
 	local slot: number?, generation: number? = Slots.take("Npc")
@@ -319,10 +321,13 @@ local function advance(npc: Npc, world: World, tick: number)
 	local stepped: boolean, landed: number?, stuck: number? = xpcall(Step.advance, warnFailure, state, command, world)
 	if not stepped then
 		State.copy(Before, state)
+		Hulls.moved(world, state)
 		Reports.fire(nil, "stage", STAGE)
 
 		return
 	end
+
+	Hulls.moved(world, state)
 
 	local pressed: Pressed = command.pressed
 	pressed.jump = false
@@ -355,6 +360,7 @@ function Npcs.step(tick: number)
 	end
 
 	world.tick = tick
+	Hulls.refresh(world)
 
 	-- A copy, so a callback that makes an NPC mid-stage waits for the next tick and one it destroys is skipped
 	for _, npc: Npc in table.clone(Bodies) do

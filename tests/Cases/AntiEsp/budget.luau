@@ -1,7 +1,8 @@
 --[[
     A slice stops once its budget has passed, and works through what is due
-    in order: overdue hidden player pairs nearest first, then visible ones,
-    then sleepers, one test a slice where each test outlasts the budget
+    in order: sleepers for their share, then overdue hidden player pairs
+    nearest first, then visible ones, one test a slice where each test
+    outlasts the budget
 --]]
 
 --!strict
@@ -37,11 +38,11 @@ return function (): (boolean, string | nil)
 	local seen: number = harness:body("Player", vector.create(100, 0, -5))
 	local sleeper: number = harness:body("Sleeper", vector.create(-100, 0, 0))
 	local order: { { any } } = {
+		{ "the sleeper", sleeper },
 		{ "the nearest hidden player", near },
 		{ "the middle hidden player", middle },
 		{ "the farthest hidden player", far },
 		{ "the visible player", seen },
-		{ "the sleeper", sleeper },
 	}
 
 	-- Asked about in the reverse of the order a slice takes them in, so the pairs' own order is no help

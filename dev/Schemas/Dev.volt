@@ -70,12 +70,14 @@ event run {
 }
 
 -- What the server says of a live run a client asked for: refused with the reason, running with the run's name, each
--- piece of its report in order, then passed or failed with the name. A piece stays well under Volt's 8,192 B maxPacket
+-- piece of its report in order, then passed or failed with the name. Of the Run all queue: its status line, the list
+-- of the reports it kept a line each, and one of those by its line, its pieces after. A piece stays well under Volt's
+-- 8,192 B maxPacket
 event runReport {
 	from: Server,
 	type: Reliable,
 	call: SingleSync,
-	data: (state: enum { Refused, Running, Piece, Passed, Failed }, text: string(0..4000)),
+	data: (state: enum { Refused, Running, Piece, Passed, Failed, Queue, Kept, Report }, text: string(0..4000)),
 }
 
 -- A client's report of one ClientCost window: the label the server opened it with, whether the client measured it

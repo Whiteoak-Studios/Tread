@@ -173,7 +173,7 @@ return function (): (boolean, string | nil)
 		end
 	)
 
-	local ran: boolean, passed: any, line: any = pcall(Run.run, LOAD, FULL, probeOf(window))
+	local ran: boolean, passed: any, line: any = pcall(Run.run, LOAD, FULL, probeOf(window), nil)
 
 	-- Everything it set goes, whatever the run did
 	stopListening()

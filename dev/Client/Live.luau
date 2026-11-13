@@ -1,7 +1,7 @@
 --[[
     The dev place's live-run panel, shown on its key or a touch screen's
-    button: a button for each live run, which asks the dev server to start
-    it, the run's status, and its report in a box that selects whole on focus
+    button: a button for each live run and Run all, one for each report the
+    queue kept, the status, and the report in a box that selects whole
 --]]
 
 --!strict
@@ -31,14 +31,20 @@ local FRAME_LAYER: number = 1 -- The panel's frame, under its parts
 local PART_LAYER: number = 2 -- The status line, the run buttons' column and the report's frame
 local CONTENT_LAYER: number = 3 -- The buttons and the report's box, over the frames they sit in
 local BUTTON_ORDER: number = 1 -- The touch button's screen, drawn over the panel's wherever the two meet
+local ALL_ORDER: number = 0 -- Run all's place in the column, above every run
+local KEPT_COLOR: Color3 = Color3.fromRGB(40, 70, 40) -- A kept report's button, apart from the runs'
+local LINES: string = "[^\n]+" -- Each line of the kept list
+local SEPARATOR: string = " | " -- Between the queue's status line and the panel's own
 
 -- The panel's parts its listeners bring up to date
 type Gui = {
 	screen: ScreenGui,
 	status: TextLabel,
+	column: ScrollingFrame,
 	report: ScrollingFrame,
 	box: TextBox,
-	buttons: { [TextButton]: string }, -- Each button's run
+	buttons: { [TextButton]: string }, -- Each button's run, Run all's among them
+	kept: { TextButton }, -- One for each report the queue kept, in its order
 }
 
 local Screen: ScreenGui? = nil -- The panel, once the PlayerGui it waits for has come
@@ -46,10 +52,27 @@ local Started: boolean = false
 
 local Live = {}
 
+-- One of the column's buttons, at its place in the column's order
+local function columnButton(column: ScrollingFrame, text: string, order: number): TextButton
+	local made: TextButton = Instance.new("TextButton")
+	made.Name = text
+	made.Text = text
+	made.LayoutOrder = order
+	made.Size = UDim2.fromOffset(LIST - BAR, ROW)
+	made.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	made.TextColor3 = Color3.new(1, 1, 1)
+	made.TextSize = TEXT_SIZE
+	made.ZIndex = CONTENT_LAYER
+	made.Parent = column
+
+	return made
+end
+
 --[[
     The panel, hidden, centered on the screen: the status line across its
-    top, a column of a button for each run beside the report's frame, and
-    in the frame the box the report shows in, editable so it takes focus
+    top, a column of Run all and a button for each run beside the report's
+    frame, and in the frame the box the report shows in, editable so it
+    takes focus
 --]]
 
 local function build(playerGui: PlayerGui): Gui
@@ -89,7 +112,7 @@ local function build(playerGui: PlayerGui): Gui
 	column.Name = "Runs"
 	column.Position = UDim2.fromOffset(GAP, top)
 	column.Size = UDim2.fromOffset(LIST, body)
-	column.CanvasSize = UDim2.fromOffset(0, #LiveRuns.runs * (ROW + GAP))
+	column.CanvasSize = UDim2.fromOffset(0, (#LiveRuns.runs + 1) * (ROW + GAP))
 	column.ScrollBarThickness = BAR
 	column.BackgroundTransparency = 1
 	column.ZIndex = PART_LAYER
@@ -101,18 +124,11 @@ local function build(playerGui: PlayerGui): Gui
 	layout.Parent = column
 
 	local buttons: { [TextButton]: string } = {}
+	local all: TextButton = columnButton(column, LiveRuns.ALL, ALL_ORDER)
+	buttons[all] = LiveRuns.ALL
+
 	for index: number, run: LiveRuns.Run in LiveRuns.runs do
-		local button: TextButton = Instance.new("TextButton")
-		button.Name = run.name
-		button.Text = run.name
-		button.LayoutOrder = index
-		button.Size = UDim2.fromOffset(LIST - BAR, ROW)
-		button.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-		button.TextColor3 = Color3.new(1, 1, 1)
-		button.TextSize = TEXT_SIZE
-		button.ZIndex = CONTENT_LAYER
-		button.Parent = column
-		buttons[button] = run.name
+		buttons[columnButton(column, run.name, index)] = run.name
 	end
 
 	local report: ScrollingFrame = Instance.new("ScrollingFrame")
@@ -146,9 +162,11 @@ local function build(playerGui: PlayerGui): Gui
 	return {
 		screen = screen,
 		status = status,
+		column = column,
 		report = report,
 		box = box,
 		buttons = buttons,
+		kept = {},
 	}
 end
 
@@ -189,7 +207,7 @@ end
 --]]
 
 local function show(gui: Gui, panel: LiveRuns.Panel)
-	gui.status.Text = panel.status
+	gui.status.Text = panel.queue ~= "" and `{panel.queue}{SEPARATOR}{panel.status}` or panel.status
 	gui.box.Text = panel.text
 
 	local width: number = gui.box.Size.X.Offset
@@ -199,6 +217,35 @@ local function show(gui: Gui, panel: LiveRuns.Panel)
 	local height: number = math.max(measured.Y, gui.report.Size.Y.Offset)
 	gui.box.Size = UDim2.fromOffset(width, height)
 	gui.report.CanvasSize = UDim2.fromOffset(0, height)
+end
+
+--[[
+    Lists the reports the queue kept, a button each under the runs, which
+    asks the server for that report, in place of the ones listed before,
+    whose connections go with them
+--]]
+
+local function list(gui: Gui, text: string)
+	for _, old: TextButton in gui.kept do
+		old:Destroy()
+	end
+
+	table.clear(gui.kept)
+
+	for line: string in string.gmatch(text, LINES) do
+		local index: number = #gui.kept + 1
+		local kept: TextButton = columnButton(gui.column, line, #LiveRuns.runs + index)
+		kept.BackgroundColor3 = KEPT_COLOR
+		kept.TextScaled = true -- A long line shrinks to its button rather than losing its verdict
+		kept.Activated:Connect(function ()
+			Network.run.fire(LiveRuns.kept(index))
+		end)
+
+		table.insert(gui.kept, kept)
+	end
+
+	local rows: number = #LiveRuns.runs + 1 + #gui.kept
+	gui.column.CanvasSize = UDim2.fromOffset(0, rows * (ROW + GAP))
 end
 
 --[[
@@ -227,15 +274,22 @@ function Live.start()
 	show(gui, panel)
 
 	Network.runReport.on(function (state: LiveRuns.State, text: string)
+		if state == "Kept" then
+			list(gui, text)
+		end
+
 		panel = LiveRuns.apply(panel, state, text)
 		show(gui, panel)
 	end)
 
-	for button: TextButton, name: string in gui.buttons do
-		button.Activated:Connect(function ()
+	for run: TextButton, name: string in gui.buttons do
+		run.Activated:Connect(function ()
 			Network.run.fire(name)
 		end)
 	end
+
+	-- The queue's state and its kept list, should a queue have run on this server before the client joined
+	Network.run.fire(LiveRuns.kept(0))
 
 	-- The whole report is selected as the box takes focus, so a copy takes all of it. Deferred, since the engine places
 	-- its own cursor for the click that focused the box after Focused fires

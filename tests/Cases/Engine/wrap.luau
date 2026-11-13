@@ -11,7 +11,6 @@ local Environment = require("../../Environment")
 
 local ENGINE: string = "src/Step/Engine.luau"
 local REST: number = 1100.5
-local ENGINE_ABSENT: string = "attempt to index nil with 'new'" -- Lune's failure at OverlapParams.new, which it lacks
 
 return function (): (boolean, string | nil)
 	local Engine: any = Environment.load(ENGINE)
@@ -80,13 +79,22 @@ return function (): (boolean, string | nil)
 		return false, "Engine.wrap's sphere did not pass a miss or the radius through"
 	end
 
-	-- With no include list the overlap still asks the engine, over every part with CanCollide on. Lune has no engine
-	-- query, so the ask fails at its OverlapParams here, and the live scenario checks what the engine answers
-	local answered: boolean, message: any = pcall(collision.overlap, origin, size)
-	if answered then
-		return false, "Engine.wrap's overlap answered with no include list, without asking the engine"
-	elseif not string.find(`{message}`, ENGINE_ABSENT, 1, true) then
-		return false, `Engine.wrap's overlap failed before it reached the engine's query: {message}`
+	-- With no include list the overlap still asks the engine, over every part with CanCollide on but its own probe.
+	-- Lune's query, stood in by the environment, finds nothing, and the live scenario checks what the engine answers
+	local query: any = Environment.partsInPart
+	local asked: number = query.calls
+	if collision.overlap(origin, size) then
+		return false, "Engine.wrap's overlap found a part, where the environment's query finds none"
+	elseif query.calls ~= asked + 1 then
+		return false,
+			`Engine.wrap's overlap asked the engine's query {query.calls - asked} times, where once was expected`
+	end
+
+	local params: any = query.params
+	if params.FilterType ~= roblox.Enum.RaycastFilterType.Exclude or params.RespectCanCollide ~= true then
+		return false, "Engine.wrap's overlap with no include list asked for less than every part with CanCollide on"
+	elseif params.FilterDescendantsInstances[1] ~= query.part.Parent then
+		return false, "Engine.wrap's overlap with no include list left its own probe in what it asks for"
 	end
 
 	collision.destroy()

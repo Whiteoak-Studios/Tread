@@ -132,11 +132,18 @@ local Retest: number = 0
 local RetestSquared: number = 0
 local LyingInterval: number = 0
 local LyingHold: number = 0
+local LyingShare: number = 0 -- Seconds of each slice its sleeper and body pairs are tested for first
 
 local Now: number = 0 -- The schedule's clock at the last slice, which an ask's fail-open is measured on
 local Slice: number = 0 -- The slices run since start
 local Round: number = 0 -- The relay's runs that asked about a pair
 local Ran: boolean = true -- Whether a slice ran since the relay last asked, so its next ask starts a round
+
+-- This slice's tests of each kind, a sleeper's or body's and a player's, and the seconds they took, for their means
+local LyingRun: number = 0
+local LyingTook: number = 0
+local PlayerRun: number = 0
+local PlayerTook: number = 0
 
 -- Since start, for the server's stats
 local Tests: number = 0
@@ -224,6 +231,9 @@ local function note(slot: number, generation: number, entry: Entry?)
 
 	KindOf[slot + 1] = kind
 	LifeOf[slot + 1] = generation
+
+	-- The next ask finds its viewer's own slot and team afresh, since two relay runs can come with no slice between
+	Asker = nil
 end
 
 --[[
@@ -301,6 +311,7 @@ function AntiEsp.start(
 	RetestSquared = Retest ^ 2
 	LyingInterval = 1 / server.sleepers.rate
 	LyingHold = server.sleepers.hold
+	LyingShare = server.antiEsp.lyingShare
 
 	for slot: number = 0, SLOTS - 1 do
 		local generation: number, entry: Entry? = Slots.get(slot)
@@ -1099,10 +1110,12 @@ local function drain(queue: Queue, now: number)
 end
 
 --[[
-    Tests a due heap's pairs lowest key first while the slice's time lasts,
-    first clearing it of stale entries once they outnumber the rest, and
-    whether it emptied. One the relay has stopped asking about, or whose
-    target has gone, while it waited is dropped untested
+    Tests a due heap's pairs lowest key first until the deadline, starting
+    none that the slice's mean test of the heap's kind, or of every kind
+    while it has none, says would end past it. It first clears the heap of
+    stale entries once they outnumber the rest, and gives whether it
+    emptied. One the relay has stopped asking about, or whose target has
+    gone, while it waited is dropped untested
 --]]
 
 local function work(heap: Heap, world: World, now: number, deadline: number): boolean
@@ -1110,8 +1123,25 @@ local function work(heap: Heap, world: World, now: number, deadline: number): bo
 		compact(heap)
 	end
 
+	local lying: boolean = heap == LyingDue
+
 	while heap.count > 0 do
-		if os.clock() >= deadline then
+		local clock: number = os.clock()
+		local run: number = PlayerRun
+		local took: number = PlayerTook
+
+		if lying then
+			run = LyingRun
+			took = LyingTook
+		end
+
+		if run == 0 then
+			run = LyingRun + PlayerRun
+			took = LyingTook + PlayerTook
+		end
+
+		-- The slice's first test runs while any time is left, as there is no mean before it
+		if clock >= deadline or (run > 0 and clock + took / run > deadline) then
 			return false
 		end
 
@@ -1126,8 +1156,14 @@ local function work(heap: Heap, world: World, now: number, deadline: number): bo
 
 			if Bodies[PairSlots[pair]] == nil or PairAsked[pair] ~= Round then
 				release(pair)
+			elseif lying then
+				test(pair, world, now)
+				LyingRun += 1
+				LyingTook += os.clock() - clock
 			else
 				test(pair, world, now)
+				PlayerRun += 1
+				PlayerTook += os.clock() - clock
 			end
 		end
 	end
@@ -1138,9 +1174,11 @@ end
 --[[
     One slice: lets what has come due wait in the due heaps, from the
     sleepers' timers, each viewer's walk and each schedule's front, then
-    tests overdue hidden player pairs nearest first, visible ones and then
-    sleepers and bodies longest untested first, until budget seconds of
-    os.clock() have passed. now is the schedule's clock every due time is on
+    tests sleepers and bodies longest untested first for their share, then
+    overdue hidden player pairs nearest first and visible ones, then
+    sleepers and bodies again with whatever the players leave, until budget
+    seconds of os.clock() have passed. now is the schedule's clock every
+    due time is on
 --]]
 
 function AntiEsp.run(budget: number, now: number)
@@ -1153,8 +1191,6 @@ function AntiEsp.run(budget: number, now: number)
 		error(`AntiEsp.run takes the schedule's clock as a finite number, not {now}`, 2)
 	end
 
-	-- Whiteoak TODO: a catch-up Heartbeat that runs the stage twice spends two slices in that frame; the tick handing
-	-- run its Heartbeat's number would let a second call in one frame spend nothing, once G3 shows the cost
 	local deadline: number = os.clock() + budget
 
 	Now = now
@@ -1202,6 +1238,13 @@ function AntiEsp.run(budget: number, now: number)
 	drain(HiddenQueue, now)
 	drain(NearQueue, now)
 	drain(VisibleQueue, now)
+
+	-- 4) The tests, the sleepers' and bodies' share counted from here and never past the budget
+	LyingRun = 0
+	LyingTook = 0
+	PlayerRun = 0
+	PlayerTook = 0
+	work(LyingDue, world, now, math.min(os.clock() + LyingShare, deadline))
 
 	-- Whiteoak TODO: a hidden pair waits keyed by its distance when it came due, at most its fail-open time and a
 	-- relay interval before it is tested or fails open; keying again by where both stand each slice would order the

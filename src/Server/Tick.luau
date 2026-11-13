@@ -23,7 +23,7 @@ export type Run = (tick: number) -> ()
 export type Stage = {
 	name: string,
 	run: Run,
-	between: boolean, -- Whether it also runs on each Heartbeat with no tick due
+	between: boolean, -- Whether it runs once each Heartbeat, in its first tick or alone when none is due
 	label: string, -- Its profiler label
 	times: { number }, -- A ring of seconds, a run's time each, made at its full size
 	held: number, -- The times the ring holds, up to its size, the first that many of times
@@ -35,7 +35,7 @@ export type Stage = {
 export type Entry = {
 	name: string,
 	run: Run,
-	between: boolean?, -- Also run on each Heartbeat with no tick due, handed the newest tick run
+	between: boolean?, -- Run once each Heartbeat: in its first tick, or with no tick due handed the newest tick run
 }
 
 -- The stages in the order each tick runs them, replaced whole when one is added so a tick running keeps its list
@@ -118,20 +118,24 @@ local function runStage(stage: Stage, tick: number)
 	end
 end
 
--- One tick: every stage in order
-local function run(tick: number)
+-- One tick: every stage in order, a between stage only in its Heartbeat's first tick
+local function run(tick: number, first: boolean)
 	local stages: { Stage } = Stages
 
 	for index: number = 1, #stages do
-		runStage(stages[index], tick)
+		local stage: Stage = stages[index]
+		if first or not stage.between then
+			runStage(stage, tick)
+		end
 	end
 end
 
 --[[
     Each Heartbeat: the ticks its time owes at the rate, at most the
     catch-up, with any further whole ticks dropped and counted and the
-    fraction of a tick left over kept for the next frame. A Heartbeat that
-    owes no tick runs only the between stages, handed the newest tick run
+    fraction of a tick left over kept for the next frame. Each between
+    stage runs once, in the first tick, or alone handed the newest tick run
+    when the Heartbeat owes none
 --]]
 
 local function frame(delta: number)
@@ -156,16 +160,16 @@ local function frame(delta: number)
 	local running: number = math.min(due, CatchUp)
 	Dropped += due - running
 
-	for _ = 1, running do
+	for count: number = 1, running do
 		Ran += 1
-		run(Ran)
+		run(Ran, count == 1)
 	end
 end
 
 --[[
     Starts the loop at rate ticks a second on Heartbeat with the stages in
     the order given, running at most catchUp ticks a frame, and each stage
-    marked between on every Heartbeat with no tick due as well. The
+    marked between once every Heartbeat, with a tick due or not. The
     Heartbeat connection lives as long as the server, which never stops its
     tick
 --]]

@@ -1305,6 +1305,8 @@ function Playback.render(self: Self, time: number)
 				local state: StepState = kept.state
 				local shown: boolean = false
 				local pitch: number = 0
+				local headYaw: number = 0
+				local headPitch: number = 0
 				local newest: number = latest(track.ticks, clip)
 
 				if newest >= note.first then
@@ -1314,7 +1316,7 @@ function Playback.render(self: Self, time: number)
 					if note.kind == "Sleeper" or note.kind == "Body" then
 						shown = lie(track, note, base, newest, at, clip, limits, state)
 					else
-						shown, pitch = Interpolate.sample(
+						shown, pitch, headYaw, headPitch = Interpolate.sample(
 							track.sampleTicks,
 							track.sampleRecords,
 							base - 1,
@@ -1327,6 +1329,11 @@ function Playback.render(self: Self, time: number)
 				end
 
 				if shown and Playback.ride(state) then
+					-- The head offset turns the neck as the live client turns it, held to the head cone
+					local cone: number = limits.headCone
+					local turnYaw: number = math.rad(math.clamp(headYaw, -cone, cone))
+					local turnPitch: number = math.rad(math.clamp(headPitch, -cone, cone))
+					rigs:turn(slot, turnYaw, turnPitch)
 					rigs:pose(slot, state, vector.magnitude(state.position - eye), pitch)
 					kept.shown = true
 				elseif kept.shown then

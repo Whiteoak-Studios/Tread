@@ -62,6 +62,7 @@ function World.new(
 		leanShift = Engine.toVector(settings.leanShift),
 		ladders = {},
 		bodies = {},
+		grid = nil,
 		platforms = {},
 		clock = 0,
 		gravity = settings.gravity,
@@ -137,7 +138,7 @@ end
 --[[
     Hands the world the live players and NPCs this tick, each body's state
     where it stands now, so each step blocks against where the bodies before
-    it already moved
+    it already moved. A world's hull grid files the new list at its next test
 --]]
 
 function World.setBodies(world: World, bodies: { State })

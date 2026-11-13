@@ -195,6 +195,7 @@ local SERVER: Specs = {
 		visibleRate = "positive",
 		hold = "nonNegative",
 		failOpen = "positive",
+		lyingShare = "nonNegative",
 		include = { [ANY] = "instance" },
 	},
 
@@ -434,6 +435,7 @@ export type ServerSettings = {
 		visibleRate: number,
 		hold: number, -- Seconds
 		failOpen: number,
+		lyingShare: number, -- Seconds of each slice, at most slice, kept for sleeper and body pairs while any wait
 		include: { Instance }, -- What its rays may hit, CanCollide on or off: the occluder folder, and Terrain
 	},
 
@@ -835,6 +837,17 @@ local function checkAim(server: any)
 	end
 end
 
+-- Refuses a share of anti-ESP's slice kept for sleepers and bodies that is more than the slice
+local function checkShare(server: any)
+	local path: string = `{SERVER_PATH}.antiEsp`
+	local slice: number = server.antiEsp.slice
+	local share: number = server.antiEsp.lyingShare
+
+	if share > slice then
+		refuse(`{path}.lyingShare`, `a number at most {path}.slice's {slice}`, share)
+	end
+end
+
 --[[
     Checks the shared table and the server settings before the server does
     anything else, erroring on the first key missing or wrong, named by its
@@ -846,6 +859,7 @@ function Config.server(shared: Shared, server: ServerSettings)
 	walk(SERVER, server, SERVER_PATH)
 	checkPairs(SERVER_PAIRS, server, SERVER_PATH)
 	checkAim(server)
+	checkShare(server)
 end
 
 --[[

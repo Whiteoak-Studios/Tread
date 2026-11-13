@@ -7,20 +7,27 @@
 --!strict
 local Workspace = game:GetService("Workspace")
 
--- The city block's occluder-only parts, set inside its walls, which the server has from the place's load
+-- The city block's and the monuments' occluder-only parts, set inside their walls, which the server has from the
+-- place's load
 local TestContent: Instance? = Workspace:FindFirstChild("TestContent")
 local CityBlock: Instance? = TestContent and TestContent:FindFirstChild("CityBlock")
 local Occluders: Instance? = CityBlock and CityBlock:FindFirstChild("Occluders")
+local Monuments: Instance? = TestContent and TestContent:FindFirstChild("Monuments")
+local MonumentOccluders: Instance? = Monuments and Monuments:FindFirstChild("Occluders")
 
 if not Occluders then
 	error("Workspace.TestContent.CityBlock.Occluders is missing, so anti-ESP has no occluders in the dev place")
+end
+
+if not MonumentOccluders then
+	error("Workspace.TestContent.Monuments.Occluders is missing, so anti-ESP has no occluders for the monuments")
 end
 
 -- A map, since a table that names its keys in another module fits no map type a setting takes
 local FOOTSTEP_RANGE: { [string]: number } = { walk = 40, sprint = 60, jump = 60, land = 60 } -- Studs; crouched is silent
 
 -- What anti-ESP's rays may hit, the occluders and solid terrain, typed as the list the setting takes
-local OCCLUSION: { Instance } = { Occluders, Workspace.Terrain }
+local OCCLUSION: { Instance } = { Occluders, MonumentOccluders, Workspace.Terrain }
 
 -- Set true on Workspace before the server starts to boot it with the out-of-view rate and records as changes off,
 -- since the relay reads both levers only at its start
@@ -91,6 +98,7 @@ return {
 		visibleRate = 2,
 		hold = 1,
 		failOpen = 0.15,
+		lyingShare = 0.0005, -- Seconds of each slice kept for sleeper and body pairs while any wait
 		include = OCCLUSION,
 	},
 

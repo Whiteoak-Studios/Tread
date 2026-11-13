@@ -1,7 +1,7 @@
 --[[
-    The bot harness's numbers: scenarios S0 to S7 and the gates' loads with
-    their areas and groups, the seeded runs' timings, how a bot roams, what
-    each cheat does to what it sends, and where its floors and spawns go
+    The bot harness's numbers: scenarios S0 to S7 and the gates' loads, the
+    seeded runs' timings, the speed calibration and the relevancy sweep, how
+    a bot roams, what each cheat sends, and where its floors and spawns go
 --]]
 
 --!strict
@@ -48,6 +48,19 @@ export type Timing = {
 	warmup: number, -- Seconds the bots run before the window
 	window: number, -- Seconds of the window, its stats read once each interval
 	interval: number,
+}
+
+-- The fixed workload a run's calibration times, a sample at a time, against a part it lays for the casts
+export type Calibration = {
+	samples: number, -- Of each workload
+	perFrame: number, -- Samples taken between Heartbeats
+	bytes: number, -- The buffer each pass of the native loop goes over
+	passes: number, -- Passes of the loop a sample times
+	casts: number, -- Blockcasts a sample times
+	at: Vector3, -- The part's center
+	part: Vector3, -- Its size
+	block: Vector3, -- Each cast's block
+	drop: number, -- Studs above the part's top each block starts, cast down twice as far
 }
 
 -- The A0 arm's areas, so B's runs stand their bots where A0's stand
@@ -245,6 +258,29 @@ return {
 		-- Each runs once a tick, so their rings of times advance together and sum tick by tick
 		stages = { "decode", "simulate", "npcs", "history", "relay" },
 		beside = "antiEsp", -- Runs between ticks too, so its p95 prints beside their total and never in it
+
+		-- The stats' counts since the last read that a run also prints a tick, over the ticks each read ran
+		counts = { "recordsSent", "recordsCut", "bytesOut", "antiEspTests" },
+	},
+
+	-- The fixed workload every run opens with, so its figures scale across servers whose speeds differ
+	calibration = {
+		samples = 400, -- Of each workload, for its p50 and p95
+		perFrame = 8, -- Samples taken between Heartbeats, so the timing never holds the server for long
+		bytes = 1024,
+		passes = 20,
+		casts = 100,
+		at = Vector3.new(-5000, 500, 5000), -- Far from every load wherever a run moves it, and from the island
+		part = Vector3.new(16, 2, 16),
+		block = Vector3.new(2, 2, 2),
+		drop = 4,
+	} :: Calibration,
+
+	-- S3's city mix and S4's fight at each render distance every viewer is set to, one shortened seed each
+	relevancy = {
+		scenarios = { "S3", "S4" },
+		distances = { 500, 750, 1000 }, -- Studs, the last the dev server's relevancy.leave
+		timing = { seeds = { 1 }, warmup = 15, window = 60, interval = 1 } :: Timing,
 	},
 
 	stage = "bots", -- The stage every bot sends from, after the relay
@@ -267,6 +303,7 @@ return {
 	spawn = {
 		batch = 10, -- Bots built a frame, so a run's build never holds the server past the engine's script timeout
 		lift = 0.5, -- Studs above the ground a bot is built at
+		tries = 10, -- Draws a body's spawn takes at most while its standing hull there meets test content or a body
 		probe = 500, -- Studs above an area its ground is cast for from, and as far below
 		thickness = 2, -- Of a floor laid where an area has no ground
 		tile = 2048, -- The most studs a part spans along an axis, so a wider floor is laid in tiles

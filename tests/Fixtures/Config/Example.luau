@@ -275,6 +275,7 @@ function Example.server(): ServerSettings
 			visibleRate = 2,
 			hold = 1,
 			failOpen = 0.15,
+			lyingShare = 0.0005,
 			include = { occluders },
 		},
 
