@@ -57,7 +57,7 @@ return function (): (boolean, string | nil)
 	mark()
 
 	-- 1) Planted over the step, only the left leg's three joints change
-	Animate.plant(animated, root, 0, reach, Collision({ STEP }), true, true)
+	Animate.plant(animated, root.CFrame, 0, reach, Collision({ STEP }), true, true)
 	if animated.legs[2].planted then
 		return false, "The right foot, over nothing, was planted"
 	end
@@ -76,7 +76,7 @@ return function (): (boolean, string | nil)
 	-- 2) A rig let go writes no joint at all
 	mark()
 
-	Animate.plant(animated, root, 0, reach, Collision({ STEP }), false, false)
+	Animate.plant(animated, root.CFrame, 0, reach, Collision({ STEP }), false, false)
 	Animate.layer(animated)
 
 	for _, name: string in names do

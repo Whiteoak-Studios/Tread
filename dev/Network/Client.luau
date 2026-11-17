@@ -257,7 +257,7 @@ local function readrunReport(player: (Player | Bot)?, packet: buffer, cursor: nu
 end
 
 local function writeclientCost(label: string, measured: boolean, line: string)
-	local offset: number, out: buffer = beginReliable(581)
+	local offset: number, out: buffer = beginReliable(2117)
 	buffer.writeu8(out, offset, 6)
 	local flags: number = 0
 
@@ -281,7 +281,7 @@ local function writeclientCost(label: string, measured: boolean, line: string)
 		refuseReliable("clientCost.line: expected string")
 	end
 
-	if #line < 1 or #line > 512 then
+	if #line < 1 or #line > 2048 then
 		refuseReliable("clientCost.line: length out of range")
 	end
 
@@ -395,7 +395,7 @@ end
 
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x17BACF31,
+	hash = 0x0E155838,
 	scope = "Dev",
 	side = "client",
 	idBytes = 1,
@@ -424,7 +424,7 @@ runtime = Volt.start({
 		[3] = { name = "shot", kind = "event", reliable = true, minBytes = 4, maxBytes = 6 },
 		[4] = { name = "played", kind = "event", reliable = true, minBytes = 6, maxBytes = 6 },
 		[5] = { name = "run", kind = "event", reliable = true, minBytes = 3, maxBytes = 34 },
-		[6] = { name = "clientCost", kind = "event", reliable = true, minBytes = 7, maxBytes = 581 },
+		[6] = { name = "clientCost", kind = "event", reliable = true, minBytes = 7, maxBytes = 2117 },
 		[7] = { name = "botSpawn", kind = "event", reliable = true, minBytes = 4, maxBytes = 6 },
 		[8] = { name = "botClear", kind = "event", reliable = true, minBytes = 1, maxBytes = 1 },
 		[9] = { name = "botWatch", kind = "event", reliable = true, minBytes = 2, maxBytes = 2 },

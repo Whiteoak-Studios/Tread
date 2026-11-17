@@ -54,7 +54,7 @@ return function (): (boolean, string | nil)
 	local rest: any = Legs.posed(rig, joints, left.place)
 
 	-- 1) Flat ground: each target is the ankle's rest, at the straight leg's full reach
-	Animate.plant(animated, root, 0, reach, Collision({ FLOOR }), true, true)
+	Animate.plant(animated, root.CFrame, 0, reach, Collision({ FLOOR }), true, true)
 	Animate.layer(animated)
 
 	for _, leg: any in animated.legs do

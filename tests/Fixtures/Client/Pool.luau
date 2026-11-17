@@ -98,6 +98,9 @@ function Pool.new(): Pool
 		record({ member = "hold", slot = slot, held = held, rig = entry(slot, "hold") })
 	end
 
+	-- The frame's end, which the stand-in has no move or cap for, so it writes nothing down
+	function rigs.frame(_: any) end
+
 	function rigs.setSpeed(_: any, speed: number)
 		record({ member = "setSpeed", speed = speed })
 	end

@@ -979,8 +979,9 @@ end
     at its distance from the eye viewed, a remote one with its record's
     head offset, a remote rider on its platform's copy, each other player
     outlined while the client spectates, and the live players and NPCs
-    drawn handed to the owner's prediction to block against. Nothing in the
-    walk over the drawn rigs makes a table. While a playback runs,
+    drawn handed to the owner's prediction to block against, then the
+    pool's frame end, which moves every root posed. Nothing in the walk
+    over the drawn rigs makes a table. While a playback runs,
     prediction, the render clock and the clock still run on live data,
     unseen, no live rig is drawn and no live body is blocked against, and
     the playback sets its track speed
@@ -1072,6 +1073,9 @@ function Client._frame(self: Self, dt: number)
 			table.insert(bodies, state)
 		end
 	end
+
+	-- The pool's end of the frame, after its last pose: what waited past its caps, and every root moved at once
+	rigs:frame()
 end
 
 --- The cleared eye and look of what the client views: a playback's

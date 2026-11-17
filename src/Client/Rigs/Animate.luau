@@ -101,6 +101,9 @@ export type Animated = {
 	animator: Animator,
 	tracks: { [string]: AnimationTrack }, -- One per state, by the state's name
 	playing: AnimationTrack?, -- The locomotion track now playing
+	waits: boolean, -- Whether a switch from one track to another waits for its pool to grant it
+	granted: boolean, -- Whether the next pose may switch, as its pool granted
+	wanted: boolean, -- Whether the last pose kept the track playing while it waited to switch
 	speed: number, -- The pool's track speed, a share of each track's authored speed
 	rate: number, -- The speed the playing track was last given
 	still: boolean, -- Whether the playing track holds its pose, as a climb does while the climber is still
@@ -379,6 +382,9 @@ function Animate.load(
 		animator = animator,
 		tracks = tracks,
 		playing = nil,
+		waits = false,
+		granted = false,
+		wanted = false,
 		speed = AUTHORED,
 		rate = AUTHORED,
 		still = false,
@@ -463,7 +469,9 @@ end
     a landing once when the state's land counter moves while the rig is
     drawn at full detail and the track picked is a still one on the ground,
     stopping it once the track picked is any other, so a landing never
-    plays over a gait
+    plays over a gait. On a rig whose switches wait, a switch from one
+    track to another keeps the one playing until the pool grants it, while
+    a rig's first track plays at once
 
     @ speed | the pool's track speed, a share of each track's authored speed, 1 unless given
 --]]
@@ -472,20 +480,27 @@ function Animate.pose(animated: Animated, state: State, full: boolean, speed: nu
 	local name: string = Animate.choose(state)
 	local track: AnimationTrack = animated.tracks[name]
 	animated.speed = speed or AUTHORED
+	animated.wanted = false
 
-	if track ~= animated.playing then
-		local playing: AnimationTrack? = animated.playing
-		if playing then
-			playing:Stop()
+	local playing: AnimationTrack? = animated.playing
+	if track ~= playing then
+		if playing and animated.waits and not animated.granted then
+			animated.wanted = true
+		else
+			if playing then
+				playing:Stop()
+			end
+
+			-- Play starts a track at its authored speed
+			track:Play()
+			animated.playing = track
+			animated.rate = AUTHORED
 		end
-
-		-- Play starts a track at its authored speed
-		track:Play()
-		animated.playing = track
-		animated.rate = AUTHORED
 	end
+	animated.granted = false
 
-	animated.still = name == "climb" and state.velocity == vector.zero
+	-- A climb holds still while the climber does, read off the track playing, which a waiting switch leaves as it was
+	animated.still = animated.playing == animated.tracks.climb and state.velocity == vector.zero
 	run(animated)
 
 	local lands: number = state.lands
@@ -705,6 +720,7 @@ end
     lets the animation move the feet again. A foot over nothing is left to
     the animation, and a planted rig that has not moved keeps its targets
 
+    @ frame | where the rig's root stands once its pool moves it this frame
     @ feet | the height of the state's position, where the hull's bottom is
     @ reach | the rig's root height above its feet; the cast runs from that
     high above the feet to as far below them
@@ -712,7 +728,7 @@ end
 
 function Animate.plant(
 	animated: Animated,
-	root: BasePart,
+	frame: CFrame,
 	feet: number,
 	reach: number,
 	collision: Collision,
@@ -728,7 +744,6 @@ function Animate.plant(
 
 	animated.planted = true
 
-	local frame: CFrame = root.CFrame
 	local top: number = feet + reach
 	local down: vector = vector.create(0, -2 * reach, 0)
 

@@ -22,6 +22,9 @@ local LYING_RAYS: number = Constants.LYING_RAYS -- A sleeper's or body's
 local NONE: number = 0 -- No pair, group, kind or heap, in every index and link
 local DUE_NOW: number = -math.huge -- A due time every slice has reached
 local ACROSS: vector = vector.create(1, 0, 0) -- The side points' axis toward a target straight above or below the eye
+local BITS: number = 8 -- A byte's, each one slot's answer in a viewer's row
+local ROW_BYTES: number = SLOTS // BITS -- A viewer's row of answers, one bit a slot
+local NO_TEAM: number = 0 / 0 -- An answered team for none, which equals no team, itself included
 
 -- A slot's kind as anti-ESP keeps it
 local PLAYER: number = 1
@@ -62,6 +65,13 @@ type State = State.State
 type Viewer = Relay.Viewer
 type World = State.World
 
+-- What isHidden would answer for each viewer handed to AntiEsp.answers, each buffer reused by its next call
+export type Answers = {
+	kinds: buffer, -- u8 by slot: 0 free, 1 player, 2 sleeper or body, 3 NPC
+	teams: buffer, -- f64 by slot: the team its current life carries, NaN for none
+	visible: buffer, -- A row of ROW_BYTES by each viewer's place in the list from 0: bit slot % 8 of byte slot // 8
+}
+
 -- What anti-ESP keeps for one viewer, made at its first pair and reused for another once it leaves
 type Sight = {
 	viewer: Viewer, -- The table the relay last asked with, which the server handle refills each relay tick
@@ -71,6 +81,10 @@ type Sight = {
 	eye: vector, -- Where its rays start this slice: its cleared eye, or where it stands while it has no body
 	drift: vector, -- How far its body moves over the look-ahead
 	lookAhead: number, -- Its round trip held to the settings' clamp, in seconds
+	cleared: vector, -- Its body's cleared eye, kept through the world's tick it was found on
+	clearedFor: State?, -- The body it was found for, nil until one is found and once a move drops it
+	clearedTick: number, -- The world's unwrapped tick it was found on
+	clearedChanges: number, -- And the body's slot's changes in the slot table then
 	groups: number, -- The first of its sleeper groups, NONE for none
 	group: number, -- The group its sleeper pairs tested in groupSlice joined
 	groupSlice: number,
@@ -155,6 +169,7 @@ local LyingTests: number = 0 -- Sleepers' and bodies' pair tests since AntiEsp.l
 -- Each slot's kind and generation by its slot plus 1, kept from the slot table's changes, so an ask calls nothing
 local KindOf: { number } = table.create(SLOTS, NONE)
 local LifeOf: { number } = table.create(SLOTS, 0)
+local ChangesOf: { number } = table.create(SLOTS, 0) -- Its changes since start, after which a kept eye is found again
 
 -- Each slot's team, kept with the life it was given for
 local TeamValues: buffer = buffer.create(SLOTS * 8) -- f64
@@ -169,6 +184,14 @@ local Asker: Viewer? = nil
 local AskerIndex: number = NONE
 local AskerTargets: buffer = buffer.create(0)
 local AskerTeam: number? = nil
+
+-- While a relay round is out, every change to anti-ESP's state made since its hold, run in arrival order at its release
+local Holding: boolean = false
+local Held: { () -> () } = {}
+
+-- What AntiEsp.answers hands out, and each asked viewer's row's first byte by its place in Sights while it runs
+local Answered: Answers = { kinds = buffer.create(SLOTS), teams = buffer.create(SLOTS * 8), visible = buffer.create(0) }
+local RowOf: { [number]: number } = {}
 
 -- Every pair by its index, each field an array, and the indexes a dropped pair left free
 local PairSights: { number } = {} -- Its viewer's place in Sights, NONE while free
@@ -231,6 +254,7 @@ local function note(slot: number, generation: number, entry: Entry?)
 
 	KindOf[slot + 1] = kind
 	LifeOf[slot + 1] = generation
+	ChangesOf[slot + 1] += 1
 
 	-- The next ask finds its viewer's own slot and team afresh, since two relay runs can come with no slice between
 	Asker = nil
@@ -318,9 +342,16 @@ function AntiEsp.start(
 		note(slot, generation, entry)
 	end
 
-	-- Lives as long as the server, as anti-ESP does
+	-- Lives as long as the server, as anti-ESP does. The slot table never changes an entry it hands out, so a held
+	-- change keeps its own
 	Slots.onChange(function (slot: number, generation: number, _: Entry?, current: Entry?)
-		note(slot, generation, current)
+		if Holding then
+			table.insert(Held, function ()
+				note(slot, generation, current)
+			end)
+		else
+			note(slot, generation, current)
+		end
 	end)
 end
 
@@ -710,6 +741,10 @@ local function sightOf(viewer: Viewer): (number, Sight)
 			eye = vector.zero,
 			drift = vector.zero,
 			lookAhead = 0,
+			cleared = vector.zero,
+			clearedFor = nil :: State?,
+			clearedTick = 0,
+			clearedChanges = 0,
 			groups = NONE,
 			group = NONE,
 			groupSlice = 0,
@@ -727,7 +762,8 @@ end
 
 --[[
     Finds what the relay's asks about one viewer read, once a viewer a run:
-    its place, its pairs by slot and its own character's team
+    its place, its pairs by slot and its own character's team, for the
+    life the slot table's changes last gave anti-ESP, which a hold keeps
 --]]
 
 local function attend(viewer: Viewer)
@@ -736,8 +772,7 @@ local function attend(viewer: Viewer)
 
 	AskerTeam = nil
 	if own ~= nil then
-		local ownGeneration: number = Slots.get(own)
-		AskerTeam = teamOf(own, ownGeneration)
+		AskerTeam = teamOf(own, LifeOf[own + 1])
 	end
 
 	Asker = viewer
@@ -884,8 +919,7 @@ function AntiEsp.reason(key: Key, slot: number): Reason
 	local own: number? = sight.viewer.slot
 
 	if kind == PLAYER and own ~= nil then
-		local ownGeneration: number = Slots.get(own)
-		local team: number? = teamOf(own, ownGeneration)
+		local team: number? = teamOf(own, LifeOf[own + 1])
 		if team ~= nil and teamOf(slot, generation) == team then
 			return "Teammate"
 		end
@@ -900,17 +934,109 @@ function AntiEsp.reason(key: Key, slot: number): Reason
 end
 
 --[[
-    A viewer's rays for this slice: its body's cleared eye, and its body's
-    move over the look-ahead, its round trip held to the settings' clamp,
-    or where it stands with no move while it has no body
+    What isHidden would answer if asked now, for a relay worker's stand-in,
+    changing nothing: each slot's kind and its life's team, and a row for
+    each viewer in the list, by its place there, with a slot's bit set when
+    the viewer's pair with it would answer visible on its own verdict. The
+    stand-in shows a free slot, an NPC, a player carrying the team of the
+    viewer's own slot, and a set bit, in that order, and hides the rest
+--]]
+
+function AntiEsp.answers(viewers: { Viewer }): Answers
+	if not Started then
+		error("AntiEsp.answers ran before AntiEsp.start", 2)
+	elseif type(viewers) ~= "table" then
+		error(`AntiEsp.answers takes the relay's viewers as a list, not a {typeof(viewers)}`, 2)
+	end
+
+	local kinds: buffer = Answered.kinds
+	local teams: buffer = Answered.teams
+
+	for slot: number = 0, SLOTS - 1 do
+		buffer.writeu8(kinds, slot, KindOf[slot + 1])
+		buffer.writef64(teams, slot * 8, teamOf(slot, LifeOf[slot + 1]) or NO_TEAM)
+	end
+
+	-- A row a viewer, made again only when their count changes
+	local size: number = #viewers * ROW_BYTES
+	local visible: buffer = Answered.visible
+	if buffer.len(visible) ~= size then
+		visible = buffer.create(size)
+		Answered.visible = visible
+	else
+		buffer.fill(visible, 0, 0)
+	end
+
+	for index: number, viewer: Viewer in viewers do
+		local sight: number? = SightOf[viewer.key]
+		if sight ~= nil then
+			RowOf[sight] = (index - 1) * ROW_BYTES
+		end
+	end
+
+	-- The round the asks will be in: the next one once a slice has run since the last
+	local round: number = Round
+	if Ran then
+		round += 1
+	end
+
+	-- A viewer with no pair for a slot yet would make it hidden, so only made pairs can set a bit
+	for pair: number = 1, PairTop do
+		local row: number? = RowOf[PairSights[pair]]
+		if row == nil then
+			continue
+		end
+
+		local slot: number = PairSlots[pair]
+		local kind: number = KindOf[slot + 1]
+		if kind ~= PLAYER and kind ~= LYING then
+			continue
+		end
+
+		local lying: boolean = kind == LYING
+		local verdict: number = PairVerdicts[pair]
+		local checked: number = PairChecked[pair]
+
+		-- As the ask would leave it: afresh for a new life or a pair the relay left out of its last run, and for a
+		-- sleep or a wake its verdict kept with its fail-open counted from now
+		if PairLives[pair] ~= LifeOf[slot + 1] or PairAsked[pair] < round - 1 then
+			verdict = UNTESTED
+			checked = Now
+		elseif PairLying[pair] ~= lying then
+			checked = Now
+		end
+
+		if verdict < HIDDEN or (not lying and Now - checked > FailOpen) then
+			local byte: number = row + slot // BITS
+			buffer.writeu8(visible, byte, bit32.bor(buffer.readu8(visible, byte), bit32.lshift(1, slot % BITS)))
+		end
+	end
+
+	for _, viewer: Viewer in viewers do
+		local sight: number? = SightOf[viewer.key]
+		if sight ~= nil then
+			RowOf[sight] = nil
+		end
+	end
+
+	return Answered
+end
+
+--[[
+    A viewer's rays for this slice: its body's cleared eye, found once a
+    tick of the world's and again after its slot changes or moves, and its
+    body's move over the look-ahead, its round trip held to the settings'
+    clamp, or where it stands with no move while it has no body
 --]]
 
 local function see(sight: Sight, world: World)
 	local viewer: Viewer = sight.viewer
 	local own: number? = viewer.slot
 	local body: State? = nil
+	local changes: number = 0
 	if own ~= nil then
 		body = Bodies[own]
+		changes = ChangesOf[own + 1]
 	end
 
 	local lookAhead: number = LookAheadMin
@@ -920,7 +1046,16 @@ local function see(sight: Sight, world: World)
 	end
 
 	if body then
-		sight.eye = Eye.clear(body, world)
+		-- A body steps only on the world's ticks, so its eye holds until the next one
+		local tick: number = world.clock
+		if sight.clearedFor ~= body or sight.clearedTick ~= tick or sight.clearedChanges ~= changes then
+			sight.cleared = Eye.clear(body, world)
+			sight.clearedFor = body
+			sight.clearedTick = tick
+			sight.clearedChanges = changes
+		end
+
+		sight.eye = sight.cleared
 		sight.drift = body.velocity * lookAhead
 	else
 		sight.eye = viewer.position
@@ -1178,13 +1313,16 @@ end
     overdue hidden player pairs nearest first and visible ones, then
     sleepers and bodies again with whatever the players leave, until budget
     seconds of os.clock() have passed. now is the schedule's clock every
-    due time is on
+    due time is on. It is refused inside a hold, whose asks must find the
+    verdicts as the round's answers gave them
 --]]
 
 function AntiEsp.run(budget: number, now: number)
 	local world: World? = Space
 	if world == nil then
 		error("AntiEsp.run ran before AntiEsp.start", 2)
+	elseif Holding then
+		error("AntiEsp.run ran inside a hold, which the relay round's release ends", 2)
 	elseif type(budget) ~= "number" or not (budget >= 0 and budget < math.huge) then
 		error(`AntiEsp.run takes a budget in seconds of 0 or more, not {budget}`, 2)
 	elseif type(now) ~= "number" or not (math.abs(now) < math.huge) then
@@ -1254,10 +1392,26 @@ function AntiEsp.run(budget: number, now: number)
 	end
 end
 
+-- Gives a slot's life of a generation a team, nil for none
+local function giveTeam(slot: number, team: number?, generation: number)
+	-- The next ask finds its viewer's team afresh
+	Asker = nil
+
+	if team == nil then
+		buffer.writeu8(TeamLives, slot, 0)
+
+		return
+	end
+
+	buffer.writef64(TeamValues, slot * 8, team)
+	buffer.writeu8(TeamLives, slot, generation + 1)
+end
+
 --[[
     Gives a slot's current life a team, nil for none. Two players carrying
     the same team are never hidden from each other, and a new life of the
-    slot starts with none
+    slot starts with none. Inside a hold it runs at the release, for the
+    life the slot had at the call
 --]]
 
 function AntiEsp.setTeam(slot: number, team: number?)
@@ -1269,33 +1423,19 @@ function AntiEsp.setTeam(slot: number, team: number?)
 		error(`AntiEsp.setTeam takes a team as a number or nil, not {team}`, 2)
 	end
 
-	-- The next ask finds its viewer's team afresh
-	Asker = nil
-
-	if team == nil then
-		buffer.writeu8(TeamLives, slot, 0)
-
-		return
-	end
-
 	local generation: number = Slots.get(slot)
-	buffer.writef64(TeamValues, slot * 8, team)
-	buffer.writeu8(TeamLives, slot, generation + 1)
+
+	if Holding then
+		table.insert(Held, function ()
+			giveTeam(slot, team, generation)
+		end)
+	else
+		giveTeam(slot, team, generation)
+	end
 end
 
---[[
-    Makes every pair a slot is in due now, as each viewer's target and as
-    the viewer whose own character it is, for a teleport's landing or a
-    sleeper's move
---]]
-
-function AntiEsp.moved(slot: number)
-	if not Started then
-		error("AntiEsp.moved ran before AntiEsp.start", 2)
-	elseif not Slots.valid(slot) then
-		error(`AntiEsp.moved takes one of the slot table's slots, not {slot}`, 2)
-	end
-
+-- Makes every pair a slot is in due now, and finds its own viewer's eye again
+local function due(slot: number)
 	for _, sight: Sight in Sights do
 		if not sight.live then
 			continue
@@ -1308,6 +1448,8 @@ function AntiEsp.moved(slot: number)
 		end
 
 		if sight.viewer.slot == slot then
+			sight.clearedFor = nil
+
 			for target: number = 0, SLOTS - 1 do
 				local own: number = buffer.readu32(targets, target * 4)
 				if own ~= NONE then
@@ -1319,17 +1461,30 @@ function AntiEsp.moved(slot: number)
 end
 
 --[[
-    Forgets a viewer that left and every pair it held. One anti-ESP was
-    never asked about leaves nothing to forget
+    Makes every pair a slot is in due now, as each viewer's target and as
+    the viewer whose own character it is, whose kept eye is found again,
+    for a teleport's landing or a sleeper's move. Inside a hold it runs at
+    the release
 --]]
 
-function AntiEsp.leave(key: Key)
+function AntiEsp.moved(slot: number)
 	if not Started then
-		error("AntiEsp.leave ran before AntiEsp.start", 2)
-	elseif key == nil then
-		error("AntiEsp.leave takes the player or bot that left, not nil", 2)
+		error("AntiEsp.moved ran before AntiEsp.start", 2)
+	elseif not Slots.valid(slot) then
+		error(`AntiEsp.moved takes one of the slot table's slots, not {slot}`, 2)
 	end
 
+	if Holding then
+		table.insert(Held, function ()
+			due(slot)
+		end)
+	else
+		due(slot)
+	end
+end
+
+-- Forgets a viewer and every pair it held, if anti-ESP was ever asked about it
+local function forget(key: Key)
 	local index: number? = SightOf[key]
 	if index == nil then
 		return
@@ -1347,6 +1502,63 @@ function AntiEsp.leave(key: Key)
 	sight.live = false
 	SightOf[key] = nil
 	table.insert(FreeSights, index)
+end
+
+--[[
+    Forgets a viewer that left and every pair it held. One anti-ESP was
+    never asked about leaves nothing to forget. Inside a hold it runs at the
+    release, so the round's asks about the viewer are forgotten with it
+--]]
+
+function AntiEsp.leave(key: Key)
+	if not Started then
+		error("AntiEsp.leave ran before AntiEsp.start", 2)
+	elseif key == nil then
+		error("AntiEsp.leave takes the player or bot that left, not nil", 2)
+	end
+
+	if Holding then
+		table.insert(Held, function ()
+			forget(key)
+		end)
+	else
+		forget(key)
+	end
+end
+
+--[[
+    Holds every change to anti-ESP's state while a relay round is out, the
+    game's, the server's and the slot table's, until AntiEsp.release. Asks
+    still run inside it, and a slice is refused
+--]]
+
+function AntiEsp.hold()
+	if not Started then
+		error("AntiEsp.hold ran before AntiEsp.start", 2)
+	elseif Holding then
+		error("AntiEsp.hold ran while its last hold was still out", 2)
+	end
+
+	Holding = true
+end
+
+--[[
+    Ends the hold, making each change held since it in the order it came,
+    as each would have run once the round's asks were done
+--]]
+
+function AntiEsp.release()
+	if not Holding then
+		error("AntiEsp.release ran with no hold out", 2)
+	end
+
+	Holding = false
+
+	for _, change: () -> () in Held do
+		change()
+	end
+
+	table.clear(Held)
 end
 
 --[[

@@ -297,8 +297,9 @@ function Spectators.probe(timing: Config.Timing): Probe
 		local parts: { string } = { `{#watches} moderators` }
 		if tapped then
 			local tapsOn: { number } = snapshot(relay)
-			local off: string = `taps off {spread(tapsOff, FIGURE)} over {#tapsOff} ticks`
-			local on: string = `taps on {spread(tapsOn, FIGURE)} over {#tapsOn} ticks`
+			-- A ring time is one relay run, and a catch-up Heartbeat's ticks run the relay once
+			local off: string = `taps off {spread(tapsOff, FIGURE)} over {#tapsOff} runs`
+			local on: string = `taps on {spread(tapsOn, FIGURE)} over {#tapsOn} runs`
 			table.insert(parts, `relay ms a tick p50/p95/p99 {off}, {on}`)
 		else
 			table.insert(problems, "the window ended before the taps connected")

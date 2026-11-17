@@ -13,6 +13,7 @@ local RUN: string = "dev/Server/Bots/Run.luau"
 local CAPACITY: number = 4
 local ELAPSED: number = 0.1 -- Seconds the window's four frames span
 local TICKS: number = 3 -- Ticks the window ran
+local LAST: number = 40 -- The tick each ring's newest time ran on
 
 -- Each Heartbeat's interval, ms, out of order so the read sorts them
 local FRAMES: { number } = { 30, 10, 40, 20 }
@@ -96,12 +97,19 @@ local function stage(ring: Ring): any
 		table.insert(times, index * PLACES[ring.name])
 	end
 
+	-- The newest at the index before the head, each one behind it a tick older
+	local ticks: { number } = table.create(CAPACITY, 0)
+	for back: number = 1, ring.held do
+		ticks[(ring.head - back) % CAPACITY + 1] = LAST - back + 1
+	end
+
 	return {
 		name = ring.name,
 		run = function () end,
 		between = ring.name == "antiEsp",
 		label = ring.name,
 		times = times,
+		ticks = ticks,
 		held = ring.held,
 		head = ring.head,
 		last = 0,

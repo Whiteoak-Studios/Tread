@@ -69,7 +69,7 @@ return function (): (boolean, string | nil)
 	end
 
 	-- 1) Over the step, the left ankle rises by the step and the right one rests
-	Animate.plant(animated, root, 0, reach, Collision({ FLOOR, STEP }), true, true)
+	Animate.plant(animated, root.CFrame, 0, reach, Collision({ FLOOR, STEP }), true, true)
 	Animate.layer(animated)
 
 	local raised: any = restLeft.ankle + Vector3.new(0, RISE, 0)

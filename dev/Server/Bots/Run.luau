@@ -35,6 +35,7 @@ local FPS: number = require(ServerScriptService.Server.Bots.Config).fps
 local TICK_STAGES: { string } = require(ServerScriptService.Server.Bots.Config).tick.stages
 local BESIDE: string = require(ServerScriptService.Server.Bots.Config).tick.beside
 local COUNTS: { string } = require(ServerScriptService.Server.Bots.Config).tick.counts
+local RELAY_COUNTS: { string } = require(ServerScriptService.Server.Bots.Config).tick.relayCounts
 local MOVED: number = require(ServerScriptService.Server.Bots.Config).moved
 local EVERY: number = require(ServerScriptService.Server.Bots.Config).cheats.every
 local HOLDS: { number } = require(ServerScriptService.Server.Bots.Config).cheats.holds
@@ -676,21 +677,22 @@ local function tickLine(label: string, totals: { number }, samples: Samples): st
 	return table.concat(parts, SEPARATOR)
 end
 
--- The configured counts a tick over the window, each read's change over the ticks that read ran
-local function countsLine(label: string, perTick: Samples): string
+-- The configured counts over the window, each read's change a relay run for a relay count and a tick for the rest
+local function countsLine(label: string, rates: Samples): string
 	local parts: { string } = {}
 	for _, name: string in COUNTS do
-		table.insert(parts, `{name} {spread(perTick[name] or {}, FIGURE)}`)
+		local over: string = table.find(RELAY_COUNTS, name) and "relay run" or "tick"
+		table.insert(parts, `{name} a {over} {spread(rates[name] or {}, FIGURE)}`)
 	end
 
-	return `{label} counts a tick, p50/p95/p99 over the reads: {table.concat(parts, SEPARATOR)}`
+	return `{label} counts, p50/p95/p99 over the reads: {table.concat(parts, SEPARATOR)}`
 end
 
 --[[
     The window: Tread's stats read once each interval with the real player
     count and each real player's bytes over the last second beside it, each
     read printed as it comes, the server's frames, every tick's summed
-    stages and the counts a tick taken beside, their lines printed after,
+    stages and the counts taken beside, their lines printed after,
     and the percentiles of every stats figure, with every figure's samples.
     It ends on its own deadline
 --]]
@@ -699,7 +701,7 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 	local server: Tread.Server = Game.get()
 	local Network = require(Packages.Tread.Network.Server) -- Tread's own scope, which each viewer's bytes are counted on
 	local samples: Samples = {}
-	local perTick: Samples = {}
+	local rates: Samples = {}
 	local sampled: Sampled = { frames = {}, heartbeatTimes = {}, physicsTimes = {}, dataSend = {} }
 	local totals: { number } = {}
 	local counted: number = Tick.counts()
@@ -742,16 +744,7 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 			push(samples, `{name}P95Ms`, times.p95 * MILLISECONDS)
 		end
 
-		-- A read whose ticks all dropped ran none to count over
-		local ticks: any = stats.ticks
-		if type(ticks) == "number" and ticks > 0 then
-			for _, name: string in COUNTS do
-				local count: any = stats[name]
-				if type(count) == "number" then
-					push(perTick, name, count / ticks)
-				end
-			end
-		end
+		Run.counts(stats, rates)
 
 		-- The ticks run since the last read, each one's stages summed from their rings
 		local ran: number = Tick.counts()
@@ -779,7 +772,7 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 
 	print(serverLine(label, sampled, elapsed))
 	print(tickLine(label, totals, samples))
-	print(countsLine(label, perTick))
+	print(countsLine(label, rates))
 
 	return `{label} summary over {second} reads, p50/p95/p99: {summary(samples)}`, samples
 end
@@ -1145,49 +1138,92 @@ function Run.run(name: string, timing: Timing, probe: Probe?, distance: number?)
 end
 
 --[[
-    The configured tick stages' times summed tick by tick, for the newest
-    count ticks their rings still hold, oldest first, in seconds. Any other
-    stage in the list is left out; a configured one missing, or whose ring
-    stands apart from the rest, is refused
+    The configured tick stages' times summed tick by tick, oldest first, in
+    seconds: the newest count ticks to the newest any of them ran on, at
+    most the longest ring's length and none before the oldest their rings
+    hold, each the time of every configured stage that ran on that tick.
+    Any other stage is left out. A configured one missing is refused, and so
+    is one whose ring is full and holds no tick as old as the window's
+    oldest, since it may have run on a tick of the window it no longer holds
 --]]
 
 function Run.tickTotals(stages: { Tick.Stage }, count: number): { number }
 	local summed: { Tick.Stage } = {}
+	local newest: number = 0
+	local floor: number = math.huge -- The oldest tick any of their rings holds
+	local length: number = 0
+
 	for _, stage: Tick.Stage in stages do
 		if table.find(TICK_STAGES, stage.name) then
+			local size: number = #stage.times
 			table.insert(summed, stage)
+			length = math.max(length, size)
+
+			if stage.held > 0 then
+				newest = math.max(newest, stage.ticks[(stage.head - 1) % size + 1])
+				floor = math.min(floor, stage.ticks[(stage.head - stage.held) % size + 1])
+			end
 		end
 	end
 
-	local first: Tick.Stage? = summed[1]
-	if not first or #summed ~= #TICK_STAGES then
+	if #summed ~= #TICK_STAGES then
 		error(`Run.tickTotals sums the stages {table.concat(TICK_STAGES, SUM)}, and the tick has {#summed} of them`, 2)
 	end
 
+	local oldest: number = math.max(newest - math.min(count, length) + 1, floor)
+	local totals: { number } = table.create(math.max(newest - oldest + 1, 0), 0)
+
 	for _, stage: Tick.Stage in summed do
-		if stage.head ~= first.head or stage.held ~= first.held then
+		local size: number = #stage.times
+		local first: number = stage.ticks[(stage.head - stage.held) % size + 1] -- The oldest tick its ring holds
+
+		if stage.held == size and first > oldest then
 			error(
-				`Run.tickTotals sums rings that advance together, and {stage.name}'s stands apart from {first.name}'s`,
+				`Run.tickTotals sums ticks {oldest} to {newest}, and {stage.name}'s full ring holds none before {first}`,
 				2
 			)
 		end
-	end
 
-	local capacity: number = #first.times
-	local totals: { number } = {}
+		-- Newest first, each time onto the total of the tick it ran on, until the ring passes the window's oldest
+		for back: number = 1, stage.held do
+			local index: number = (stage.head - back) % size + 1
+			local tick: number = stage.ticks[index]
+			if tick < oldest then
+				break
+			end
 
-	for back: number = math.min(count, first.held), 1, -1 do
-		local index: number = (first.head - back) % capacity + 1
-		local total: number = 0
-
-		for _, stage: Tick.Stage in summed do
-			total += stage.times[index]
+			totals[tick - oldest + 1] += stage.times[index]
 		end
-
-		table.insert(totals, total)
 	end
 
 	return totals
+end
+
+--[[
+    A stats read's configured counts pushed onto samples, a relay count
+    over the read's relay runs, its ticks less the relay ticks it skipped,
+    and the rest over its ticks. A figure whose divisor is none is left
+    out, as a read whose ticks all dropped gives, or a short one charged
+    with relay ticks skipped before it, since they count at the next run
+--]]
+
+function Run.counts(stats: { [string]: any }, samples: Samples)
+	local ticks: any, skipped: any = stats.ticks, stats.relaySkipped
+	if type(ticks) ~= "number" or type(skipped) ~= "number" then
+		return
+	end
+
+	for _, name: string in COUNTS do
+		local count: any = stats[name]
+		local over: number = ticks
+		if table.find(RELAY_COUNTS, name) then
+			over -= skipped
+		end
+
+		if type(count) == "number" and over > 0 then
+			push(samples, name, count / over)
+		end
+	end
 end
 
 return Run

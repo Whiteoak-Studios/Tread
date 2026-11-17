@@ -62,7 +62,7 @@ return function (): (boolean, string | nil)
 	end
 
 	-- 1) Ground a stud too low leaves both legs straight down toward it
-	Animate.plant(animated, root, 0, reach, Collision({ LOW }), true, true)
+	Animate.plant(animated, root.CFrame, 0, reach, Collision({ LOW }), true, true)
 	Animate.layer(animated)
 
 	local below: any = Vector3.new(0, DROP, 0)

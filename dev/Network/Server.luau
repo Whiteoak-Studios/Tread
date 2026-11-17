@@ -272,7 +272,7 @@ local function readclientCost(player: (Player | Bot)?, packet: buffer, cursor: n
 
 	local lineLength: number = 1 + buffer.readu16(packet, cursor + 2)
 
-	if lineLength > 512 then
+	if lineLength > 2048 then
 		error("clientCost.line: length out of range")
 	end
 
@@ -390,7 +390,7 @@ end
 
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x17BACF31,
+	hash = 0x0E155838,
 	scope = "Dev",
 	side = "server",
 	idBytes = 1,

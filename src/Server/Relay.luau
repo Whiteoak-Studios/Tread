@@ -180,7 +180,7 @@ type Grid = {
 	rows: buffer, -- u16 by slot: and its row
 	orders: buffer, -- u16 by slot: its place from 1 in this run's walk of the states
 	walk: buffer, -- u16 by place: the slot at it
-	positions: buffer, -- f32 x, y and z by slot, 12 B a slot: where it stood this run, exactly, since a vector is f32
+	positions: { vector }, -- By slot plus 1: where it stood this run
 	count: number, -- The bodies this run filed
 	visits: { number }, -- A turn's slots to visit, each as its place times SLOTS plus the slot
 	visited: number, -- The bodies the turns have gathered since start
@@ -219,8 +219,8 @@ type View = {
 	lookSent: buffer, -- u16: the look version it was last given
 	heldSent: buffer,
 	repeats: buffer, -- u8: the rest repeats left
-	lastRecord: buffer, -- u32: the run its last record went in, 0 for none
-	shotUntil: buffer, -- u32: the last run a shot near it raises that shooter's rate
+	lastRecord: buffer, -- u32: the relay tick its last record went in, unwrapped, 0 for none
+	shotUntil: buffer, -- u32: the last relay tick a shot near it raises that shooter's rate
 	aim: buffer, -- f32: the tier ticks it is owed at the target's aim rate
 	floor: buffer, -- f32: and at its floor rate
 	baseRuns: buffer, -- u32: the newest run whose record every recipient acknowledged, 0 for none; empty unless changes
@@ -270,7 +270,7 @@ local Keyed: { hash: number, gravity: number } = { hash = 0, gravity = 0 }
 -- radii each viewer's own render distance caps, in studs, and the grid that finds the bodies inside them, which
 -- share one table since Luau caps a chunk's locals
 local RelayRate: number = 0
-local StillRuns: number = 0
+local StillTicks: number = 0
 local Radii: { enter: number, leave: number, sleepers: number, npcs: number, grid: Grid } = {
 	enter = 0,
 	leave = 0,
@@ -283,7 +283,7 @@ local Radii: { enter: number, leave: number, sleepers: number, npcs: number, gri
 		rows = buffer.create(SLOTS * 2),
 		orders = buffer.create(SLOTS * 2),
 		walk = buffer.create((SLOTS + 1) * 2),
-		positions = buffer.create(SLOTS * 12),
+		positions = table.create(SLOTS, vector.zero),
 		count = 0,
 		visits = {},
 		visited = 0,
@@ -300,7 +300,7 @@ local WeightFar: number = 0
 local WeightShooter: number = 0
 local WeightCone: number = 0
 local ShotRate: number = 0
-local ShotRuns: number = 0
+local ShotTicks: number = 0
 local Soft: number = 0
 local Hard: number = 0
 local NpcNearSquared: number = 0
@@ -316,7 +316,9 @@ local LeaveSquared: number = 0
 local SleeperSquared: number = 0
 local NpcRangeSquared: number = 0
 
-local Run: number = 0 -- The relay runs so far, which every timing counts in
+local Run: number = 0 -- The relay runs so far, which every timing but those in seconds counts in
+local RunTick: number = 0 -- The relay tick of this run, or the last, unwrapped, which the timings in seconds count in
+local Elapsed: number = 1 -- The relay ticks since the run before, more than 1 after runs a catch-up skipped
 local TickWire: number = 0 -- The relay tick this run's blocks carry, a u16
 local RecordsSent: number = 0 -- The records the tier ticks' lists placed in a block, since start
 local RecordsCut: number = 0 -- And those a viewer's room left out
@@ -327,7 +329,7 @@ local Generations: buffer = buffer.create(SLOTS)
 local Kinds: buffer = buffer.create(SLOTS)
 local Records: buffer = buffer.create(SLOTS * RECORD_BYTES)
 local References: buffer = buffer.create(SLOTS * RECORD_BYTES) -- The record each change is measured from
-local Changed: buffer = buffer.create(SLOTS * 4) -- u32: the run its record last changed
+local Changed: buffer = buffer.create(SLOTS * 4) -- u32: the relay tick its record last changed, unwrapped
 
 -- Records as changes, on while the game's relay.changes is: every present slot's record over the last DEPTH runs, a
 -- plane a run at the run's place in DEPTH with the run and wire tick it holds, and this run's changes, each encoded
@@ -517,7 +519,7 @@ function Relay.start(
 	end
 
 	RelayRate = shared.rates.relay
-	StillRuns = STILL_SECONDS * RelayRate
+	StillTicks = STILL_SECONDS * RelayRate
 	Radii = {
 		enter = server.relevancy.enter,
 		leave = server.relevancy.leave,
@@ -548,7 +550,7 @@ function Relay.start(
 	WeightShooter = server.weights.shooter
 	WeightCone = server.weights.cone
 	ShotRate = server.shotNear.rate
-	ShotRuns = math.ceil(server.shotNear.seconds * RelayRate)
+	ShotTicks = math.ceil(server.shotNear.seconds * RelayRate)
 	Soft = server.budget.soft * BYTES_PER_KB
 	Hard = server.budget.hard * BYTES_PER_KB
 	NpcNearSquared = server.npcs.near ^ 2
@@ -637,7 +639,7 @@ local function encode(slot: number, state: State, command: Command?, generation:
 
 	if changed(at) then
 		buffer.copy(References, at, Records, at, RECORD_BYTES)
-		buffer.writeu32(Changed, slot * 4, Run)
+		buffer.writeu32(Changed, slot * 4, RunTick)
 	end
 end
 
@@ -1395,7 +1397,7 @@ local function writeRecord(view: View, slot: number, base: number)
 
 	local aims: buffer = view.aim
 	local floors: buffer = view.floor
-	buffer.writeu32(lastRecord, slot * 4, Run)
+	buffer.writeu32(lastRecord, slot * 4, RunTick)
 	buffer.writef32(aims, slot * 4, math.max(buffer.readf32(aims, slot * 4) - 1, 0))
 	buffer.writef32(floors, slot * 4, math.max(buffer.readf32(floors, slot * 4) - 1, 0))
 end
@@ -1630,7 +1632,7 @@ local function placeRecords(view: View, list: { number }, count: number, budget:
 			end
 		end
 
-		buffer.writeu32(lastRecord, slot * 4, Run)
+		buffer.writeu32(lastRecord, slot * 4, RunTick)
 		buffer.writef32(aims, slot * 4, math.max(buffer.readf32(aims, slot * 4) - 1, 0))
 		buffer.writef32(floors, slot * 4, math.max(buffer.readf32(floors, slot * 4) - 1, 0))
 		RecordsSent += 1
@@ -1638,7 +1640,7 @@ local function placeRecords(view: View, list: { number }, count: number, budget:
 
 	for index: number = 1, count do
 		local slot: number = list[index]
-		if buffer.readu32(lastRecord, slot * 4) ~= Run then
+		if buffer.readu32(lastRecord, slot * 4) ~= RunTick then
 			buffer.writef32(aims, slot * 4, math.min(buffer.readf32(aims, slot * 4), 1))
 			buffer.writef32(floors, slot * 4, math.min(buffer.readf32(floors, slot * 4), 1))
 		end
@@ -1794,7 +1796,7 @@ local function consider(view: View, viewer: Viewer, own: number?)
 	-- power of two, so a visit's slot is its low bits
 	local viewFlags: buffer = view.flags
 	local kinds: buffer = Kinds
-	local positions: buffer = grid.positions
+	local positions: { vector } = grid.positions
 	local slotBits: number = SLOTS - 1
 	local listed: number = 0
 	local ordered: boolean = true
@@ -1814,12 +1816,7 @@ local function consider(view: View, viewer: Viewer, own: number?)
 			continue
 		end
 
-		local at: number = slot * 12
-		local offset: vector = vector.create(
-			buffer.readf32(positions, at),
-			buffer.readf32(positions, at + 4),
-			buffer.readf32(positions, at + 8)
-		) - origin
+		local offset: vector = positions[slot + 1] - origin
 		local squared: number = vector.dot(offset, offset)
 		local kept: number = buffer.readu16(viewFlags, slot * 2)
 		local kind: number = buffer.readu8(kinds, slot)
@@ -1948,8 +1945,8 @@ end
     or NPC's record is listed when its tier tick comes and it has something
     to send: a change, a rest repeat or the still repeat. At or past its
     floor it is owed; under it, it waits in the queue by its weight times
-    the runs since its last record. A player outside the viewer's cone past
-    the out-of-view radius, and no recent shooter, is held to the
+    the relay ticks since its last record. A player outside the viewer's
+    cone past the out-of-view radius, and no recent shooter, is held to the
     out-of-view rate, and is owed a record the run it no longer is. Returns
     how many hides, reveals, look entries, owed and queued records it listed
 
@@ -1964,7 +1961,7 @@ local function schedule(
 	looking: vector?
 ): (number, number, number, number, number)
 	local hides: number, reveals: number, restyles: number, floors: number, fills: number = 0, 0, 0, 0, 0
-	local positions: buffer = Radii.grid.positions
+	local positions: { vector } = Radii.grid.positions
 	local tracked: { number } = view.tracked
 	local viewFlags: buffer = view.flags
 	local shotUntil: buffer = view.shotUntil
@@ -2022,12 +2019,7 @@ local function schedule(
 			continue
 		end
 
-		local at: number = slot * 12
-		local offset: vector = vector.create(
-			buffer.readf32(positions, at),
-			buffer.readf32(positions, at + 4),
-			buffer.readf32(positions, at + 8)
-		) - origin
+		local offset: vector = positions[slot + 1] - origin
 		local near: boolean = bit32.btest(flags, NEAR)
 		local aimRate: number
 		local floorRate: number
@@ -2052,7 +2044,7 @@ local function schedule(
 			floorRate = FarFloor
 		end
 
-		local shooter: boolean = buffer.readu32(shotUntil, slot * 4) >= Run
+		local shooter: boolean = buffer.readu32(shotUntil, slot * 4) >= RunTick
 		if shooter then
 			aimRate = math.max(aimRate, ShotRate)
 			floorRate = math.max(floorRate, ShotRate)
@@ -2091,8 +2083,9 @@ local function schedule(
 			end
 		end
 
-		local aim: number = buffer.readf32(aimCredits, slot * 4) + math.min(aimRate / RelayRate, 1)
-		local floor: number = buffer.readf32(floorCredits, slot * 4) + math.min(floorRate / RelayRate, 1)
+		-- Each tier tick's credit for every relay tick since the last run, so its rate keeps its seconds
+		local aim: number = buffer.readf32(aimCredits, slot * 4) + math.min(aimRate * Elapsed / RelayRate, 1)
+		local floor: number = buffer.readf32(floorCredits, slot * 4) + math.min(floorRate * Elapsed / RelayRate, 1)
 
 		if outside then
 			buffer.writeu16(viewFlags, slot * 2, bit32.bor(flags, OUTSIDE))
@@ -2114,7 +2107,7 @@ local function schedule(
 		local still: boolean = buffer.readu32(Changed, slot * 4) <= last and buffer.readu8(repeats, slot) == 0
 
 		-- Its tier tick passes with nothing to send while it stays still
-		if still and Run - last < StillRuns then
+		if still and RunTick - last < StillTicks then
 			buffer.writef32(aimCredits, slot * 4, aim - 1)
 			buffer.writef32(floorCredits, slot * 4, math.max(floor - 1, 0))
 
@@ -2123,7 +2116,7 @@ local function schedule(
 
 		buffer.writef32(aimCredits, slot * 4, aim)
 		buffer.writef32(floorCredits, slot * 4, floor)
-		buffer.writef64(Priorities, slot * 8, weight * (Run - last))
+		buffer.writef64(Priorities, slot * 8, weight * (RunTick - last))
 
 		if floor >= 1 then
 			floors += 1
@@ -2237,7 +2230,7 @@ local function withhold(view: View, states: { [number]: State })
 			end
 
 			local rate: number = bit32.btest(flags, NEAR) and NearAim or FarAim
-			aim = buffer.readf32(withheld.aim, slot * 4) + math.min(rate / RelayRate, 1)
+			aim = buffer.readf32(withheld.aim, slot * 4) + math.min(rate * Elapsed / RelayRate, 1)
 		end
 
 		if aim >= 1 then
@@ -2623,7 +2616,8 @@ end
     it. states holds the server's live bodies by slot, and commands the
     command each last stepped, whose pitch and head offset its record
     carries. A target handed more watchers than it takes errors, naming
-    it, once every viewer has had its turn
+    it, once every viewer has had its turn, and a tick, unwrapped, no later
+    than the last run's is refused
 --]]
 
 function Relay.run(
@@ -2635,9 +2629,13 @@ function Relay.run(
 )
 	if not Started then
 		error("Relay.run ran before Relay.start", 2)
+	elseif not (tick > RunTick) then
+		error(`Relay.run takes a relay tick after the last run's {RunTick}, not {tick}`, 2)
 	end
 
 	Run += 1
+	Elapsed = tick - RunTick
+	RunTick = tick
 	TickWire = tick % WRAP
 	StepCount = 0
 
@@ -2651,7 +2649,7 @@ function Relay.run(
 	-- Each body is filed in its cell's list in its kind's cells, numbered in the order the states are walked, which each
 	-- turn keeps
 	local grid: Grid = Radii.grid
-	local positions: buffer = grid.positions
+	local positions: { vector } = grid.positions
 	local bound: number = Constants.PLAY_BOUND
 	local order: number = 0
 
@@ -2687,10 +2685,7 @@ function Relay.run(
 		-- Its place where every turn reads it, held to the grid's edges, and a NaN place to its first cell, since a turn
 		-- finds that inside no radius
 		local position: vector = state.position
-		local at: number = slot * 12
-		buffer.writef32(positions, at, position.x)
-		buffer.writef32(positions, at + 4, position.y)
-		buffer.writef32(positions, at + 8, position.z)
+		positions[slot + 1] = position
 
 		local cells: Cells = grid.cells[kind + 1]
 		local size: number = cells.size
@@ -2852,7 +2847,7 @@ function Relay.shotNear(key: Key, slot: number)
 
 	local view: View? = Views[key]
 	if view then
-		buffer.writeu32(view.shotUntil, slot * 4, Run + ShotRuns)
+		buffer.writeu32(view.shotUntil, slot * 4, RunTick + ShotTicks)
 	end
 end
 

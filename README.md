@@ -366,6 +366,11 @@ Tread holds no game values and ships no default for any setting. Every gameplay 
 | `drawDistance.desktop`, `console`, `phone`, `tablet` | The character draw distance per device class, studs. Tread reads the class once at start: console on a ten-foot interface, desktop with no touch or with a keyboard, phone on a small touch display, tablet otherwise. It is also the render distance the client starts with and sends the server, until the game calls `client:setRenderDistance`. |
 | `lod.full`, `lod.footIk`, `lod.aim` | The distances, in studs, inside which a rig animates in full, plants its feet, and shows aim pitch. Lean shows wherever a character is drawn. |
 | `firstPerson.back` | How far behind the world rig, in studs along its facing, the local player's first-person copy is drawn, 0 or more, so its torso stays behind a camera at the eye. The camera, the eye and everything the server reads stay where they are. Tune it to your rig, field of view and near plane: on Roblox's stock R15 rig at a 70° view, 1 stud kept the walking body clear of a 0.1-stud near plane, and a 0.5-stud near plane needed 1.55 looking straight down. While a rig is the copy, its model is named `FirstPersonCopy`. |
+| `perFrame.switches` | Optional, a whole number of 1 or more: the most track switches, from one track to another, the client's rigs make a frame. Given, a switch waits for the frame's end with its rig's track still playing, and the frame's end plays up to the cap: the switches that waited from frames before first, in the order they came, then the frame's new ones nearest first. A rig's first track plays at once, outside the cap. The frame's end is the end of the client's frame and of each `playback:render`. Left out, every switch plays at once. |
+| `perFrame.draws` | Optional, a whole number of 1 or more: the most rigs the client puts into the Workspace a frame, a rig's first draw for its slot and its return from past the draw distance alike. Given, such a draw waits out of the Workspace for the frame's end, which draws up to the cap in the same order as `perFrame.switches`. Left out, every rig is drawn at once. |
+| `perFrame.ragdolls` | Optional, a whole number of 1 or more: the most ragdolls the client starts a frame. Given, a dying rig holds its pose until the frame's end starts its ragdoll, up to the cap in the same order as `perFrame.switches`. Left out, every ragdoll starts at once. |
+| `perFrame.builds` | Optional, a whole number of 1 or more: the most spare rigs the client builds at each frame's end toward `pool.spare`. Left out, every missing spare rig is built at once. Without `pool.spare` it builds none. |
+| `pool.spare` | Optional, as a table: the rigs the pool keeps built outside the Workspace, a whole number of 1 or more, refilled at each frame's end so a burst of reveals takes rigs without cloning any. A checkout from an empty pool still builds one at once. Left out, the pool keeps none. |
 
 #### How the tables are checked
 
@@ -426,7 +431,7 @@ Under luau-lsp's new type checker:
 - `server:stats(): { [string]: any }` gives Tread's aggregate numbers, with no endpoint and no signal, for the game to read about once a second. It holds no position and no name:
   - `seconds` since the last read, and `stages`, each stage's `last` and `p95` time over 10 s, in seconds;
   - as they stand: `players` (live characters), `npcs` (awake), `bodies`, `historyBytes`, `trafficLargest` and `trafficP95`, the largest and the p95 of the bytes Volt sent each joined player and bot over the last second, and `antiEspLyingWaiting`, the sleeper and body pairs due for a test that anti-ESP's slices haven't had time for yet;
-  - as their change since the last read: `ticks`, `dropped`, `standIns`, `late`, `recordsSent`, `recordsCut`, `bytesOut`, `antiEspTests`, `antiEspHidden`, `antiEspFailOpens`, `antiEspLyingTests` (the sleeper and body pair tests among `antiEspTests`), and `reports` by kind.
+  - as their change since the last read: `ticks`, `dropped`, `relaySkipped` (the relay ticks the relay didn't run, since a Heartbeat that runs two ticks to catch up relays once, on the last of them that starts a relay tick), `standIns`, `late`, `recordsSent`, `recordsCut`, `bytesOut`, `antiEspTests`, `antiEspHidden`, `antiEspFailOpens`, `antiEspLyingTests` (the sleeper and body pair tests among `antiEspTests`), and `reports` by kind.
 
 The recording taps on the server handle are under [Recording taps and clip playback](#recording-taps-and-clip-playback).
 
@@ -519,7 +524,7 @@ The root re-exports every public type under its own name.
 
 ### Recording taps and clip playback
 
-The taps let a game record moderator clips. With nothing connected, each tap point costs one flag check. A sink is called every relay tick after the relay stage's flush, with the unwrapped relay tick and a frame in a new buffer the sink may keep. Each sink and callback runs under its own `xpcall` and must not yield, and a viewer who leaves has its sinks dropped.
+The taps let a game record moderator clips. With nothing connected, each tap point costs one flag check. A sink is called after each relay run's flush, with that run's unwrapped relay tick and a frame in a new buffer the sink may keep. When the server falls behind and the relay skips a relay tick, that tick gives no frame, so a clip's tick numbers can jump by more than one; playback blends across the gap, and the next frame carries the skipped tick's looks. Each sink and callback runs under its own `xpcall` and must not yield, and a viewer who leaves has its sinks dropped.
 
 - `server:observe(viewer: Player | Bot, sink: Sink): () -> ()` calls the sink with a frame of every block the relay sent the viewer that tick, each record with its send reason, and the viewer's OwnerState while it owns a character, with its view lag and the looks it stepped since the last frame. A spectating moderator's frames hold the copies of its target's blocks. The reasons are `"Clear"`, `"Hold"`, `"FailOpen"`, `"Teammate"`, `"Npc"`, `"Hidden"` and `"Untested"`.
 - `server:observeWithheld(viewer: Player | Bot, sink: Sink): () -> ()` calls the sink with a frame of the withheld blocks the relay sent the moderators spectating the viewer: the players anti-ESP held back from it, never an Invisible or Parked one. While no moderator spectates the viewer, each frame holds no block.
@@ -599,6 +604,8 @@ Tread ships no rig. `rig` is the game's template: any R15 Model with AnimationCo
 `joints` names, for each of the 15 logical joints, the AnimationConstraint that is that joint in the rig, found anywhere under it and joining two parts by its attachments: `Root`, `Waist`, `Neck`, `LeftShoulder`, `LeftElbow`, `LeftWrist`, `RightShoulder`, `RightElbow`, `RightWrist`, `LeftHip`, `LeftKnee`, `LeftAnkle`, `RightHip`, `RightKnee` and `RightAnkle`.
 
 The rig has no Humanoid, so Shirt, Pants, BodyColors and `Humanoid:AddAccessory` don't work on it, and the game's `dress` hook welds each piece of a look by hand. The first-person copy is dressed with `copy` true, so the game can leave off what the copy never shows, such as the head. Each client attaches the held item to its own copy of the rig in `hold`.
+
+Tread moves a drawn rig's root every frame, a standing rig's too: on alternate frames a still rig's root sits 0.001 studs above where it stands. In Studio, Roblox's renderer spent a long frame whenever an anchored rig that had stopped being moved was moved again, and the nudge keeps that from happening. So a game that reads a rig's `PrimaryPart.CFrame` sees it shift by that much, and whatever the game welds to the rig moves with it. A rig lying Downed, a sleeper or a body among them, is left where it lies.
 
 ### Animations
 

@@ -86,7 +86,7 @@ event clientCost {
 	from: Client,
 	type: Reliable,
 	call: SingleSync,
-	data: (label: string(1..64), measured: boolean, line: string(1..512)),
+	data: (label: string(1..64), measured: boolean, line: string(1..2048)),
 }
 
 -- A client's ask that the server spawn the bot panel's bots: how many, how they move, and how many studs either way

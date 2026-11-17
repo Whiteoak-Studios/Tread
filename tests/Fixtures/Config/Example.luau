@@ -378,6 +378,10 @@ function Example.client(): ClientSettings
 
 		-- Frontier Zero tunes the copy's distance live with its rig and field of view, so the dev place's stands in
 		firstPerson = { back = 1 },
+
+		-- Frontier Zero sets its caps and spare rigs once ClientCost measures them, so the dev place's stand in
+		perFrame = { switches = 8, draws = 4, ragdolls = 4, builds = 4 },
+		pool = { spare = 40 },
 	}
 end
 

@@ -72,6 +72,8 @@ local LiveRuns = {
 		{ name = "LateReveals", minutes = 31.5 }, -- 3 seeds of a 30 s warm-up and a 600 s window
 		{ name = "Corrections", minutes = 0.1 }, -- Prints the counts kept since each player joined
 		{ name = "HitAgreement", minutes = 8.4 }, -- A 3 s settle, then 4 cases of a 3 s warm-up, 120 s firing, 2 s drain
+		{ name = "Versus", minutes = 4 }, -- S3, S4 and both at 300 players, a 10 s warm-up and a 40 s window each
+		{ name = "GoA0", minutes = 0.5 }, -- Every real player sent to a fresh A0 server, whose quick program then runs there
 	} :: { Run },
 
 	-- What Run all runs one after another on one server, each a listed run needing neither a player's hands nor a server

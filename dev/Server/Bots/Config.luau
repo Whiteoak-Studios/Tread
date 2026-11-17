@@ -1,7 +1,7 @@
 --[[
     The bot harness's numbers: scenarios S0 to S7 and the gates' loads, the
-    seeded runs' timings, the speed calibration and the relevancy sweep, how
-    a bot roams, what each cheat sends, and where its floors and spawns go
+    seeded runs' timings, the calibration, the relevancy sweep and versus run,
+    how a bot roams, what each cheat sends, and where its floors and spawns go
 --]]
 
 --!strict
@@ -81,6 +81,7 @@ local CITY_SLEEPERS: number = 125 -- The estimate's hotspot, the sleepers one ci
 local SPREAD_SLEEPERS: number = 1875 -- The rest of S9's 2,000
 local MODERATORS: number = 4 -- S10's spectating moderators, the map group cut by as many
 local SCALE: number = 299 -- G10's 300 players beside the one real client
+local IN_CITY_SCALED: number = 120 -- S3x300's bots on the plaza, S3's share of the city at SCALE, the rest on the map
 local TEAM: number = 1 -- G5's one team, which every bot and real player shares
 
 local SCENARIOS: { [string]: Scenario } = {
@@ -236,6 +237,24 @@ local SCENARIOS: { [string]: Scenario } = {
 		follow = true,
 		storm = false,
 	},
+
+	-- The versus run's 300 players: S3's city mix scaled to SCALE bots, and S4's fight with SCALE in its square
+	S3x300 = {
+		groups = {
+			{ name = "city", count = IN_CITY_SCALED, spawn = PLAZA, roam = CITY },
+			{ name = "map", count = SCALE - IN_CITY_SCALED, spawn = MAP, roam = MAP },
+		},
+		viewer = PLAZA.center,
+		follow = false,
+		storm = false,
+	},
+
+	S4x300 = {
+		groups = { { name = "fight", count = SCALE, spawn = FIGHT, roam = FIGHT } },
+		viewer = FIGHT.center,
+		follow = true,
+		storm = false,
+	},
 }
 
 return {
@@ -255,12 +274,17 @@ return {
 	fps = 0.1, -- The share the server's frame rate is read at, G3's p10
 
 	tick = {
-		-- Each runs once a tick, so their rings of times advance together and sum tick by tick
+		-- Each runs at most once a tick and the relay at most once a Heartbeat, so their rings of times sum by the
+		-- tick each time ran on, a stage adding nothing to a tick it skipped
 		stages = { "decode", "simulate", "npcs", "history", "relay" },
 		beside = "antiEsp", -- Runs between ticks too, so its p95 prints beside their total and never in it
 
-		-- The stats' counts since the last read that a run also prints a tick, over the ticks each read ran
+		-- The stats' counts since the last read that a run also prints, each over the ticks the read ran
 		counts = { "recordsSent", "recordsCut", "bytesOut", "antiEspTests" },
+
+		-- Those the relay counts, over the read's relay runs instead: its ticks less the relay ticks it skipped,
+		-- since the dev place runs the relay at the simulation's rate
+		relayCounts = { "recordsSent", "recordsCut", "bytesOut" },
 	},
 
 	-- The fixed workload every run opens with, so its figures scale across servers whose speeds differ
@@ -281,6 +305,12 @@ return {
 		scenarios = { "S3", "S4" },
 		distances = { 500, 750, 1000 }, -- Studs, the last the dev server's relevancy.leave
 		timing = { seeds = { 1 }, warmup = 15, window = 60, interval = 1 } :: Timing,
+	},
+
+	-- The versus run against the A0 arm: the city mix and the fight at 150 and 300 players, one short seed each
+	versus = {
+		scenarios = { "S3", "S4", "S3x300", "S4x300" },
+		timing = { seeds = { 1 }, warmup = 10, window = 40, interval = 1 } :: Timing,
 	},
 
 	stage = "bots", -- The stage every bot sends from, after the relay

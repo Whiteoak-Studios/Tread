@@ -98,7 +98,9 @@ return function (): (boolean, string | nil)
 	state.lean = LEAN
 	state.mode = "Ground"
 
+	-- The frame's end moves every root its poses placed
 	rigs:pose(OWN, state, DISTANCE, PITCH)
+	rigs:frame()
 
 	local worldDrawn: Drawn? = drawn[world]
 	local copyDrawn: Drawn? = drawn[copy]

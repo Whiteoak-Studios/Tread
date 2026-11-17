@@ -103,6 +103,9 @@ local StandIns: number = 0
 local Late: number = 0
 local BytesOut: number = 0 -- The bytes of every buffer the server's own sends handed Volt
 local ReportCounts: { [string]: number } = {} -- Every report by kind
+local RelaySkipped: number = 0 -- The relay ticks the relay didn't run, each counted at the next run
+
+local Relayed: number = 0 -- The relay tick the relay last ran, unwrapped, 0 before the first
 
 -- What each counter read at the last stats read, and when it was
 local ReadAt: number = os.clock()
@@ -116,6 +119,7 @@ local ReadBytes: number = 0
 local ReadTests: number = 0
 local ReadHidden: number = 0
 local ReadFailOpens: number = 0
+local ReadRelaySkipped: number = 0
 local ReadReports: { [string]: number } = {}
 
 local RelayFailure: string = "" -- What the relay's own work last threw, raised again once the flush has gone
@@ -162,6 +166,11 @@ local function relayTickOf(tick: number): number?
 	end
 
 	return relayTick
+end
+
+-- Whether a simulation tick starts a relay tick, the ticks the relay stage may run on
+local function startsRelayTick(tick: number): boolean
+	return relayTickOf(tick) ~= nil
 end
 
 --[[
@@ -384,12 +393,17 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 			end,
 		},
 		{
+			-- At most once a Heartbeat, on the last of its ticks that starts a relay tick
 			name = "relay",
+			latest = startsRelayTick,
 			run = function (tick: number)
 				local relayTick: number? = relayTickOf(tick)
 				if not relayTick then
 					return
 				end
+
+				RelaySkipped += relayTick - Relayed - 1
+				Relayed = relayTick
 
 				-- Whiteoak TODO: one flush sends every player's batch on the relay tick; staggering even slots and
 				-- odd ones across two Heartbeats needs a flush per player from Volt, a Volt task if G3 shows the need
@@ -658,13 +672,14 @@ function Server.addStage(self: Self, name: string, after: string, run: Run)
 	Tick.addStage(name, after, run)
 end
 
---- Tap 1: calls the sink once every relay tick, after relevancy, the tiers,
---- the allocator and anti-ESP, with the relay tick and a frame of every
---- block the relay sent the viewer that tick, a spectating moderator's
+--- Tap 1: calls the sink after each relay run, after relevancy, the tiers,
+--- the allocator and anti-ESP, with the run's relay tick and a frame of
+--- every block the relay sent the viewer in it, a spectating moderator's
 --- copies of its target's included, each record's 3-bit send reason, and
 --- the viewer's OwnerState while it owns a character, with its view lag
---- and the looks it stepped since the last frame. Each sink runs under its
---- own xpcall and must not yield, and one whose viewer leaves is called no
+--- and the looks it stepped since the last frame. A relay tick a catch-up
+--- Heartbeat runs no relay on gives no frame. Each sink runs under its own
+--- xpcall and must not yield, and one whose viewer leaves is called no
 --- more. Returns the closure that disconnects the sink
 --- @method observe
 --- @within Server
@@ -676,11 +691,12 @@ function Server.observe(self: Self, viewer: Key, sink: Sink): () -> ()
 	return Taps.observe(viewer, sink)
 end
 
---- Tap 5: calls the sink once every relay tick with a frame of the
+--- Tap 5: calls the sink after each relay run with a frame of the
 --- withheld blocks the relay sent the moderators spectating the viewer:
 --- the culled players anti-ESP held back from it, never an Invisible or
 --- Parked one, with the look entries those blocks carry and each record's
---- reason. While no one spectates the viewer each frame holds no block.
+--- reason. While no one spectates the viewer each frame holds no block,
+--- and a relay tick a catch-up Heartbeat runs no relay on gives no frame.
 --- Returns the closure that disconnects the sink
 --- @method observeWithheld
 --- @within Server
@@ -796,10 +812,11 @@ end
 --- awake NPCs and bodies, the history's bytes, the largest and p95 traffic
 --- to a player over the last second, the sleeper and body pairs due and
 --- waiting untested, and, as the change since the last read, the ticks run
---- and dropped, stand-ins, late commands, records sent and cut, Tread's
---- bytes out, anti-ESP's pair tests, the tests that left a pair hidden, its
---- fail-opens and its sleeper and body pair tests, and the reports by kind.
---- It holds no position and no name
+--- and dropped, the relay ticks the relay skipped on catch-up Heartbeats,
+--- stand-ins, late commands, records sent and cut, Tread's bytes out,
+--- anti-ESP's pair tests, the tests that left a pair hidden, its fail-opens
+--- and its sleeper and body pair tests, and the reports by kind. It holds
+--- no position and no name
 --- @method stats
 --- @within Server
 --- @return { [string]: any }
@@ -839,6 +856,7 @@ function Server.stats(self: Self): { [string]: any }
 		stages = stages,
 		ticks = ran - ReadTicks,
 		dropped = dropped - ReadDropped,
+		relaySkipped = RelaySkipped - ReadRelaySkipped,
 		players = players,
 		npcs = awake,
 		bodies = Slots.count("Body"),
@@ -869,6 +887,7 @@ function Server.stats(self: Self): { [string]: any }
 	ReadTests = tests
 	ReadHidden = hidden
 	ReadFailOpens = failOpens
+	ReadRelaySkipped = RelaySkipped
 
 	return read
 end

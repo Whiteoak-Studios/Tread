@@ -283,6 +283,8 @@ local CLIENT: Specs = {
 	drawDistance = { desktop = "positive", console = "positive", phone = "positive", tablet = "positive" },
 	lod = { full = "nonNegative", footIk = "nonNegative", aim = "nonNegative" },
 	firstPerson = { back = "nonNegative" },
+	["perFrame?"] = { ["switches?"] = "count", ["draws?"] = "count", ["ragdolls?"] = "count", ["builds?"] = "count" },
+	["pool?"] = { spare = "count" },
 }
 
 local SHARED_PAIRS: { Pair } = {
@@ -369,6 +371,16 @@ type JointLimit = {
 	tilt: number, -- The cone the joint may tilt in
 	twistLower: number, -- The twist about its axis, from lower to upper
 	twistUpper: number,
+}
+
+-- The most of each costly kind of rig work the client starts a frame, each left out to start all of it at once: track
+-- switches, rigs put into the Workspace, ragdolls, and spare rigs built toward pool.spare. Read only, so a table a game
+-- builds in its own module fits with any of them
+export type PerFrame = {
+	read switches: number?,
+	read draws: number?,
+	read ragdolls: number?,
+	read builds: number?,
 }
 
 -- The table both entry points take, which the server's handshake hashes
@@ -502,6 +514,8 @@ export type ClientSettings = {
 	drawDistance: { desktop: number, console: number, phone: number, tablet: number }, -- Studs
 	lod: { full: number, footIk: number, aim: number },
 	firstPerson: { back: number }, -- Studs the first-person copy is drawn behind the world rig, along its facing
+	read perFrame: PerFrame?, -- With none, every kind starts all of its work at once
+	read pool: { read spare: number }?, -- The rigs the pool keeps built outside the Workspace; with none, it keeps none
 }
 
 local Config = {}

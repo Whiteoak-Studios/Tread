@@ -98,10 +98,11 @@ return function (): (boolean, string | nil)
 		return false, `Laying the rig down made {#calls} hook calls, though it keeps its look`
 	end
 
-	-- 2) The body's slot poses it as any other rig, where its state lies
+	-- 2) The body's slot poses it as any other rig, where its state lies once the frame's end moves it
 	state.posture = "Downed"
 	state.position = vector.create(12, 0, -5)
 	rigs:pose(BODY, state, DISTANCE, 0)
+	rigs:frame()
 	if rig.Parent == nil or rig.PrimaryPart.CFrame.Position.X ~= state.position.x then
 		return false, `The body's pose left its rig at {rig.PrimaryPart.CFrame.Position}`
 	end

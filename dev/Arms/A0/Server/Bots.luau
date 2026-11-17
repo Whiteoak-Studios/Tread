@@ -205,15 +205,17 @@ end
 --[[
     Lays an anchored floor under each configured area whose center has no
     ground below it, so every scenario runs on a bare place as on one that
-    holds Roblox's baseplate or a copy of the city block
+    holds Roblox's baseplate or a copy of the city block. Returns each floor
+    laid by its name, size and center
 --]]
 
-function Bots.layFloors()
+function Bots.layFloors(): { string }
 	local folder: Folder = Instance.new("Folder")
 	folder.Name = FLOORS_NAME
 	folder.Parent = Workspace
 
 	local depth: number = FLOOR_PROBE_HEIGHT * 2 -- As far below the area's center as the ray starts above it
+	local laid: { string } = {}
 
 	for index: number, area: Area in Config.floors do
 		local origin: Vector3 = area.center + Vector3.new(0, FLOOR_PROBE_HEIGHT, 0)
@@ -227,7 +229,11 @@ function Bots.layFloors()
 		floor.Size = Vector3.new(area.size.X, FLOOR_THICKNESS, area.size.Y)
 		floor.Position = area.center - Vector3.new(0, FLOOR_THICKNESS / 2, 0)
 		floor.Parent = folder
+
+		table.insert(laid, `{floor.Name} {area.size.X} x {area.size.Y} at {area.center}`)
 	end
+
+	return laid
 end
 
 --[[

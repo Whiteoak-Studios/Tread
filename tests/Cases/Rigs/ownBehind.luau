@@ -88,10 +88,12 @@ return function (): (boolean, string | nil)
 	state.position = vector.create(10, 2, -5)
 	state.mode = "Ground"
 
+	-- The frame's end moves every root its poses placed
 	for _, facing: number in FACINGS do
 		state.facing = facing
 		rigs:pose(OWN, state, DISTANCE, 0)
 		rigs:pose(OTHER, state, DISTANCE, 0)
+		rigs:frame()
 
 		local placed: any = world.PrimaryPart.CFrame
 		local drawn: any = copy.PrimaryPart.CFrame
@@ -111,6 +113,7 @@ return function (): (boolean, string | nil)
 	settings.firstPerson.back = TUNED
 	state.position = vector.create(12, 2, -5)
 	rigs:pose(OWN, state, DISTANCE, 0)
+	rigs:frame()
 	local tuned: any = copy.PrimaryPart.CFrame.Position
 	if apart(tuned, behind(world, TUNED)) > TOLERANCE then
 		return false, `Once tuned, the copy stands at {tuned}, not {TUNED} studs behind`
@@ -127,6 +130,7 @@ return function (): (boolean, string | nil)
 	local stillWorld: any = stillRigs:checkout(OWN, {}, true)
 	local stillCopy: any = stillCalls[2].rig
 	stillRigs:pose(OWN, state, DISTANCE, 0)
+	stillRigs:frame()
 	local stood: any = stillCopy.PrimaryPart.CFrame
 	if stood ~= stillWorld.PrimaryPart.CFrame then
 		return false, `With a back of 0, the copy stands at {stood.Position}, not at its world rig`

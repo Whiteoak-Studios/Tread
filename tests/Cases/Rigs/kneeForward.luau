@@ -56,7 +56,7 @@ return function (): (boolean, string | nil)
 			tilt = 0,
 		}
 
-		Animate.plant(animated, root, SPOT[2], reach, Collision({ FLOOR, step }), true, true)
+		Animate.plant(animated, root.CFrame, SPOT[2], reach, Collision({ FLOOR, step }), true, true)
 		Animate.layer(animated)
 
 		local posed: any = Legs.posed(rig, joints, left.place)

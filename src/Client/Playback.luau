@@ -1228,7 +1228,9 @@ end
 --- at its own OwnerStates, its eye and look, and the platforms' copies. A
 --- time past either end draws that end, and each render depends on its
 --- time alone, so play, pause, single steps, slow motion and seeks are the
---- caller's. Forward play raises the footsteps it passes.
+--- caller's. Forward play raises the footsteps it passes. It ends with
+--- the rig pool's frame end, so a render on PreRender moves its rigs in
+--- the frame it draws.
 --- @method render
 --- @within Playback
 --- @param time number -- Seconds since the keyframe's tick
@@ -1350,6 +1352,9 @@ function Playback.render(self: Self, time: number)
 			self:_release(slot, kept)
 		end
 	end
+
+	-- 6) The pool's frame end, so a render drawn on PreRender moves its rigs in the frame it draws
+	rigs:frame()
 end
 
 -- Raises each footstep a block brought after one clip tick and by another, oldest first

@@ -1,7 +1,7 @@
 --[[
     Dev client values: Frontier Zero's remote smoothing, ragdoll, correction,
     draw distance and detail numbers, stand-ins where it sets none, and the dev
-    place's view, keys, prompt, shooter, replay, kit, panels and G5 cost window
+    place's view, keys, prompt, shooter, replay, kit, panels and run windows
 --]]
 
 --!strict
@@ -88,6 +88,19 @@ return {
 		back = 1, -- Studs the first-person copy is drawn behind the world rig, so its torso sits behind the camera
 	},
 
+	-- The most of each costly kind of rig work a frame starts, so a burst of 40 clears in about 10 frames, standing in
+	-- until ClientCost runs on them
+	perFrame = {
+		switches = 8, -- Track switches, so 40 clear in 5 frames
+		draws = 4, -- Rigs put into the Workspace, nearest first, so 40 clear in 10
+		ragdolls = 4, -- Ragdolls started, nearest first, so 40 clear in 10
+		builds = 4, -- Spare rigs built, so the pool refills its 40 in 10
+	},
+
+	pool = {
+		spare = 40, -- Rigs kept built outside the Workspace, so a burst of 40 reveals clones none at its checkouts
+	},
+
 	-- The dev place's own shoulder view on V, standing in where Frontier Zero's camera sets none
 	view = {
 		side = 1.6, -- Studs right of the eye, just past the right shoulder of the 2.78-stud hull
@@ -171,9 +184,28 @@ return {
 		attribute = "ClientCost", -- The Workspace attribute the scenario sets to a window's label, and clears at its end
 		longest = 180, -- Seconds a window measures at most, past the scenario's 120 s window, before it ends on its own
 		limit = 2, -- Milliseconds of remote-character work a frame the lowest device's p95 is held to
-		percentiles = { 0.5, 0.95, 0.99 }, -- The remote work's, as the line prints them
-		fps = 0.1, -- The share the frame rate is read at
 		drawn = 0.5, -- The share the rigs drawn are read at
+		blocks = 0.95, -- The share the frames with a relay block and those without are each read at
+		switches = { 0.5, 0.99 }, -- The track switches a frame's shares, as the line prints them before their max
+
+		-- Whether a window also wraps the pose, the draw, the first draws and the track switches, off to time what those
+		-- wrappers cost
+		split = true,
+
+		-- The native and the interpreted loop, timed in turn as each window ends, like the server's calibration
+		loop = {
+			samples = 100, -- Of each, for their medians
+			passes = 4, -- Passes over the buffer each sample times
+			bytes = 1024, -- The buffer each pass goes over, the server calibration's
+		},
+	},
+
+	-- The versus run's receive rates: the window the dev server's Versus scenario opens, and what each line reads
+	receive = {
+		attribute = "ClientReceive", -- The Workspace attribute the scenario sets to a window's label, and clears at its end
+		interval = 1, -- Seconds between samples of the receive rates, as the A0 arm's client takes them
+		longest = 90, -- Seconds a window samples at most, past the scenario's 40 s window, before it ends on its own
+		percentiles = { 0.5, 0.95, 0.99 }, -- Each rate's, as the line prints them
 	},
 
 	-- The dev place's exploit kit: what its panel counts, what each tool does, and how the ESP draws

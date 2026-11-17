@@ -239,12 +239,13 @@ local function plays(rig: Model, animation: Animation): boolean
 	return false
 end
 
--- Poses rig A and rig B every frame until the deadline, or until done says so
+-- Poses rig A and rig B every frame, each frame ended so their roots move, until the deadline, or until done says so
 local function poseFor(rigs: Pool, a: State, b: State, seconds: number, done: (() -> boolean)?)
 	local deadline: number = os.clock() + seconds
 	while os.clock() < deadline do
 		rigs:pose(0, a, 0, PITCH)
 		rigs:pose(1, b, 0, 0)
+		rigs:frame()
 
 		if done and done() then
 			return
@@ -308,9 +309,10 @@ local function run(problems: { string }, folder: Folder, made: Made)
 	end)
 	made.measuring = measuring
 
-	-- The foot where the first pose leaves it, before any step bends its leg
+	-- The foot where the first pose and its frame end leave it, before any step bends its leg
 	rigs:pose(0, stateA, 0, PITCH)
 	rigs:pose(1, stateB, 0, 0)
+	rigs:frame()
 	local posed: number = os.clock()
 	local before: number = footHeight(a)
 
@@ -398,6 +400,7 @@ local function run(problems: { string }, folder: Folder, made: Made)
 		table.insert(problems, "rig A stayed in Workspace past the draw distance")
 	end
 	rigs:pose(0, stateA, 0, 0)
+	rigs:frame()
 	if a.Parent == nil then
 		table.insert(problems, "rig A did not come back inside the draw distance")
 	end
@@ -410,6 +413,7 @@ local function run(problems: { string }, folder: Folder, made: Made)
 	local deadline: number = os.clock() + Rig.bodies.maxSeconds + RAGDOLL_MARGIN
 	while not frozen(a) and os.clock() < deadline do
 		rigs:pose(1, stateB, 0, 0)
+		rigs:frame()
 		RunService.Heartbeat:Wait()
 	end
 

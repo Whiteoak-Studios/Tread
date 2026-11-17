@@ -133,7 +133,6 @@ type Setup = {
 	sendDeath: SendDeath,
 	simulationRate: number, -- Hz
 	relayRate: number,
-	relayInterval: number, -- Seconds between relay ticks, the cadence each connection samples its ping at
 	focusGroups: number, -- The shares the focus parts are moved in, one a relay tick, so each moves at FOCUS_RATE
 	focusHolder: Camera, -- The server-only Camera the focus parts sit under
 	bots: boolean, -- Whether the server settings give bots.rtt
@@ -161,6 +160,9 @@ local RecentTicks: buffer = buffer.create(SLOTS * RECENT * TICK_BYTES)
 local RecentWaits: buffer = buffer.create(SLOTS * RECENT * WAIT_BYTES)
 local RecentNext: buffer = buffer.create(SLOTS) -- The ring index the next one goes at
 local RecentHeld: buffer = buffer.create(SLOTS) -- How many the ring holds
+
+-- Each character's relay tick its connection last sampled its ping on, unwrapped, an f64 by slot
+local SampledAt: buffer = buffer.create(SLOTS * TICK_BYTES)
 
 -- Each character by slot: its connection, its viewer the relay is handed, whether the game made it Invisible, and
 -- whether its player left before the game destroyed it
@@ -542,7 +544,6 @@ function Characters.start(context: Context)
 		sendDeath = context.sendDeath,
 		simulationRate = shared.rates.simulation,
 		relayRate = shared.rates.relay,
-		relayInterval = 1 / shared.rates.relay,
 		focusGroups = math.max(math.round(shared.rates.relay / FOCUS_RATE), 1),
 		focusHolder = holder,
 		bots = server.bots ~= nil,
@@ -626,6 +627,9 @@ local function enlist(key: Key, player: Player?, slot: number, generation: numbe
 	claim(slot, state, state.facing)
 	buffer.writeu8(RecentNext, slot, 0)
 	buffer.writeu8(RecentHeld, slot, 0)
+
+	-- So its first sample, which takes the ping whole, is handed a time above 0
+	buffer.writef64(SampledAt, slot * TICK_BYTES, RelayTick)
 	Links[slot] = connection
 	Viewers[slot] =
 		{ key = key, slot = slot, position = position, acknowledged = 0, received = 0, target = nil, look = nil }
@@ -1470,17 +1474,19 @@ local function sendOwnerState(character: Self, key: Key, connection: Connection,
 end
 
 --[[
-    The slow pass behind each player's focus part: the parts whose share
-    this relay tick is move to their player's body, or while the player
-    spectates to the target's, and a player with no body to follow keeps
-    the place it was last given
+    The slow pass behind each player's focus part: the parts of every share
+    whose turn came on a relay tick since the relay's last run, at since,
+    move to their player's body, or while the player spectates to the
+    target's, and a player with no body to follow keeps the place it was
+    last given
 --]]
 
-local function focus(relayTick: number, groups: number)
-	local turn: number = relayTick % groups
+local function focus(relayTick: number, since: number, groups: number)
+	-- A share's turn comes on each relay tick equal to it modulo groups: here those after since up to this one
+	local turns: number = math.min(relayTick - since, groups)
 
 	for player: Player, part: Part in Focus do
-		if FocusGroups[player] ~= turn then
+		if (relayTick - FocusGroups[player]) % groups >= turns then
 			continue
 		end
 
@@ -1511,6 +1517,7 @@ end
 function Characters.relay(relayTick: number, tick: number)
 	local setup: Setup = running("Characters.relay")
 	local count: number = 0
+	local since: number = RelayTick
 	RelayTick = relayTick
 	placePlatforms(setup.world, tick)
 
@@ -1528,7 +1535,10 @@ function Characters.relay(relayTick: number, tick: number)
 			viewer.target = Spectate.targetOf(key)
 			viewer.look = Commands.look(connection)
 
-			connection:sample(setup.relayInterval)
+			-- Handed the seconds since its last sample, more than a relay tick's after a run a catch-up skipped
+			local sampled: number = buffer.readf64(SampledAt, slot * TICK_BYTES)
+			buffer.writef64(SampledAt, slot * TICK_BYTES, relayTick)
+			connection:sample((relayTick - sampled) / setup.relayRate)
 			sendOwnerState(character, key, connection, setup)
 
 			count += 1
@@ -1541,7 +1551,7 @@ function Characters.relay(relayTick: number, tick: number)
 	end
 
 	Relay.run(relayTick, ViewerList, States, Stepped, PlatformPlaces)
-	focus(relayTick, setup.focusGroups)
+	focus(relayTick, since, setup.focusGroups)
 end
 
 --[[
