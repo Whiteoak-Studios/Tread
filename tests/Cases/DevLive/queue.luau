@@ -31,6 +31,8 @@ local ORDER: { string } = {
 	"LateReveals",
 	"Openings",
 	"ClientCost",
+	"RelayWorkers",
+	"BenchWorkers",
 	"ParallelProbe",
 }
 

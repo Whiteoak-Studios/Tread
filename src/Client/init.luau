@@ -111,6 +111,9 @@ type Fields = {
 	_rigged: { [number]: Slot }, -- Every slot with a rig out, bodies included
 	_models: { [number]: Model },
 	_deaths: { [number]: number }, -- Each body a death drew and the body's generation, which the slot table ends
+	_kept: { [number]: Model }, -- Each rig the pool holds frozen, a player's anti-ESP hid, until its spawn is told again
+	_stands: { [number]: vector }, -- Where each of those stands, which ends its frozen body past the render distance
+	_thawed: { number }, -- The kept rigs' slots posed this frame, each spawn told once the frame's end has moved its rig
 	_posed: { number }, -- The slots posed each frame: every rigged one but a ragdoll
 	_outlined: { [number]: true }, -- The slots whose rigs are drawn under the spectate outline
 	_states: { [number]: StepState }, -- Each remote slot's drawn state, refilled each frame
@@ -278,6 +281,9 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 		_rigged = {} :: { [number]: Slot },
 		_models = {} :: { [number]: Model },
 		_deaths = {} :: { [number]: number },
+		_kept = {} :: { [number]: Model },
+		_stands = {} :: { [number]: vector },
+		_thawed = {} :: { number },
 		_posed = {} :: { number },
 		_outlined = {} :: { [number]: true },
 		_states = {} :: { [number]: StepState },
@@ -352,8 +358,8 @@ function Client.start(shared: Shared, client: ClientSettings): Client
 		handle:_reveal(slot, kind, occupant :: Player?, outfit, held)
 	end)
 
-	Interpolate.onHide(function (slot: number)
-		handle:_despawn(slot)
+	Interpolate.onHide(function (slot: number, frozen: boolean)
+		handle:_hide(slot, frozen)
 	end)
 
 	Interpolate.onDress(function (slot: number, outfit: Values)
@@ -596,6 +602,7 @@ function Client._bury(
 
 	local rigs: Rigs.Rigs = self._rigs
 	local model: Model = self._models[slot]
+	local told: boolean = self._kept[slot] == nil
 	local ragdolls: boolean = distance <= self._radius and late <= self._late
 
 	if ragdolls then
@@ -625,7 +632,11 @@ function Client._bury(
 		end
 	end
 
-	fire(self._despawned, dying)
+	-- A kept rig that dies before its reveal's first pose never told its spawn, so its hide's despawn stands
+	if told then
+		fire(self._despawned, dying)
+	end
+
 	fire(self._spawned, lying, model)
 end
 
@@ -789,9 +800,11 @@ end
     Takes a rig out of the pool for a slot, dressed and holding its item,
     and tells the spawn. The local player's own rig comes out with its
     first-person copy, and is hidden on their screen. A dress hook that
-    throws leaves the slot with no rig, so its next reveal tries again.
-    While a playback runs no live rig comes out, and its end draws again
-    every live stretch still open
+    throws leaves the slot with no rig, so its next reveal tries again. A
+    slot whose frozen body still stands takes that rig back as it is, and
+    its spawn waits for the frame whose pose moves it. While a playback
+    runs no live rig comes out, and its end draws again every live stretch
+    still open
 --]]
 
 function Client._spawn(self: Self, slot: number, kind: Kind, player: Player?, outfit: Values, held: Values?)
@@ -799,15 +812,10 @@ function Client._spawn(self: Self, slot: number, kind: Kind, player: Player?, ou
 		return
 	end
 
-	local rigs: Rigs.Rigs = self._rigs
-	local own: boolean = slot == self._own
-	local checked: boolean, rig: Model? = xpcall(rigs.checkout, warnHook, rigs, slot, outfit, own)
-	if not checked or not rig then
+	local kept: Model? = self._kept[slot]
+	local rig: Model? = kept or self:_take(slot, outfit, held)
+	if not rig then
 		return
-	end
-
-	if held then
-		xpcall(rigs.hold, warnHook, rigs, slot, held)
 	end
 
 	local drawn: Slot = { id = slot, kind = kind, player = player, withheld = Interpolate.isWithheld(slot) }
@@ -819,15 +827,35 @@ function Client._spawn(self: Self, slot: number, kind: Kind, player: Player?, ou
 		self._states[slot] = State.new()
 	end
 
-	fire(self._spawned, drawn, rig)
+	if not kept then
+		fire(self._spawned, drawn, rig)
+	end
 end
 
--- Drops a slot's rig from what the handle draws, leaving the pool's own bookkeeping to its caller
+-- A rig out of the pool for a slot, dressed and holding its item, or nil when its dress hook threw
+function Client._take(self: Self, slot: number, outfit: Values, held: Values?): Model?
+	local rigs: Rigs.Rigs = self._rigs
+	local own: boolean = slot == self._own
+	local checked: boolean, rig: Model? = xpcall(rigs.checkout, warnHook, rigs, slot, outfit, own)
+	if not checked or not rig then
+		return nil
+	end
+
+	if held then
+		xpcall(rigs.hold, warnHook, rigs, slot, held)
+	end
+
+	return rig
+end
+
+-- Drops a slot's rig from what the handle draws and keeps, leaving the pool's own bookkeeping to its caller
 function Client._forget(self: Self, slot: number)
 	self._rigged[slot] = nil
 	self._models[slot] = nil
 	self._deaths[slot] = nil
 	self._outlined[slot] = nil
+	self._kept[slot] = nil
+	self._stands[slot] = nil
 
 	local watching: Watch? = self._watching
 	if watching and slot == watching.slot then
@@ -844,12 +872,15 @@ end
 
 --[[
     Puts a slot's rig back in the pool, a ragdoll's destroyed, and tells
-    the despawn. A slot with no rig out changes nothing
+    the despawn. A kept rig goes back untold, a frozen body's or one its
+    reveal took back that no pose has reached, since the hide that froze
+    it told its despawn. A slot with no rig out changes nothing
 --]]
 
 function Client._despawn(self: Self, slot: number)
 	local drawn: Slot? = self._rigged[slot]
-	if not drawn then
+	local kept: boolean = self._kept[slot] ~= nil
+	if not drawn and not kept then
 		return
 	end
 
@@ -857,26 +888,67 @@ function Client._despawn(self: Self, slot: number)
 	xpcall(rigs.release, warnHook, rigs, slot)
 	self:_forget(slot)
 
-	fire(self._despawned, drawn)
+	if drawn and not kept then
+		fire(self._despawned, drawn)
+	end
 end
 
--- A slot's new look on its rig, kept for the local player's own rig until its body has one
+--[[
+    Ends a slot's stretch as the interpolation tells it. A drawn player's
+    rig whose hide anti-ESP made stays in Workspace where it stands,
+    frozen: the slot is forgotten, its rig and place kept, and the despawn
+    told, unless that rig was kept already and no pose had reached it,
+    which tells nothing. While the client spectates, or when the pool has
+    no place for the rig or refuses it, it goes back to the pool like any
+    other, as does a frozen body told ended
+
+    @ frozen | whether the stretch was a player's that a hide anti-ESP made ended
+--]]
+
+function Client._hide(self: Self, slot: number, frozen: boolean)
+	local drawn: Slot? = self._rigged[slot]
+	local rigs: Rigs.Rigs = self._rigs
+
+	-- Where the rig stands comes from the pool, in the world, since the slot's drawn state is in its platform's space
+	-- on a frame whose pose found no copy to stand it on
+	local place: vector? = nil
+	if frozen and drawn and drawn.kind == "Player" and not self._watching then
+		place = self._stands[slot] or rigs:placeOf(slot)
+	end
+
+	if not drawn or not place or not rigs:freeze(slot) then
+		self:_despawn(slot)
+		return
+	end
+
+	local model: Model = self._models[slot]
+	local told: boolean = self._kept[slot] == nil
+	self:_forget(slot)
+	self._kept[slot] = model
+	self._stands[slot] = place
+
+	if told then
+		fire(self._despawned, drawn)
+	end
+end
+
+-- A slot's new look on its rig, a frozen body's too, kept for the local player's own rig until its body has one
 function Client._dress(self: Self, slot: number, outfit: Values)
 	if slot == self._own then
 		self._outfit = outfit
 	end
 
 	-- The pool dresses the local player's own first-person copy with their world rig
-	if self._rigged[slot] then
+	if self._rigged[slot] or self._kept[slot] then
 		local rigs: Rigs.Rigs = self._rigs
 		xpcall(rigs.dress, warnHook, rigs, slot, outfit)
 	end
 end
 
 --[[
-    A slot's new held item on its rig, nil for none, kept for the local
-    player's own rig as its look is, and handed to the owner's prediction,
-    whose rules read the item its body holds
+    A slot's new held item on its rig, a frozen body's too, nil for none,
+    kept for the local player's own rig as its look is, and handed to the
+    owner's prediction, whose rules read the item its body holds
 --]]
 
 function Client._hold(self: Self, slot: number, held: Values?)
@@ -886,7 +958,7 @@ function Client._hold(self: Self, slot: number, held: Values?)
 	end
 
 	-- The pool puts it in the local player's own first-person copy's hands too
-	if self._rigged[slot] then
+	if self._rigged[slot] or self._kept[slot] then
 		local rigs: Rigs.Rigs = self._rigs
 		xpcall(rigs.hold, warnHook, rigs, slot, held)
 	end
@@ -979,12 +1051,13 @@ end
     at its distance from the eye viewed, a remote one with its record's
     head offset, a remote rider on its platform's copy, each other player
     outlined while the client spectates, and the live players and NPCs
-    drawn handed to the owner's prediction to block against, then the
-    pool's frame end, which moves every root posed. Nothing in the walk
-    over the drawn rigs makes a table. While a playback runs,
-    prediction, the render clock and the clock still run on live data,
-    unseen, no live rig is drawn and no live body is blocked against, and
-    the playback sets its track speed
+    drawn handed to the owner's prediction to block against, each frozen
+    body past the render distance put away, then the pool's frame end,
+    which moves every root posed, and the spawn of each kept rig that end
+    moved. Nothing in the walk over the drawn rigs makes a table. While a
+    playback runs, prediction, the render clock and the clock still run on
+    live data, unseen, no live rig is drawn and no live body is blocked
+    against, and the playback sets its track speed
 --]]
 
 function Client._frame(self: Self, dt: number)
@@ -1054,8 +1127,9 @@ function Client._frame(self: Self, dt: number)
 			continue
 		end
 
+		-- A kept rig still stands frozen where its hide left it, so its outline waits for the frame after its spawn
 		drawn.withheld = Interpolate.isWithheld(slot)
-		self:_outline(slot, watching ~= nil and drawn.kind == "Player")
+		self:_outline(slot, watching ~= nil and drawn.kind == "Player" and self._kept[slot] == nil)
 
 		local state: StepState = self._states[slot]
 		local shown: boolean, pitch: number, headYaw: number, headPitch: number = Interpolate.pose(slot, state)
@@ -1069,13 +1143,39 @@ function Client._frame(self: Self, dt: number)
 		rigs:turn(slot, turnYaw, turnPitch)
 		rigs:pose(slot, state, vector.magnitude(state.position - eye), pitch)
 
+		-- A kept rig's first pose since its reveal thaws it, and its spawn waits for the frame's end to move it
+		if self._kept[slot] then
+			table.insert(self._thawed, slot)
+		end
+
 		if drawn.kind == "Player" or drawn.kind == "Npc" then
 			table.insert(bodies, state)
 		end
 	end
 
+	-- A frozen body past the render distance goes back to the pool, as a posed rig past it leaves Workspace
+	local reach: number = self._renderDistance
+	for slot: number, place: vector in self._stands do
+		if not self._rigged[slot] and vector.magnitude(place - eye) > reach then
+			self:_despawn(slot)
+		end
+	end
+
 	-- The pool's end of the frame, after its last pose: what waited past its caps, and every root moved at once
 	rigs:frame()
+
+	-- Each kept rig now stands where its slot is drawn, so its spawn is told with the rig its hide left
+	local thawed: { number } = self._thawed
+	for _, slot: number in thawed do
+		local drawn: Slot? = self._rigged[slot]
+		local model: Model? = self._kept[slot]
+		if drawn and model then
+			self._kept[slot] = nil
+			self._stands[slot] = nil
+			fire(self._spawned, drawn, model)
+		end
+	end
+	table.clear(thawed)
 end
 
 --- The cleared eye and look of what the client views: a playback's
@@ -1284,11 +1384,11 @@ end
 --- Plays a moderator's clip as the taps recorded it: its keyframe first,
 --- then the target's observed frames from the keyframe's tick on, and
 --- optionally the withheld frames over the same ticks. It never yields.
---- Every live rig goes back to the pool while it runs, its rigs come from
---- the client's own pool with slots that name no player, and getEye gives
---- its eye and look, while prediction and the live characters carry on
---- unseen. It errors, changing nothing, while another playback runs, and
---- on a clip this client can't read.
+--- Every live rig goes back to the pool while it runs, a frozen body's for
+--- good, its rigs come from the client's own pool with slots that name no
+--- player, and getEye gives its eye and look, while prediction and the
+--- live characters carry on unseen. It errors, changing nothing, while
+--- another playback runs, and on a clip this client can't read.
 --- @method play
 --- @within Client
 --- @param ticks { buffer } -- The keyframe, then the observed frames, oldest first
@@ -1336,6 +1436,11 @@ function Client.play(self: Self, ticks: { buffer }, withheld: { buffer }?): Play
 
 	-- Every live rig goes back to the pool, which holds one a slot, so no live rig is drawn beside the clip's
 	for slot: number in table.clone(self._rigged) do
+		self:_despawn(slot)
+	end
+
+	-- A frozen body is no open stretch's, so it goes too, and the playback's end draws none again
+	for slot: number in self._kept do
 		self:_despawn(slot)
 	end
 
@@ -1416,6 +1521,12 @@ end
 --- revealed, the owner's own body started, a spectated target's first
 --- feed, or a dying rig turned into its body. While the client spectates,
 --- a slot's withheld says whether anti-ESP withheld it from the target.
+--- A player anti-ESP hides while its rig is drawn in Workspace leaves a
+--- frozen body where it stood, and once the server shows that player
+--- again the callback comes with that same rig, in the frame its first
+--- pose moves it to where the player is, so what a game hangs on a spawned
+--- rig never shows at the stale place. A player hidden again before that
+--- pose tells nothing.
 --- @method onSpawned
 --- @within Client
 --- @param callback (slot: Slot, rig: Model) -> ()
@@ -1427,7 +1538,12 @@ end
 
 --- Calls back when a slot's rig is put away: hidden, its slot freed or
 --- given a new life, dropped by a spectate's start or end, or turned into
---- its body.
+--- its body. A player's rig that is drawn in Workspace when anti-ESP
+--- hides it stays there as a frozen body, holding its pose and its held
+--- item, and the callback comes at that hide all the same, so a game takes
+--- off there what it hung on the slot, such as a held light. It comes
+--- once: the frozen body's own end, back to the pool or spawned again as
+--- the same rig, calls it no more.
 --- @method onDespawned
 --- @within Client
 --- @param callback (slot: Slot) -> ()

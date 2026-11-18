@@ -27,7 +27,8 @@ local NEAR: number = 0 -- Studs from the eye the copy is posed at, since the eye
 local LEVEL: number = 0 -- The copy's aim pitch, radians: the torso turns with the camera for other viewers only
 local IN_PLACE: number = 0 -- Studs behind the state's place every rig but the copy is drawn
 local AUTHORED: number = 1 -- The track speed every rig starts at, each track's own
-local HELD: number = 0 -- The track speed a dying rig holds its pose at while its ragdoll waits for the frame's end
+-- The track speed a rig holds its pose at: a dying one while its ragdoll waits for the frame's end, and a frozen one
+local HELD: number = 0
 local OUTLINED: string = "TreadOutlined" -- The model the outlined rigs are drawn in, under the one Highlight
 local THROUGH_WALLS: Enum.HighlightDepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- The outline shows through walls
 local UNCAPPED: PerFrame = {} -- The caps of a pool given none, under which every request starts at once
@@ -110,6 +111,7 @@ type Entry = {
 	target: CFrame, -- Where its root stands once the frame's move is made, which its feet plant from
 	raised: CFrame?, -- Its target the nudge higher, made at its first raise, nil from each change of target until then
 	lifts: boolean, -- Whether the frame's move puts its root at raised, on alternate frames its target holds
+	lying: boolean, -- Whether its last pose was in the Downed posture, which leaves its root unmoved once on its target
 	queued: boolean, -- Whether the frame's move holds its root
 	distance: number, -- Studs from the viewer at its last draw, the farthest before one
 	state: State?, -- What its last draw was handed, for a draw or a switch the frame's end grants
@@ -118,6 +120,7 @@ type Entry = {
 	full: boolean,
 	admitted: boolean, -- Whether the frame's end let its next draw put it into the Workspace
 	dying: boolean, -- Whether it holds its pose while its ragdoll waits for the frame's end
+	frozen: boolean, -- Whether it stands in Workspace holding its pose, a hidden player's body, until its next pose
 	push: vector?, -- The attack's direction its ragdoll starts with, nil for no push
 	animated: Animated?, -- Its tracks, from its first draw until it ragdolls
 	body: Ragdoll.Body?, -- Its ragdoll, once it dies
@@ -157,6 +160,7 @@ type Fields = {
 	_listeners: { [{ nil }]: Marker },
 	_layering: RBXScriptConnection?, -- The PreSimulation layer, from the first draw until destroy
 	_queued: { Entry }, -- The rigs whose roots the frame's move takes, in the order first posed
+	_frozen: { Entry }, -- The frozen rigs, which no pose reaches, so the frame's end queues the roots a pose would have
 	_moved: { BasePart }, -- BulkMoveTo's lists, reused for every frame's move
 	_targets: { CFrame },
 	_switches: Gate, -- Track switches from one track to another
@@ -297,10 +301,10 @@ local function restyle(settings: Settings, rig: Model, outfit: Outfit, copy: boo
 	settings.dress(rig, outfit, copy)
 end
 
--- The aim, lean and head layer and the planted legs of one rig, if it is drawn
+-- The aim, lean and head layer and the planted legs of one rig, if it is drawn. A frozen rig shows its tracks' own pose
 local function layer(entry: Entry)
 	local animated: Animated? = entry.animated
-	if animated and entry.drawn then
+	if animated and entry.drawn and not entry.frozen then
 		Animate.layer(animated)
 	end
 end
@@ -333,6 +337,12 @@ local function recoil(kicks: { Kick }): (number, number)
 	end
 
 	return pitch, yaw
+end
+
+-- Whether a rig's root joins the frame's move. A rig standing still is moved all the same, but one lying down only to a
+-- new target or off the nudge, since a sleeper or a body lies still for as long as it is drawn
+local function joins(entry: Entry): boolean
+	return not entry.queued and (not entry.lying or not entry.lifts)
 end
 
 -- Takes every kick and the head offset off a rig, as a body or a pooled rig holds none
@@ -514,6 +524,7 @@ function Rigs.new(settings: Settings, drawDistance: number, collision: Collision
 		_listeners = {} :: { [{ nil }]: Marker },
 		_layering = nil :: RBXScriptConnection?,
 		_queued = {} :: { Entry },
+		_frozen = {} :: { Entry },
 		_moved = {} :: { BasePart },
 		_targets = {} :: { CFrame },
 		_switches = newGate(perFrame.switches, false),
@@ -635,6 +646,7 @@ function Rigs._build(self: Self): Entry
 		target = root.CFrame,
 		raised = nil,
 		lifts = false,
+		lying = false,
 		queued = false,
 		distance = math.huge,
 		state = nil,
@@ -643,6 +655,7 @@ function Rigs._build(self: Self): Entry
 		full = false,
 		admitted = false,
 		dying = false,
+		frozen = false,
 		push = nil,
 		animated = nil,
 		body = nil,
@@ -759,13 +772,14 @@ end
 --[[
     Stops, clears and undresses a rig no slot holds any more, then pools
     it, or destroys it once it is a body. Its requests waiting for the
-    frame's end are dropped, so a rig whose ragdoll waited goes back to the
-    pool as any other
+    frame's end are dropped and its freeze ends, so a rig whose ragdoll
+    waited, or a frozen one, goes back to the pool as any other
 --]]
 
 function Rigs._put(self: Self, entry: Entry)
 	local settings: Settings = self._settings
 	self:_forgo(entry)
+	self:_thaw(entry)
 	entry.dying = false
 	entry.admitted = false
 	entry.state = nil
@@ -827,13 +841,15 @@ end
     that isn't lying down is moved too, the nudge above its target and back
     on alternate frames, while under perFrame a draw into the Workspace or
     a switch of track past its cap waits for it. A ragdoll is left to its
-    physics. The local player's own first-person copy is posed from the
-    same state firstPerson.back studs behind where its world rig stands,
-    along its facing, at full detail, leaning with no aim pitch. Past a
-    rig's first draw it makes no table, closure or string; a move, a new
-    aim, lean or head offset and a planted foot's cast make the engine's
-    own CFrames and results, and joining the frame's move while standing
-    still makes none
+    physics, and a frozen rig thaws first, its tracks at the pool's speed
+    again, then is posed like any other with no draw grant. The local
+    player's own first-person copy is posed from the same state
+    firstPerson.back studs behind where its world rig stands, along its
+    facing, at full detail, leaning with no aim pitch. Past a rig's first
+    draw it makes no table, closure or string; a move, a new aim, lean or
+    head offset and a planted foot's cast make the engine's own CFrames
+    and results, and joining the frame's move while standing still makes
+    none
 
     @ distance | studs from the viewer's eye to the rig
     @ pitch | the character's aim pitch, radians, up positive
@@ -853,6 +869,17 @@ end
 function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pitch: number, back: number)
 	if entry.body or entry.dying then
 		return
+	end
+
+	-- A frozen rig's first draw thaws it where it stands, already drawn and loaded, so it takes no draw grant. A
+	-- landing held still is given the pool's speed here, since a pose gives one its speed only as it starts
+	if entry.frozen then
+		self:_thaw(entry)
+
+		local animated: Animated? = entry.animated
+		if animated then
+			Animate.speed(animated, self._speed)
+		end
 	end
 
 	entry.distance = distance
@@ -910,9 +937,8 @@ function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pi
 		entry.lifts = false
 	end
 
-	-- A rig standing still is moved all the same, but one lying down only to a new target or off the nudge, since a
-	-- sleeper or a body lies still for as long as it is drawn
-	if not entry.queued and (state.posture ~= "Downed" or not entry.lifts) then
+	entry.lying = state.posture == "Downed"
+	if joins(entry) then
 		entry.queued = true
 		table.insert(self._queued, entry)
 	end
@@ -975,11 +1001,12 @@ end
     ragdolls waiting, each up to its cap, those that waited from frames
     before first and then the nearest, builds the pool toward pool.spare,
     and then moves every root posed since with one BulkMoveTo, a still
-    rig's the nudge above its target on alternate frames, on the main
-    thread, since BulkMoveTo is Unsafe in parallel. Past the rigs it builds
-    and the draws and ragdolls it starts, it makes no table, closure or
-    string, and a still rig makes its raised CFrame once, at its first
-    raise after its target changes
+    rig's the nudge above its target on alternate frames, and with them
+    each frozen rig's root that its poses would have moved, so one frozen
+    lying at rest stays unwritten, on the main thread, since BulkMoveTo is
+    Unsafe in parallel. Past the rigs it builds and the draws and ragdolls
+    it starts, it makes no table, closure or string, and a still rig makes
+    its raised CFrame once, at its first raise after its target changes
 --]]
 
 function Rigs.frame(self: Self)
@@ -991,6 +1018,17 @@ function Rigs.frame(self: Self)
 	admit(self, self._draws, Rigs._first)
 	admit(self, self._ragdolls, Rigs._start)
 	self:_stock()
+
+	-- No pose reaches a frozen rig, so its root is queued here just as its poses would have queued it: a root that
+	-- starts or stops being written brings the long frame back, so the freeze changes neither
+	local queued: { Entry } = self._queued
+	for _, entry: Entry in self._frozen do
+		if joins(entry) then
+			entry.queued = true
+			table.insert(queued, entry)
+		end
+	end
+
 	self:_move()
 end
 
@@ -1319,12 +1357,13 @@ end
 
 --[[
     Keys a dying slot's rig to its body's slot, a body no longer the local
-    player's own, the spectated target or outlined, with no kick, head
-    offset or request waiting for the frame's end
+    player's own, the spectated target, outlined or frozen, with no kick,
+    head offset or request waiting for the frame's end
 --]]
 
 function Rigs._rekey(self: Self, entry: Entry, slot: number, body: number)
 	self:_forgo(entry)
+	self:_thaw(entry)
 
 	if slot == self._own then
 		self:_disown()
@@ -1344,6 +1383,59 @@ function Rigs._rekey(self: Self, entry: Entry, slot: number, body: number)
 	self._slots[body] = entry
 	entry.slot = body
 	settle(entry)
+end
+
+--[[
+    Freezes a slot's drawn rig where it stands, as a player anti-ESP hid
+    stays on screen, until its next pose thaws it or it is released: its
+    tracks hold their pose, its layer goes unwritten and its requests
+    waiting for the frame's end are dropped. Its root is written as before:
+    in every frame's move with the nudge, or, lying Downed at rest, in
+    none. Gives whether it is frozen. A rig out of Workspace, the local
+    player's own, the spectated target's, an outlined one, a ragdoll and a
+    dying one are refused and left as they were
+--]]
+
+function Rigs.freeze(self: Self, slot: number): boolean
+	local entry: Entry = self:_entry(slot, "freeze")
+	if entry.frozen then
+		return true
+	elseif not entry.drawn or entry.outlined or entry.body or entry.dying then
+		return false
+	elseif slot == self._own or slot == self._watched then
+		return false
+	end
+
+	self:_forgo(entry)
+	entry.frozen = true
+	table.insert(self._frozen, entry)
+
+	local animated: Animated? = entry.animated
+	if animated then
+		Animate.speed(animated, HELD)
+	end
+
+	return true
+end
+
+-- Ends a rig's freeze, leaving its tracks' speed to what its caller does with it next
+function Rigs._thaw(self: Self, entry: Entry)
+	if entry.frozen then
+		entry.frozen = false
+		forget(self._frozen, entry)
+	end
+end
+
+--[[
+    Where a slot's drawn rig stands in the world: the feet its last pose
+    inside the draw distance put it at. A rider's is on its platform's copy
+    as that pose drew it, where the state it was posed from may be back in
+    its platform's space. A rig no pose has drawn for its slot has none, or
+    the place the slot it was pooled from left it
+--]]
+
+function Rigs.placeOf(self: Self, slot: number): vector?
+	return self:_entry(slot, "placeOf").placed
 end
 
 --[[
@@ -1440,7 +1532,8 @@ end
     on the rigs drawn now and on every pose after, the first-person copy's
     included: 0 holds each rig's pose where it is, as a paused clip's
     rigs hold, and 1 plays each track as it was authored. A dying rig
-    keeps holding its pose until its ragdoll starts
+    keeps holding its pose until its ragdoll starts, and a frozen one
+    until its next pose
 --]]
 
 function Rigs.setSpeed(self: Self, speed: number)
@@ -1452,7 +1545,7 @@ function Rigs.setSpeed(self: Self, speed: number)
 
 	for _, entry: Entry in self._slots do
 		local animated: Animated? = entry.animated
-		if animated and not entry.dying then
+		if animated and not entry.dying and not entry.frozen then
 			Animate.speed(animated, speed)
 		end
 	end
@@ -1515,6 +1608,7 @@ function Rigs.destroy(self: Self)
 	table.clear(self._rigs)
 	table.clear(self._pool)
 	table.clear(self._slots)
+	table.clear(self._frozen)
 	table.clear(self._listeners)
 	self._own = nil
 	self._copy = nil

@@ -1,8 +1,8 @@
 --[[
     Block.read refuses bytes that aren't a relay block: shorter than its
     header, past 896 B, a section past the end, records that aren't whole,
-    a kind code no kind has, a look flag no part has or a part past its bound,
-    and a footstep entry naming no kind or material
+    a kind code, look flag or hide reason no value has, a part past its
+    bound, and a footstep entry naming no kind or material
 --]]
 
 --!strict
@@ -32,6 +32,7 @@ local ROWS: { Row } = {
 	{ name = "a reveal past the end", bytes = join(header(1, 0, 0, 0), { 1, 0 }), text = "ends inside" },
 	{ name = "a reveal of kind 4", bytes = join(header(1, 0, 0, 0), { 1, 0, 4 }), text = "kind code 4" },
 	{ name = "a hide past the end", bytes = join(header(0, 1, 0, 0), { 1 }), text = "ends inside" },
+	{ name = "a hide reason of 2", bytes = join(header(0, 1, 0, 0), { 1, 0, 2 }), text = "reason 2" },
 	{ name = "a look flag of 4", bytes = join(header(0, 0, 1, 0), { 1, 0, 4 }), text = "flags 4" },
 	{ name = "a look of 65 B", bytes = join(header(0, 0, 1, 0), { 1, 0, 1, 65 }), text = "part of 65 B" },
 	{ name = "a held item of 17 B", bytes = join(header(0, 0, 1, 0), { 1, 0, 2, 17 }), text = "part of 17 B" },

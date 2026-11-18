@@ -7,7 +7,7 @@
 --!strict
 local Environment = require("../../Environment")
 
-local RELAY: string = "src/Server/Relay.luau"
+local RELAY: string = "src/Server/Relay/init.luau"
 local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 local FIELDS: string = "src/Codec/Fields.luau"
 local NOT_FUNCTIONS: { any } = { "send", 1, {}, false }

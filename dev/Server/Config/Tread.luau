@@ -34,6 +34,23 @@ local OCCLUSION: { Instance } = { Occluders, MonumentOccluders, Workspace.Terrai
 local LEVERS_OFF_ATTRIBUTE: string = "TreadLeversOff"
 local LEVERS_OFF: boolean = Workspace:GetAttribute(LEVERS_OFF_ATTRIBUTE) == true
 
+-- Set on Workspace before the server starts to a whole number to boot the relay with that many Actor workers, left out
+-- or 0 for none, since the relay makes its workers only at its start
+local WORKERS_ATTRIBUTE: string = "TreadRelayWorkers"
+local WORKERS: any = Workspace:GetAttribute(WORKERS_ATTRIBUTE) or 0
+local RELAY_TIMEOUT: number = 1 -- Seconds a round out on the workers may take before the relay gives it up
+
+if type(WORKERS) ~= "number" or WORKERS < 0 or WORKERS % 1 ~= 0 then
+	error(`Workspace's {WORKERS_ATTRIBUTE} takes a whole number of relay workers from 0, not {WORKERS}`)
+end
+
+-- Records as changes, and with workers their count and the timeout they need, left out with none
+local RELAY: { changes: boolean, workers: number?, timeout: number? } = { changes = not LEVERS_OFF }
+if WORKERS > 0 then
+	RELAY.workers = WORKERS
+	RELAY.timeout = RELAY_TIMEOUT
+end
+
 return {
 	rates = {
 		move = { perSecond = 35, burst = 60 },
@@ -55,7 +72,7 @@ return {
 		outOfView = not LEVERS_OFF and { rate = 5, cone = 70, radius = 40 } or nil,
 	},
 
-	relay = { changes = not LEVERS_OFF }, -- Each record as its change since what the viewer last acknowledged
+	relay = RELAY, -- Each record as its change since what the viewer last acknowledged, and any workers
 	weights = { near = 1, far = 0.5, shooter = 2, cone = 1.5 },
 	shotNear = { rate = 10, seconds = 5 },
 	budget = { soft = 64, hard = 96 }, -- KB/s a viewer gets across every Volt stream

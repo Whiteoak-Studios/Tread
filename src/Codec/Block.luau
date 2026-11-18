@@ -25,6 +25,10 @@ local LOOK_FLAG: number = 0
 local HELD_FLAG: number = 1
 local FLAG_BITS: number = 2
 
+-- The bits of a hide entry's reason byte
+local CULLED_REASON: number = 0 -- Anti-ESP made the hide
+local REASON_BITS: number = 1
+
 -- The kind of character a reveal marks
 export type Kind = "Player" | "Npc" | "Body" | "Sleeper"
 
@@ -42,6 +46,7 @@ export type Reveal = {
 export type Hide = {
 	slot: number,
 	generation: number,
+	culled: boolean, -- Whether anti-ESP made the hide, which a write handed none takes as false
 }
 
 -- A look entry. Each part present is a stretch of packed game fields at an offset of its data, and a held part of
@@ -227,8 +232,14 @@ function Block.write(block: Block, data: buffer, bound: number?): number
 
 	for index: number = 1, hideCount do
 		local hide: Hide = block.hides[index]
+		local reason: number = 0
+
+		if hide.culled then
+			reason = bit32.replace(reason, 1, CULLED_REASON)
+		end
 
 		buffer.writeu16(data, offset, Record.id(hide.slot, hide.generation))
+		buffer.writeu8(data, offset + 2, reason)
 		offset += Constants.HIDE_BYTES
 	end
 
@@ -304,8 +315,8 @@ end
     offsets into names, so a reader decodes each where it lies, a change
     against the client's store. It errors on a block that isn't one: past
     bound, 896 B unless a tap block's is given, a section past its end, a
-    kind or flag no value is given, or a change record whose base is
-    outside 1 to 31 or whose mask holds Y both ways
+    kind, flag or reason no value is given, or a change record whose base
+    is outside 1 to 31 or whose mask holds Y both ways
 --]]
 
 function Block.read(data: buffer, into: Block, bound: number?)
@@ -349,11 +360,17 @@ function Block.read(data: buffer, into: Block, bound: number?)
 
 		local hide: Hide = into.hides[index]
 		if not hide then
-			hide = { slot = 0, generation = 0 }
+			hide = { slot = 0, generation = 0, culled = false }
 			into.hides[index] = hide
 		end
 
+		local reason: number = buffer.readu8(data, offset + 2)
+		if bit32.extract(reason, 0, REASON_BITS) ~= reason then
+			error(`A hide entry's reason {reason} sets a bit no reason is given`)
+		end
+
 		hide.slot, hide.generation = Record.split(buffer.readu16(data, offset))
+		hide.culled = bit32.extract(reason, CULLED_REASON) == 1
 		offset += Constants.HIDE_BYTES
 	end
 

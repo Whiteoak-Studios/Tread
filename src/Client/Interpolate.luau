@@ -73,7 +73,7 @@ export type Rates = {
 }
 
 export type RevealCallback = (slot: number, kind: Kind, player: Instance?, outfit: Values, held: Values?) -> ()
-export type HideCallback = (slot: number) -> ()
+export type HideCallback = (slot: number, frozen: boolean) -> ()
 export type DressCallback = (slot: number, outfit: Values) -> ()
 export type HoldCallback = (slot: number, held: Values?) -> ()
 export type FootstepCallback = (step: Footstep) -> ()
@@ -114,6 +114,8 @@ local Players: { [number]: Instance } = {} -- A live player's slot's Player
 local Kinds: { [number]: Kind } = {} -- An open stretch's kind
 local Changed: { [number]: number } = {} -- The tick of the newest reveal or hide this life applied
 local Hides: { [number]: number } = {} -- A hide's tick, which closes the stretch once the render time passes it
+local Culled: { [number]: boolean } = {} -- Whether anti-ESP made a waiting hide, as the newest copy of it says
+local Frozen: { [number]: true } = {} -- The closed stretches a hide anti-ESP made left a player's frozen body for
 local Hiding: { number } = {} -- The slots that may have a hide waiting
 local Withheld: { [number]: number } = {} -- A withheld stretch's newest withheld record's tick, while it is withheld
 
@@ -564,7 +566,8 @@ end
     Applies a reveal: a newer one than the life's last reveal or hide opens
     a stretch with an empty ring, marks a change of kind, takes back a hide
     still waiting or ends a withholding, since the target is sent the slot
-    again, and an older one is a repeat from before it
+    again, and an older one is a repeat from before it. A frozen body the
+    stretch before left is the new stretch's from here on
 --]]
 
 local function reveal(slot: number, kind: Kind, tick: number)
@@ -575,6 +578,8 @@ local function reveal(slot: number, kind: Kind, tick: number)
 
 	Changed[slot] = tick
 	Hides[slot] = nil
+	Culled[slot] = nil
+	Frozen[slot] = nil
 	Withheld[slot] = nil
 
 	local open: Kind? = Kinds[slot]
@@ -589,13 +594,25 @@ local function reveal(slot: number, kind: Kind, tick: number)
 	publishReveal(slot, kind)
 end
 
+-- Tells every hide callback of a stretch ended, and whether it left a frozen body, or of a frozen body ended
+local function publishHide(slot: number, frozen: boolean)
+	for _, callback: HideCallback in HideListeners do
+		callback(slot, frozen)
+	end
+end
+
 --[[
     A hide newer than the life's last reveal or hide waits for the render
-    time to pass its tick. One no newer than a withheld record of the slot
-    changes nothing, since a spectating moderator still draws it
+    time to pass its tick. Each copy of a pending hide carries its own
+    run's reason, so the newest copy's stands, for the hide while it waits
+    and for the frozen body it left, which a copy anti-ESP didn't make
+    ends. One no newer than a withheld record of the slot changes nothing,
+    since a spectating moderator still draws it
+
+    @ culled | whether anti-ESP made the hide, in the run this copy was written
 --]]
 
-local function hideAt(slot: number, tick: number)
+local function hideAt(slot: number, tick: number, culled: boolean)
 	local last: number? = Changed[slot]
 	if last ~= nil and tick <= last then
 		return
@@ -603,7 +620,18 @@ local function hideAt(slot: number, tick: number)
 
 	Changed[slot] = tick
 
-	if Kinds[slot] == nil or Hides[slot] ~= nil then
+	if Kinds[slot] == nil then
+		if Frozen[slot] and not culled then
+			Frozen[slot] = nil
+			publishHide(slot, false)
+		end
+
+		return
+	end
+
+	Culled[slot] = culled
+
+	if Hides[slot] ~= nil then
 		return
 	end
 
@@ -614,19 +642,15 @@ local function hideAt(slot: number, tick: number)
 	end
 end
 
--- Ends a slot's stretch, its withholding and its fall, and empties its ring
+-- Ends a slot's stretch, its withholding, its fall and any frozen body, and empties its ring
 local function close(slot: number)
 	Kinds[slot] = nil
 	Hides[slot] = nil
+	Culled[slot] = nil
+	Frozen[slot] = nil
 	Withheld[slot] = nil
 	forgetPlace(slot)
 	buffer.writeu8(RingCounts, slot, 0)
-end
-
-local function publishHide(slot: number)
-	for _, callback: HideCallback in HideListeners do
-		callback(slot)
-	end
 end
 
 --[[
@@ -790,6 +814,8 @@ local function withhold(slot: number, tick: number, data: buffer, offset: number
 
 	Changed[slot] = tick
 	Hides[slot] = nil
+	Culled[slot] = nil
+	Frozen[slot] = nil
 
 	local newest: number? = Withheld[slot]
 	if newest == nil or tick > newest then
@@ -909,7 +935,7 @@ function Interpolate.receive(data: buffer)
 		local verdict: Verdict = judge(hide.slot, hide.generation)
 
 		if verdict == "Apply" then
-			hideAt(hide.slot, tick)
+			hideAt(hide.slot, tick, hide.culled)
 		elseif verdict == "Hold" then
 			unhold(hide.slot, hide.generation, tick)
 		end
@@ -1006,8 +1032,9 @@ end
     Advances the render time by a frame toward the delay behind the newest
     tick the clock estimates, at the time scale that closes its drift in
     seconds within the scale's range. The delay eases back toward its
-    floor, each hide the render time passes closes its stretch, and so does
-    a withheld slot no record has refreshed for a few relay intervals
+    floor, each hide the render time passes closes its stretch, a player's
+    that anti-ESP made leaving a frozen body, and so does a withheld slot
+    no record has refreshed for a few relay intervals
 
     @ dt | the frame's seconds, 0 or more
 --]]
@@ -1054,8 +1081,15 @@ function Interpolate.frame(dt: number)
 			table.remove(Hiding)
 
 			if hide ~= nil then
+				-- Only a player's body freezes, and only for a hide anti-ESP made
+				local frozen: boolean = Culled[slot] == true and Kinds[slot] == "Player"
 				close(slot)
-				publishHide(slot)
+
+				if frozen then
+					Frozen[slot] = true
+				end
+
+				publishHide(slot, frozen)
 			end
 		end
 	end
@@ -1064,7 +1098,7 @@ function Interpolate.frame(dt: number)
 	for slot: number, last: number in Withheld do
 		if newest - last > WITHHELD_INTERVALS then
 			close(slot)
-			publishHide(slot)
+			publishHide(slot, false)
 		end
 	end
 end
@@ -1291,10 +1325,10 @@ end
 --[[
     Begins a spectate's view, or the moderator's own once it ends, at the
     relay tick the Spectate message names: each slot whose newest record is
-    older closes, told to every hide callback, a block older than the tick
-    is dropped from then on, as is a change record naming a baseline older
-    than it, and the acknowledgment starts again from the next block,
-    acknowledging none until it comes
+    older closes and every frozen body ends, each told to every hide
+    callback, a block older than the tick is dropped from then on, as is a
+    change record naming a baseline older than it, and the acknowledgment
+    starts again from the next block, acknowledging none until it comes
 
     @ tick | the u16 relay tick the view starts at
 --]]
@@ -1315,8 +1349,14 @@ function Interpolate.restart(tick: number)
 		local count: number = buffer.readu8(RingCounts, slot)
 		if count == 0 or tickOf(RingTicks, slot * RING, buffer.readu8(RingHeads, slot), 0) < since then
 			close(slot)
-			publishHide(slot)
+			publishHide(slot, false)
 		end
+	end
+
+	-- A frozen body is the view before's, whichever view left it
+	for slot: number in Frozen do
+		Frozen[slot] = nil
+		publishHide(slot, false)
 	end
 
 	Acking = false
@@ -1355,16 +1395,17 @@ end
 
 --[[
     Announces a slot's life: a freed slot or a new generation ends the
-    life drawn now, told to every hide callback, and a new generation
-    starts with no reveal, hide or look of its own
+    life drawn now, or the frozen body it left, told to every hide
+    callback, and a new generation starts with no reveal, hide or look of
+    its own
 --]]
 
 local function announce(slot: number, generation: number, taken: boolean, player: Instance?)
 	local renewed: boolean = Generations[slot] ~= generation
 
-	if Kinds[slot] ~= nil and (renewed or not taken) then
+	if (Kinds[slot] ~= nil or Frozen[slot]) and (renewed or not taken) then
 		close(slot)
-		publishHide(slot)
+		publishHide(slot, false)
 	end
 
 	if renewed then
@@ -1441,7 +1482,8 @@ end
 --[[
     Takes a death message as Volt's Death sends it. The dying life's
     stretch ends with no hide, since the rig drawing it becomes the body's,
-    and later entries for that life are ignored. Gives the dying slot, the
+    while a frozen body it left is told ended to every hide callback, and
+    later entries for that life are ignored. Gives the dying slot, the
     body's slot, the push for the ragdoll, and the dying life's newest
     record's age in seconds by the newest tick the clock estimates, an
     infinite age for a life with none
@@ -1467,8 +1509,14 @@ function Interpolate.death(
 			age = math.max(newest - last, 0) / Rate
 		end
 
+		local frozen: boolean = Frozen[slot] ~= nil
 		Taken[slot] = false
 		close(slot)
+
+		-- A frozen body is no drawn slot's rig for the body to take, so it ends as one whose slot was freed does
+		if frozen then
+			publishHide(slot, false)
+		end
 	end
 
 	if HoldGenerations[slot] == generation then
@@ -1505,7 +1553,12 @@ end
 --[[
     Calls back when a slot's stretch ends: once the render time passes its
     hide, or at once when the slot table frees the slot or gives it a new
-    life. Returns the closure that disconnects the callback
+    life. frozen is true when the stretch was a player's and the newest
+    copy of its hide says anti-ESP made it, so its body stays where it
+    stood, and the callback comes again with false when that body ends with
+    no reveal: on a later copy anti-ESP didn't make, its slot freed or given
+    a new life, a spectate's start or end, or its death. Returns the closure
+    that disconnects the callback
 --]]
 
 function Interpolate.onHide(callback: HideCallback): () -> ()

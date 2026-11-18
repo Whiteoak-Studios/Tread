@@ -49,7 +49,7 @@ local NPC_RUN: number = 20
 local NPCS_MOVED: number = 2
 
 -- The digest both arms give, which changes only with what a viewer is sent, and the bodies each arm's turns gather
-local EXPECTED: string = "8a432223525a67e538e15260d10b8594096ed7c079cb62d620f66f35e54aeb21"
+local EXPECTED: string = "834901db8e9e3d4b4ee8844a9eef045e547edce70a9c4c6b10be0c6937a805d7"
 local OWN_VISITS: number = 52894
 local WHOLE_VISITS: number = 66934
 

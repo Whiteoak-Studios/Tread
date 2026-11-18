@@ -314,6 +314,8 @@ Tread holds no game values and ships no default for any setting. Every gameplay 
 | `tiers.farFloor`, `tiers.farAim` | The far tier's floor and target send rates, Hz. |
 | `tiers.outOfView.rate`, `cone`, `radius` | Optional, as a table: the out-of-view rate. `rate` is the aim and floor, Hz, a player outside a viewer's view cone is held to, `cone` the cone's half-angle in degrees either side of the viewer's look, above 0 and at most 180, and `radius` the distance in studs, 0 or more, inside which no player is held to it. Left out, no player is, as under [Networking](#networking). |
 | `relay.changes` | Optional, `true` or `false`: whether each record goes as its change since the newest record of it the viewer's client acknowledged, in place of the whole 16 B record. Left out or `false`, every record goes whole, as under [Networking](#networking). |
+| `relay.workers` | Optional, a whole number of 0 or more: how many Actor workers take the relay's per-viewer turns. A viewer's turns stay on the worker that had the fewest viewers when it first came in. Left out or 0, every turn runs in the server's own script. Every block a client is sent is the same either way. With workers, each player's OwnerState and feed still go out on the relay tick. The blocks of the turns on the workers go out at the start of the first Heartbeat that finds every worker's result in, normally the next one, and the tick's remaining stages and every later tick wait until then. While a run's turns are out on the workers, `server:viewersOf` and `server:keyframe` answer as of the run before. Whether they pay depends on the server's cores, and no live run has measured it yet: in plain Lune at 150 viewers in a fight, a worker's share of the turns cost about 1.5 times what it costs in the server's own script, and every live server probed so far ran about 2 workers at once. |
+| `relay.timeout` | Needed when `relay.workers` is above 0, a number of seconds above 0: how long a run's turns may stay out on the workers before the run is given up. A run given up sends none of its workers' blocks, as if every one were lost, and `server:stats()` counts it in `relayDropped`. |
 | `weights.near`, `far`, `shooter`, `cone` | The send allocator's priority weights. `cone` weighs a character inside the view cone of `tiers.outOfView`, and with no `tiers.outOfView`, one in the half space ahead of the viewer's body. |
 | `shotNear.rate`, `shotNear.seconds` | How fast, and for how long, a shooter whose bullet passed near a viewer is sent to that viewer. |
 | `budget.soft`, `budget.hard` | The per-viewer downstream across every Volt stream, KB/s. |
@@ -389,7 +391,7 @@ Each entry point checks its tables before it does anything else, and errors nami
 Under luau-lsp's new type checker:
 
 - `collision`'s five keys are read-only in the type, so a game's own module of its four functions fits as a whole.
-- `tiers.outOfView`, `relay` and `relay.changes` are read-only in the type too, so a `tiers` or `relay` table built in a game's own module fits whether it gives the key or not.
+- `tiers.outOfView`, `relay`, `relay.changes`, `relay.workers` and `relay.timeout` are read-only in the type too, so a `tiers` or `relay` table built in a game's own module fits whether it gives the key or not.
 - A table that names its keys, built in another module, fits no map type. Type each map built outside the start call's literal as the map: `hitShapes.*.zones`, `footsteps.range`, `joints`, `animations` and `bodies.jointLimits`.
 - The strings in a field declaration are singletons in `Tread.Field`, so a `fields` table built in its own module needs a cast, `:: Tread.Fields`, or they widen to `string`.
 - A whole settings table built in another module and passed as it is gets none of its optional keys, such as `bots`. Build the table in a literal where it is passed, as the examples above do.
@@ -431,7 +433,8 @@ Under luau-lsp's new type checker:
 - `server:stats(): { [string]: any }` gives Tread's aggregate numbers, with no endpoint and no signal, for the game to read about once a second. It holds no position and no name:
   - `seconds` since the last read, and `stages`, each stage's `last` and `p95` time over 10 s, in seconds;
   - as they stand: `players` (live characters), `npcs` (awake), `bodies`, `historyBytes`, `trafficLargest` and `trafficP95`, the largest and the p95 of the bytes Volt sent each joined player and bot over the last second, and `antiEspLyingWaiting`, the sleeper and body pairs due for a test that anti-ESP's slices haven't had time for yet;
-  - as their change since the last read: `ticks`, `dropped`, `relaySkipped` (the relay ticks the relay didn't run, since a Heartbeat that runs two ticks to catch up relays once, on the last of them that starts a relay tick), `standIns`, `late`, `recordsSent`, `recordsCut`, `bytesOut`, `antiEspTests`, `antiEspHidden`, `antiEspFailOpens`, `antiEspLyingTests` (the sleeper and body pair tests among `antiEspTests`), and `reports` by kind.
+  - as their change since the last read: `ticks`, `dropped`, `relaySkipped` (the relay ticks the relay didn't run, since a Heartbeat that runs two ticks to catch up relays once, on the last of them that starts a relay tick), `standIns`, `late`, `recordsSent`, `recordsCut`, `bytesOut`, `antiEspTests`, `antiEspHidden`, `antiEspFailOpens`, `antiEspLyingTests` (the sleeper and body pair tests among `antiEspTests`), and `reports` by kind;
+  - with `relay.workers` above 0 only: `relayFinish`, the `last` and `p95` time over 10 s, in seconds, of each relay tick's finish, the work at the Heartbeat that brings its workers' results in with its sends, the flush and the taps' frames, while the `relay` stage's own times cover the run up to the dispatch; and `relayDropped`, the runs given up past `relay.timeout` since the last read.
 
 The recording taps on the server handle are under [Recording taps and clip playback](#recording-taps-and-clip-playback).
 
@@ -475,8 +478,8 @@ Every member errors on a handle that has ended, but for the `destroy` that follo
 - `client:onCorrected(callback: (size: number, flagged: boolean) -> ()): () -> ()` calls back on every replay of the owner's prediction, with the correction's size in studs and whether grounded, posture, mode or the ridden platform flipped.
 - `client:onMarker(callback: (slot: Slot, marker: string, value: string) -> ()): () -> ()` calls back on every animation marker a drawn rig's track reaches, a playback's rigs included.
 - `client:onFootstep(callback: (step: Footstep) -> ()): () -> ()` calls back on each step the viewer can hear from an enemy culled from it, which the server sends in place of the enemy's record. A sent enemy's steps come from its animation markers through `onMarker`.
-- `client:onSpawned(callback: (slot: Slot, rig: Model) -> ()): () -> ()` calls back when a slot's rig is drawn: a character, sleeper or body revealed, the owner's own body started, a spectated target's first feed, or a dying rig turned into its body.
-- `client:onDespawned(callback: (slot: Slot) -> ()): () -> ()` calls back when a slot's rig is put away.
+- `client:onSpawned(callback: (slot: Slot, rig: Model) -> ()): () -> ()` calls back when a slot's rig is drawn: a character, sleeper or body revealed, the owner's own body started, a spectated target's first feed, or a dying rig turned into its body. When the server shows a player again whose [frozen body](#the-rig) still stands, it calls back with that body's rig, in the frame of the rig's first pose after the reveal.
+- `client:onDespawned(callback: (slot: Slot) -> ()): () -> ()` calls back when a slot's rig is put away, and when anti-ESP hides a player whose rig is drawn, which stays in Workspace as a [frozen body](#the-rig). It calls back once for each spawn, so a frozen body's own end calls it no more.
 
 `client:play` is under [Recording taps and clip playback](#recording-taps-and-clip-playback).
 
@@ -577,10 +580,10 @@ end)
 While a playback runs:
 
 - `play` errors, changing nothing, on a second playback, a first buffer that isn't a keyframe of this `CODEC_VERSION`, field declarations that hash other than the client's, frames out of order or before the keyframe, and a withheld frame with an OwnerState or a reveal, hide or footstep entry.
-- Every live rig goes back to the pool. The clip's rigs come from the same pool and raise `onSpawned` and `onDespawned` with slots that name no player, and their markers reach `onMarker`.
+- Every live rig goes back to the pool, and so does every frozen body, which raises no `onDespawned` of its own. The clip draws no frozen body. Its rigs come from the same pool and raise `onSpawned` and `onDespawned` with slots that name no player, and their markers reach `onMarker`.
 - `getEye()` gives the playback's eye and look, while `getState()` and `getRenderTime()` stay live, and prediction and the live characters carry on unseen.
 - A death shows as the dying rig's hide and the body's lying reveal, with no ragdoll.
-- After `destroy`, a body that a live death laid down before `play` stays undrawn until its own next reveal.
+- After `destroy`, a body that a live death laid down before `play` stays undrawn until its own next reveal. A frozen body that `play` put away stays away too, and its player is drawn again when the server next shows it.
 
 To mark the slots the target's client was never sent, decode the withheld frames:
 
@@ -606,6 +609,19 @@ Tread ships no rig. `rig` is the game's template: any R15 Model with AnimationCo
 The rig has no Humanoid, so Shirt, Pants, BodyColors and `Humanoid:AddAccessory` don't work on it, and the game's `dress` hook welds each piece of a look by hand. The first-person copy is dressed with `copy` true, so the game can leave off what the copy never shows, such as the head. Each client attaches the held item to its own copy of the rig in `hold`.
 
 Tread moves a drawn rig's root every frame, a standing rig's too: on alternate frames a still rig's root sits 0.001 studs above where it stands. In Studio, Roblox's renderer spent a long frame whenever an anchored rig that had stopped being moved was moved again, and the nudge keeps that from happening. So a game that reads a rig's `PrimaryPart.CFrame` sees it shift by that much, and whatever the game welds to the rig moves with it. A rig lying Downed, a sleeper or a body among them, is left where it lies.
+
+A player that anti-ESP hides from this client leaves a frozen body when the player's rig is drawn in Workspace at the hide. Once every ray from the viewer to an enemy is blocked, the server stops sending that enemy, and Tread keeps the enemy's rig in Workspace where it last stood, holding the pose its animations were in. Its root is written as it was before the hide: a standing rig's keeps the nudge every frame, and one lying Downed at rest is left where it lies. The player can therefore see a frozen enemy where nobody stands any more, and the body shows only what the client had already been sent. The local player's prediction walks through a frozen body, as the server's step does, since the enemy is no longer there. `onDespawned` fires at the hide. When the server shows the enemy again, `onSpawned` fires with the same rig in the frame of the rig's first pose, which moves it to the enemy's place or, past the render distance, takes it out of Workspace, so nothing a game puts on a spawned rig shows at the old place. An enemy hidden again before that pose raises neither. While it is frozen the rig stays dressed and the held item stays in its hands. A look that changed while the enemy was hidden goes on when the reveal arrives, through `undress` and then `dress` on the kept rig, and a changed held item through `hold`. With no change, `undress` next runs when the rig goes back to the pool. At `onDespawned`, switch off anything the game hung on the slot, such as a held light, because a hidden player must not show one.
+
+A frozen body goes back to the pool, with no second `onDespawned`, when:
+
+- the server says anti-ESP no longer hides the enemy, as when the enemy turns invisible or leaves this client's relevancy before the client has acknowledged the hide;
+- the enemy's slot is freed or given a new life;
+- the hidden enemy's death reaches this client;
+- the body stands farther from the eye than the render distance;
+- the client starts, switches or ends a spectate;
+- `client:play` starts a clip.
+
+Only a player whose rig is drawn in Workspace at the hide leaves a frozen body. A player past the render distance, or one whose rig still waits for its first draw, is put away with an ordinary `onDespawned`. So is an NPC, a sleeper or a body at every hide, and a player that the game hid or that left relevancy. Nothing freezes while the client spectates.
 
 ### Animations
 

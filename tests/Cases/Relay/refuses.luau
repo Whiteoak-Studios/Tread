@@ -8,7 +8,7 @@
 --!strict
 local Environment = require("../../Environment")
 
-local RELAY: string = "src/Server/Relay.luau"
+local RELAY: string = "src/Server/Relay/init.luau"
 local HARNESS: string = "tests/Fixtures/Relay/Harness.luau"
 local NOT_SLOTS: { number } = { -1, 4096, 1.5 }
 

@@ -75,7 +75,8 @@ return function (): (boolean, string | nil)
 	end
 
 	block.looks, block.lookCount = looks, #looks
-	block.hides, block.hideCount = { { slot = 4095, generation = 0 }, { slot = 0, generation = 15 } }, 2
+	block.hides, block.hideCount =
+		{ { slot = 4095, generation = 0, culled = true }, { slot = 0, generation = 15, culled = false } }, 2
 
 	local reveals: { { [string]: any } } = {}
 	for index: number, kind: string in KINDS do
@@ -88,7 +89,7 @@ return function (): (boolean, string | nil)
 	local bytes: number = Block.write(block, data)
 	local size: number = 9
 		+ 4 * 3
-		+ 2 * 2
+		+ 2 * 3
 		+ (5 + lookLength + heldLength)
 		+ (4 + lookLength)
 		+ (4 + 0)

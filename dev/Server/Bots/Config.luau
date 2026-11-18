@@ -1,7 +1,7 @@
 --[[
     The bot harness's numbers: scenarios S0 to S7 and the gates' loads, the
-    seeded runs' timings, the calibration, the relevancy sweep and versus run,
-    how a bot roams, what each cheat sends, and where its floors and spawns go
+    seeded runs' timings, the calibration, the relevancy, versus and relay
+    workers runs, how a bot roams, what each cheat sends, its floors and spawns
 --]]
 
 --!strict
@@ -285,6 +285,8 @@ return {
 		-- Those the relay counts, over the read's relay runs instead: its ticks less the relay ticks it skipped,
 		-- since the dev place runs the relay at the simulation's rate
 		relayCounts = { "recordsSent", "recordsCut", "bytesOut" },
+
+		byHeartbeat = { 0.5, 0.95 }, -- The shares Tread's time each Heartbeat is read at, by its place in the tick
 	},
 
 	-- The fixed workload every run opens with, so its figures scale across servers whose speeds differ
@@ -311,6 +313,19 @@ return {
 	versus = {
 		scenarios = { "S3", "S4", "S3x300", "S4x300" },
 		timing = { seeds = { 1 }, warmup = 10, window = 40, interval = 1 } :: Timing,
+	},
+
+	-- The relay's two modes compared: the city mix and the fight, each with its workers off and then on, one seed each
+	workers = {
+		scenarios = { "S3", "S4" },
+		timing = { seeds = { 1 }, warmup = 30, window = 120, interval = 1 } :: Timing,
+	},
+
+	-- The relay's workers checked: the fight and the city mix with them on, a short seed each
+	relayWorkers = {
+		scenarios = { "S4", "S3" },
+		timing = { seeds = { 1 }, warmup = 10, window = 20, interval = 1 } :: Timing,
+		ready = 10, -- Seconds the check waits for every worker to be ready
 	},
 
 	stage = "bots", -- The stage every bot sends from, after the relay

@@ -16,6 +16,8 @@ local Tread = require(Packages.Tread)
 
 local Network = require(ReplicatedStorage.Shared.Network.Server)
 
+local Relay = require(Packages.Tread.Server.Relay)
+
 local Corrections = require(ServerScriptService.Server.Corrections)
 local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
 local Forward = require(ServerScriptService.Server.Forward)
@@ -199,6 +201,12 @@ function Game.start()
 	local server: Tread.Server = Tread.startServer(Shared, settings)
 	Running = server
 	Settings = settings
+
+	-- Before the first relay run, so a real player's view stays in process and each bench load picks its own mode
+	local relay: { read workers: number? }? = settings.relay
+	if relay and relay.workers and relay.workers > 0 then
+		Relay.useWorkers(false)
+	end
 
 	Shots.start(server, Shared, settings)
 	Requests.start(server)

@@ -1,7 +1,7 @@
 --[[
     One of the bot harness's scenarios on the dev game's server, seed by
-    seed after any calibration: its bodies laid out at any render distance,
-    a warm-up, a window of Tread's stats and frames, and all of it undone
+    seed after any calibration: bodies laid out at any render distance and
+    relay mode, a warm-up, a window of Tread's stats and frames, all undone
 --]]
 
 --!strict
@@ -36,6 +36,8 @@ local TICK_STAGES: { string } = require(ServerScriptService.Server.Bots.Config).
 local BESIDE: string = require(ServerScriptService.Server.Bots.Config).tick.beside
 local COUNTS: { string } = require(ServerScriptService.Server.Bots.Config).tick.counts
 local RELAY_COUNTS: { string } = require(ServerScriptService.Server.Bots.Config).tick.relayCounts
+local BY_HEARTBEAT: { number } = require(ServerScriptService.Server.Bots.Config).tick.byHeartbeat
+local BOTS_STAGE: string = require(ServerScriptService.Server.Bots.Config).stage
 local MOVED: number = require(ServerScriptService.Server.Bots.Config).moved
 local EVERY: number = require(ServerScriptService.Server.Bots.Config).cheats.every
 local HOLDS: { number } = require(ServerScriptService.Server.Bots.Config).cheats.holds
@@ -59,14 +61,22 @@ local FIGURE: string = "%.3f" -- Each stats figure and stage time as the summari
 local RAW: string = "%.4g" -- Four significant digits, for frame times and Stats' figures, whose units differ
 local SEPARATOR: string = "; " -- Between the parts of one line
 local SUM: string = " + " -- Between the summed stages' names
+local FINISH: string = "finish" -- What the lines call the relay's finish, which a held tick's sum takes
+local VIEWS: string = "/" -- Between the workers' view counts
 
 -- Where an area is probed for ground: its center and its corners, as shares of its half width and half depth
 local PROBES: { Vector2 } = { Vector2.zero, Vector2.new(-1, -1), Vector2.new(-1, 1), Vector2.new(1, -1), Vector2.one }
+
+-- Each place a Heartbeat takes in its tick as the readout names it, from the one that ran the tick, the last any later
+local PLACES: { string } = { "the tick's Heartbeat", "the one after", "the one after that", "later" }
 
 type Area = Config.Area
 type Group = Config.Group
 type Scenario = Config.Scenario
 type Timing = Config.Timing
+
+-- What a sum reads of a ring of times, a stage's or the finishes'
+type Timed = { times: { number }, ticks: { number }, held: number, head: number }
 
 -- Each figure the window read, a sample a read, by its name
 type Samples = { [string]: { number } }
@@ -77,6 +87,15 @@ type Sampled = {
 	heartbeatTimes: { number },
 	physicsTimes: { number },
 	dataSend: { number },
+}
+
+-- Tread's work each Heartbeat of a window, oldest first, taken from the tick loop's ring as the window reads
+export type Readout = {
+	times: { number }, -- Seconds of the tick loop's whole work in each, the bots' stage's included
+	flags: { number }, -- What the loop did in each, as Tick's flags
+	bots: { number }, -- Seconds of the bots' stage in each
+	through: number, -- The newest Heartbeat taken, by the loop's count
+	lost: number, -- Heartbeats the ring no longer held when they came to be taken
 }
 
 -- What watches a run's window beside the stats, started after the warm-up's read and stopped after the window
@@ -607,14 +626,25 @@ local function percentile(samples: { number }, share: number): number
 	return samples[math.max(1, math.ceil(#samples * share))]
 end
 
--- A list's configured percentiles in one figure, each in the format given. It sorts the list in place
-local function spread(values: { number }, format: string): string
+-- A list's percentiles in one figure, the configured ones unless shares are given, each in the format given. It sorts
+-- the list in place
+local function spread(values: { number }, format: string, shares: { number }?): string
 	local figures: { string } = {}
-	for _, share: number in PERCENTILES do
+	for _, share: number in shares or PERCENTILES do
 		table.insert(figures, string.format(format, percentile(values, share)))
 	end
 
 	return table.concat(figures, "/")
+end
+
+-- The pNN labels of a list of shares in one figure, as spread lays them out
+local function labels(shares: { number }): string
+	local names: { string } = {}
+	for _, share: number in shares do
+		table.insert(names, `p{math.round(share * PERCENT)}`)
+	end
+
+	return table.concat(names, "/")
 end
 
 -- Each figure's percentiles over the window, in one line
@@ -665,16 +695,68 @@ local function serverLine(label: string, sampled: Sampled, elapsed: number): str
 	return table.concat(parts, SEPARATOR)
 end
 
--- The tick stages' line: their total a tick over the window, with the stage beside them's p95 as each read gave it
-local function tickLine(label: string, totals: { number }, samples: Samples): string
+--[[
+    The tick stages' line: their total a tick over the window with each
+    held tick's finish, the stage beside them's p95 as each read gave it,
+    the finish alone over the held ticks, and the rounds the relay gave up
+--]]
+
+local function tickLine(
+	label: string,
+	totals: { number },
+	samples: Samples,
+	finishes: { number },
+	dropped: number
+): string
 	local besideKey: string = `{BESIDE}P95Ms`
+	local summed: string = `{table.concat(TICK_STAGES, SUM)}{SUM}{FINISH}`
 	local parts: { string } = {
-		`{label} Tread tick stages a tick, {table.concat(TICK_STAGES, SUM)}, ms p50/p95/p99 {spread(totals, FIGURE)}`,
+		`{label} Tread tick stages a tick, {summed}, ms p50/p95/p99 {spread(totals, FIGURE)}`,
 		`{#totals} ticks`,
 		`{BESIDE} p95 ms beside them, p50/p95/p99 over the reads {spread(samples[besideKey] or {}, FIGURE)}`,
+		`the {FINISH} alone ms p50/p95/p99 {spread(finishes, FIGURE)} over {#finishes} held ticks`,
+		`{dropped} rounds dropped`,
 	}
 
 	return table.concat(parts, SEPARATOR)
+end
+
+--[[
+    Tread's time a Heartbeat by its place in the tick at the configured
+    shares, less the bots' stage, which shows apart, with the Heartbeats in
+    each place, the relay's rounds in by the next Heartbeat and later, and
+    the Heartbeats the ring lost before the window took them
+--]]
+
+local function heartbeatLine(label: string, readout: Readout): string
+	local tread: { { number } } = {}
+	local bots: { { number } } = {}
+	for place: number = 1, #PLACES do
+		tread[place] = {}
+		bots[place] = {}
+	end
+
+	for index: number, place: number in Run.places(readout.flags) do
+		if place > 0 then
+			table.insert(tread[place], (readout.times[index] - readout.bots[index]) * MILLISECONDS)
+			table.insert(bots[place], readout.bots[index] * MILLISECONDS)
+		end
+	end
+
+	local parts: { string } = {}
+	for place: number, name: string in PLACES do
+		local own: string = spread(tread[place], FIGURE, BY_HEARTBEAT)
+		local stage: string = spread(bots[place], FIGURE, BY_HEARTBEAT)
+		table.insert(parts, `{name} {own} with the bots' stage {stage} over {#tread[place]}`)
+	end
+
+	local inTime: number, late: number = Run.rounds(readout.flags)
+	local head: string =
+		`{label} Tread ms a Heartbeat by its place in the tick, {labels(BY_HEARTBEAT)}, less the bots' stage`
+	local rounds: string = `{inTime} rounds in by the next Heartbeat, {late} later`
+	local lost: string = `{readout.lost} Heartbeats not read`
+
+	return `{head}: {table.concat(parts, SEPARATOR)}{SEPARATOR}{rounds}{SEPARATOR}{lost}`
 end
 
 -- The configured counts over the window, each read's change a relay run for a relay count and a tick for the rest
@@ -688,23 +770,42 @@ local function countsLine(label: string, rates: Samples): string
 	return `{label} counts, p50/p95/p99 over the reads: {table.concat(parts, SEPARATOR)}`
 end
 
+-- The tick's stage of that name, nil while the tick has none
+local function stageNamed(name: string): Tick.Stage?
+	for _, stage: Tick.Stage in Tick.stages() do
+		if stage.name == name then
+			return stage
+		end
+	end
+
+	return nil
+end
+
 --[[
-    The window: Tread's stats read once each interval with the real player
-    count and each real player's bytes over the last second beside it, each
-    read printed as it comes, the server's frames, every tick's summed
-    stages and the counts taken beside, their lines printed after,
+    The window: the relay's mode line, then Tread's stats read once each
+    interval with the real player count and each real player's bytes over
+    the last second beside it, each read printed as it comes, the server's
+    frames, every finished tick's summed stages and finish, Tread's time
+    each Heartbeat and the counts taken beside, their lines printed after,
     and the percentiles of every stats figure, with every figure's samples.
     It ends on its own deadline
 --]]
 
-local function window(label: string, scenario: Scenario, timing: Timing, made: Made): (string, Samples)
+local function window(label: string, scenario: Scenario, timing: Timing, made: Made, asked: boolean?): (string, Samples)
 	local server: Tread.Server = Game.get()
 	local Network = require(Packages.Tread.Network.Server) -- Tread's own scope, which each viewer's bytes are counted on
 	local samples: Samples = {}
 	local rates: Samples = {}
 	local sampled: Sampled = { frames = {}, heartbeatTimes = {}, physicsTimes = {}, dataSend = {} }
 	local totals: { number } = {}
-	local counted: number = Tick.counts()
+	local finishes: { number } = {}
+	local dropped: number = 0
+	local counted: number = Run.settled()
+	local readout: Readout = { times = {}, flags = {}, bots = {}, through = Tick.heartbeats().count, lost = 0 }
+
+	local inProcess: number, views: { number } = Relay.homes()
+	print(Run.modeLine(label, Run.workers(), asked, inProcess, views))
+
 	local started: number = os.clock()
 	local deadline: number = started + timing.window
 	local stalled: boolean = false
@@ -746,13 +847,24 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 
 		Run.counts(stats, rates)
 
-		-- The ticks run since the last read, each one's stages summed from their rings
-		local ran: number = Tick.counts()
-		for _, total: number in Run.tickTotals(Tick.stages(), ran - counted) do
+		local relayDropped: any = stats.relayDropped
+		if type(relayDropped) == "number" then
+			dropped += relayDropped
+		end
+
+		-- The ticks finished since the last read, each one's stages and any finish summed from their rings, and each
+		-- Heartbeat since with the bots' stage's share
+		local through: number = Run.settled()
+		for _, total: number in Run.tickTotals(Tick.stages(), through - counted, Tick.finishes(), through) do
 			table.insert(totals, total * MILLISECONDS)
 		end
 
-		counted = ran
+		for _, time: number in Run.finishTimes(Tick.finishes(), counted, through) do
+			table.insert(finishes, time * MILLISECONDS)
+		end
+
+		counted = through
+		Run.takeBeats(readout, Tick.heartbeats(), stageNamed(BOTS_STAGE))
 		table.insert(sampled.dataSend, Stats.DataSendKbps)
 
 		local counts: string = `real players {#real}, viewers {HttpService:JSONEncode(viewers)}`
@@ -771,7 +883,8 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 	made.beats = nil
 
 	print(serverLine(label, sampled, elapsed))
-	print(tickLine(label, totals, samples))
+	print(heartbeatLine(label, readout))
+	print(tickLine(label, totals, samples, finishes, dropped))
 	print(countsLine(label, rates))
 
 	return `{label} summary over {second} reads, p50/p95/p99: {summary(samples)}`, samples
@@ -954,11 +1067,11 @@ local function removeAll(server: Tread.Server, made: Made, problems: { string })
 end
 
 --[[
-    One seeded run: the layout with every viewer at any render distance
-    given, the warm-up, the window with any probe beside it, and then the
-    removal of everything it made, checked against what the handle lists,
-    and the real players put back. A probe that started is stopped whatever
-    happened
+    One seeded run: the relay's mode set for the views its bots make, the
+    layout with every viewer at any render distance given, the warm-up, the
+    window with any probe beside it, and then the removal of everything it
+    made, checked against what the handle lists, the real players put back
+    and the mode off again. A probe that started is stopped whatever happened
 --]]
 
 local function runSeed(
@@ -967,7 +1080,8 @@ local function runSeed(
 	seed: number,
 	timing: Timing,
 	probe: Probe?,
-	distance: number?
+	distance: number?,
+	asked: boolean?
 ): (boolean, string)
 	local label: string = `Bots {name} seed {seed}`
 	local server: Tread.Server = Game.get()
@@ -1021,7 +1135,14 @@ local function runSeed(
 		end
 	end)
 
+	-- Each view is homed when it is made, so the mode is set before any bot joins, and put back off once they are gone
+	local workers: number = Run.workers()
+
 	local ran: boolean, result: any = pcall(function (): string
+		if workers > 0 then
+			Relay.useWorkers(asked == true)
+		end
+
 		local folder: Folder, floored: number = layFloors(scenario, offset, testContent, params)
 		made.floors = folder
 
@@ -1046,7 +1167,7 @@ local function runSeed(
 			setViewers(distance, made)
 		end
 
-		local line: string, samples: Samples = window(label, scenario, timing, made)
+		local line: string, samples: Samples = window(label, scenario, timing, made, asked)
 		drove(label, scenario, made, problems)
 
 		if probe then
@@ -1090,6 +1211,11 @@ local function runSeed(
 		floors:Destroy()
 	end
 
+	-- So a real player who joins between loads keeps their view in process
+	if workers > 0 then
+		Relay.useWorkers(false)
+	end
+
 	if #problems > 0 then
 		return false, `{label}: {table.concat(problems, SEPARATOR)}`
 	end
@@ -1098,23 +1224,35 @@ local function runSeed(
 end
 
 --[[
-    Runs a scenario for each of the timing's seeds in turn, after the
-    server's speed calibration, a probe beside each window and every viewer
-    at a render distance when given, and gives whether every run drove and
-    cleaned up, with a line for each. Every read, summary and probe's line
-    prints as it comes
+    A scenario's seeds in turn after the server's speed calibration, with
+    its probe, render distance and relay mode, nil leaving its bots' views
+    in process and its name unmarked, and whether every run drove and
+    cleaned up, with a line for each
 --]]
 
-function Run.run(name: string, timing: Timing, probe: Probe?, distance: number?): (boolean, string)
+local function runAll(
+	name: string,
+	timing: Timing,
+	probe: Probe?,
+	distance: number?,
+	workers: boolean?
+): (boolean, string)
 	local scenario: Scenario? = SCENARIOS[name]
 	if not scenario then
 		return false, `Bots {name}: no scenario has that name`
 	end
 
-	-- A run at a render distance is named for it too, in one word, so the report still drops its per-second lines
+	-- A run at a render distance or one that picks the relay's mode is named for it too, in one word, so the report
+	-- still drops its per-second lines
 	local run: string = name
 	if distance then
 		run = `{name}@{distance}`
+	end
+
+	if workers == true then
+		run = `{run}/workers`
+	elseif workers == false then
+		run = `{run}/serial`
 	end
 
 	-- Before the first load, so it times nothing a load does
@@ -1129,7 +1267,7 @@ function Run.run(name: string, timing: Timing, probe: Probe?, distance: number?)
 	local lines: { string } = {}
 
 	for _, seed: number in timing.seeds do
-		local ok: boolean, line: string = runSeed(run, scenario, seed, timing, probe, distance)
+		local ok: boolean, line: string = runSeed(run, scenario, seed, timing, probe, distance, workers)
 		passed = passed and ok
 		table.insert(lines, line)
 	end
@@ -1138,16 +1276,107 @@ function Run.run(name: string, timing: Timing, probe: Probe?, distance: number?)
 end
 
 --[[
+    Runs a scenario for each of the timing's seeds in turn, after the
+    server's speed calibration, a probe beside each window and every viewer
+    at a render distance when given, its bots' views in process, and gives
+    whether every run drove and cleaned up, with a line for each. Every
+    read, summary and probe's line prints as it comes
+--]]
+
+function Run.run(name: string, timing: Timing, probe: Probe?, distance: number?): (boolean, string)
+	return runAll(name, timing, probe, distance, nil)
+end
+
+--[[
+    Runs a scenario as Run.run does, with its bots' views on the relay's
+    workers when workers is true and the server started some, and in
+    process otherwise, its name marked with the mode it asked for
+--]]
+
+function Run.runWorkers(name: string, timing: Timing, workers: boolean, probe: Probe?): (boolean, string)
+	return runAll(name, timing, probe, nil, workers)
+end
+
+-- How many relay workers the running dev server started with, 0 for none
+function Run.workers(): number
+	local _, _, settings: Tread.ServerSettings = Game.get()
+	local relay: { read workers: number? }? = settings.relay
+	if relay and relay.workers then
+		return relay.workers
+	end
+
+	return 0
+end
+
+--[[
+    The newest tick whose work is all done, its relay's finish included:
+    the newest the tick loop ran, or the one before while that one is held
+--]]
+
+function Run.settled(): number
+	local ran: number = Tick.counts()
+	if Tick.holding() then
+		return ran - 1
+	end
+
+	return ran
+end
+
+--[[
+    The line naming a run's relay mode at its window's start: the workers
+    the server started, whether this load has its bots' views on them, which
+    one asking for them on a server with none says it doesn't, and how many
+    views are in process and on each worker
+--]]
+
+function Run.modeLine(label: string, started: number, asked: boolean?, inProcess: number, views: { number }): string
+	local inside: string = `views {inProcess} in process`
+	if started == 0 then
+		local mode: string = "no relay workers started"
+		if asked then
+			mode = `{mode}, so this load, which asked for them, runs serial`
+		end
+
+		return `{label} mode: {mode}; {inside}`
+	end
+
+	local on: string = "off"
+	if asked then
+		on = "on"
+	end
+
+	local homes: string = `{table.concat(views, VIEWS)} on the workers`
+
+	return `{label} mode: {started} relay workers started, {on} for this load; {inside}, {homes}`
+end
+
+-- Adds each time a ring holds onto the total of the tick it ran on, newest first, from newest back to the oldest
+local function addTimes(totals: { number }, ring: Timed, oldest: number, newest: number)
+	local size: number = #ring.times
+
+	for back: number = 1, ring.held do
+		local index: number = (ring.head - back) % size + 1
+		local tick: number = ring.ticks[index]
+		if tick < oldest then
+			break
+		elseif tick <= newest then
+			totals[tick - oldest + 1] += ring.times[index]
+		end
+	end
+end
+
+--[[
     The configured tick stages' times summed tick by tick, oldest first, in
-    seconds: the newest count ticks to the newest any of them ran on, at
-    most the longest ring's length and none before the oldest their rings
-    hold, each the time of every configured stage that ran on that tick.
+    seconds: the newest count ticks to the newest any of them ran on, or to
+    through when given, at most the longest ring's length and none before
+    the oldest their rings hold, each the time of every configured stage
+    that ran on that tick and of the finish of a held one, given finishes.
     Any other stage is left out. A configured one missing is refused, and so
     is one whose ring is full and holds no tick as old as the window's
     oldest, since it may have run on a tick of the window it no longer holds
 --]]
 
-function Run.tickTotals(stages: { Tick.Stage }, count: number): { number }
+function Run.tickTotals(stages: { Tick.Stage }, count: number, finishes: Tick.Ring?, through: number?): { number }
 	local summed: { Tick.Stage } = {}
 	local newest: number = 0
 	local floor: number = math.huge -- The oldest tick any of their rings holds
@@ -1170,6 +1399,10 @@ function Run.tickTotals(stages: { Tick.Stage }, count: number): { number }
 		error(`Run.tickTotals sums the stages {table.concat(TICK_STAGES, SUM)}, and the tick has {#summed} of them`, 2)
 	end
 
+	if through then
+		newest = math.min(newest, through)
+	end
+
 	local oldest: number = math.max(newest - math.min(count, length) + 1, floor)
 	local totals: { number } = table.create(math.max(newest - oldest + 1, 0), 0)
 
@@ -1184,19 +1417,118 @@ function Run.tickTotals(stages: { Tick.Stage }, count: number): { number }
 			)
 		end
 
-		-- Newest first, each time onto the total of the tick it ran on, until the ring passes the window's oldest
-		for back: number = 1, stage.held do
-			local index: number = (stage.head - back) % size + 1
-			local tick: number = stage.ticks[index]
-			if tick < oldest then
-				break
-			end
+		addTimes(totals, stage, oldest, newest)
+	end
 
-			totals[tick - oldest + 1] += stage.times[index]
-		end
+	-- A finish is kept once a tick a time, so its ring, as long as the stages', always reaches the window's oldest
+	if finishes then
+		addTimes(totals, finishes, oldest, newest)
 	end
 
 	return totals
+end
+
+-- The finishes' times, in seconds, of the held ticks after one tick and up to another, newest first
+function Run.finishTimes(finishes: Tick.Ring, after: number, through: number): { number }
+	local size: number = #finishes.times
+	local times: { number } = {}
+
+	for back: number = 1, finishes.held do
+		local index: number = (finishes.head - back) % size + 1
+		local tick: number = finishes.ticks[index]
+		if tick <= after then
+			break
+		elseif tick <= through then
+			table.insert(times, finishes.times[index])
+		end
+	end
+
+	return times
+end
+
+--[[
+    Takes each Heartbeat the tick loop's ring holds since the readout's
+    newest into it, oldest first, with the time the bots' stage took in it
+    from that stage's ring by the Heartbeat each run came in, and counts as
+    lost any the ring no longer holds
+--]]
+
+function Run.takeBeats(readout: Readout, beats: Tick.Heartbeats, bots: Tick.Stage?)
+	local newest: number = beats.count
+	local fresh: number = newest - readout.through
+	local taken: number = math.min(fresh, beats.held)
+	readout.lost += fresh - taken
+
+	local inBeat: { [number]: number } = {}
+	if bots then
+		local size: number = #bots.times
+		for back: number = 1, bots.held do
+			local index: number = (bots.head - back) % size + 1
+			local beat: number = bots.beats[index]
+			if beat <= readout.through then
+				break
+			end
+
+			inBeat[beat] = (inBeat[beat] or 0) + bots.times[index]
+		end
+	end
+
+	local size: number = #beats.times
+	for beat: number = newest - taken + 1, newest do
+		local index: number = (beats.head - (newest - beat) - 1) % size + 1
+		table.insert(readout.times, beats.times[index])
+		table.insert(readout.flags, beats.flags[index])
+		table.insert(readout.bots, inBeat[beat] or 0)
+	end
+
+	readout.through = newest
+end
+
+--[[
+    Each Heartbeat's place in its tick, oldest first: 1 for one a tick began
+    in, 2 for the next, 3 for the one after, the last place for any later,
+    and 0 for one before the first a tick began in
+--]]
+
+function Run.places(flags: { number }): { number }
+	local places: { number } = table.create(#flags, 0)
+	local place: number = 0
+
+	for index: number, flag: number in flags do
+		if bit32.btest(flag, Tick.TICKED) then
+			place = 1
+		elseif place > 0 then
+			place = math.min(place + 1, #PLACES)
+		end
+
+		places[index] = place
+	end
+
+	return places
+end
+
+--[[
+    The relay's rounds over a window's Heartbeats, one for each Heartbeat a
+    tick began in and was held as it ended: how many the next Heartbeat's
+    poll released, and how many it didn't. The newest, with no Heartbeat
+    after it, counts as neither
+--]]
+
+function Run.rounds(flags: { number }): (number, number)
+	local dispatched: number = bit32.bor(Tick.TICKED, Tick.HELD)
+	local inTime: number, late: number = 0, 0
+
+	for index: number = 1, #flags - 1 do
+		if bit32.band(flags[index], dispatched) == dispatched then
+			if bit32.btest(flags[index + 1], Tick.RELEASED) then
+				inTime += 1
+			else
+				late += 1
+			end
+		end
+	end
+
+	return inTime, late
 end
 
 --[[

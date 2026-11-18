@@ -8,7 +8,7 @@
 local Environment = require("../tests/Environment")
 
 local SLOTS_PATH: string = "src/Server/Slots.luau"
-local RELAY_PATH: string = "src/Server/Relay.luau"
+local RELAY_PATH: string = "src/Server/Relay/init.luau"
 local FIELDS_PATH: string = "src/Codec/Fields.luau"
 local STATE_PATH: string = "src/Step/State.luau"
 local EXAMPLE_PATH: string = "tests/Fixtures/Config/Example.luau"

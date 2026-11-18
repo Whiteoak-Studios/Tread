@@ -200,7 +200,7 @@ local function readBlock(data: buffer, bound: number): Decoded
 	local hides: { Decoded } = {}
 	for index: number = 1, block.hideCount do
 		local hide: Block.Hide = block.hides[index]
-		hides[index] = { slot = hide.slot, generation = hide.generation }
+		hides[index] = { slot = hide.slot, generation = hide.generation, culled = hide.culled }
 	end
 
 	local looks: { Decoded } = {}

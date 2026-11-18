@@ -82,14 +82,38 @@ local function spread(values: { number }, format: string): string
 	return table.concat(figures, "/")
 end
 
--- The times a stage's ring holds, in milliseconds, in no particular order
-local function snapshot(stage: Tick.Stage): { number }
+--[[
+    The relay's runs its ring holds, in milliseconds in no particular order,
+    each with the finish of its tick when the finishes hold one, where its
+    taps' frames are made while the workers are on. The tick held, whose
+    finish is still to come, is left out
+--]]
+
+function Spectators.relayTimes(relay: Tick.Stage, finishes: Tick.Ring, held: number?): { number }
+	local finished: { [number]: number } = {}
+	for index: number = 1, finishes.held do
+		finished[finishes.ticks[index]] = finishes.times[index]
+	end
+
 	local times: { number } = {}
-	for index: number = 1, stage.held do
-		table.insert(times, stage.times[index] * MILLISECONDS)
+	for index: number = 1, relay.held do
+		local tick: number = relay.ticks[index]
+		if tick ~= held then
+			table.insert(times, (relay.times[index] + (finished[tick] or 0)) * MILLISECONDS)
+		end
 	end
 
 	return times
+end
+
+-- The relay's runs with their finishes as they stand
+local function snapshot(relay: Tick.Stage): { number }
+	local held: number? = nil
+	if Tick.holding() then
+		held = Tick.counts()
+	end
+
+	return Spectators.relayTimes(relay, Tick.finishes(), held)
 end
 
 --[[
@@ -300,7 +324,7 @@ function Spectators.probe(timing: Config.Timing): Probe
 			-- A ring time is one relay run, and a catch-up Heartbeat's ticks run the relay once
 			local off: string = `taps off {spread(tapsOff, FIGURE)} over {#tapsOff} runs`
 			local on: string = `taps on {spread(tapsOn, FIGURE)} over {#tapsOn} runs`
-			table.insert(parts, `relay ms a tick p50/p95/p99 {off}, {on}`)
+			table.insert(parts, `relay ms a tick with any finish p50/p95/p99 {off}, {on}`)
 		else
 			table.insert(problems, "the window ended before the taps connected")
 		end

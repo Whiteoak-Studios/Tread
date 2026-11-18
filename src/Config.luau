@@ -179,7 +179,7 @@ local SERVER: Specs = {
 		["outOfView?"] = { rate = "positive", cone = "cone", radius = "nonNegative" },
 	},
 
-	["relay?"] = { ["changes?"] = "boolean" },
+	["relay?"] = { ["changes?"] = "boolean", ["workers?"] = "whole", ["timeout?"] = "positive" },
 	weights = { near = "positive", far = "positive", shooter = "positive", cone = "positive" },
 	shotNear = { rate = "positive", seconds = "positive" },
 	budget = { soft = "positive", hard = "positive" },
@@ -428,9 +428,10 @@ export type ServerSettings = {
 		read outOfView: { rate: number, cone: number, radius: number }?,
 	},
 
-	-- Whether each record goes as its change since what the viewer last acknowledged; left out or false, whole. Read
-	-- only, as tiers.outOfView is, so a game's own relay table fits
-	read relay: { read changes: boolean? }?,
+	-- Whether each record goes as its change since what the viewer last acknowledged, left out or false whole, how
+	-- many Actor workers take the viewers' turns, left out or 0 none, and the seconds a round out on them may take
+	-- before it is given up, which workers need. Read only, as tiers.outOfView is, so a game's own relay table fits
+	read relay: { read changes: boolean?, read workers: number?, read timeout: number? }?,
 
 	weights: { near: number, far: number, shooter: number, cone: number }, -- The allocator's priorities
 	shotNear: { rate: number, seconds: number },
@@ -851,6 +852,17 @@ local function checkAim(server: any)
 	end
 end
 
+-- Refuses relay workers with no timeout for the rounds they take, since every round out waits on it
+local function checkRelay(server: any)
+	local relay: any = server.relay
+	if relay == nil or relay.workers == nil or relay.workers == 0 or relay.timeout ~= nil then
+		return
+	end
+
+	local path: string = `{SERVER_PATH}.relay`
+	refuse(`{path}.timeout`, `{EXPECTED.positive}, since {path}.workers is {relay.workers}`, nil)
+end
+
 -- Refuses a share of anti-ESP's slice kept for sleepers and bodies that is more than the slice
 local function checkShare(server: any)
 	local path: string = `{SERVER_PATH}.antiEsp`
@@ -874,6 +886,7 @@ function Config.server(shared: Shared, server: ServerSettings)
 	checkPairs(SERVER_PAIRS, server, SERVER_PATH)
 	checkAim(server)
 	checkShare(server)
+	checkRelay(server)
 end
 
 --[[

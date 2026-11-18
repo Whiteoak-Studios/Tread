@@ -31,6 +31,10 @@ local STEPS: number = 3 -- Mock steps that carry a flush across, as manualFlush.
 local RECORD_BYTES: number = Constants.RECORD_BYTES
 local SLOTS: number = Constants.SLOTS
 local BASE_AT: number = 2 -- A change record's base, after its slot and generation
+local BITS: number = 8 -- A byte's, each one slot's answer in a viewer's row of anti-ESP's answers
+local ROW_BYTES: number = SLOTS // BITS
+local LYING: number = 2 -- Anti-ESP's kind for a sleeper or body, whose answer a worker reads from its bit alone
+local ALL_SHOWN: number = 255 -- A row's byte with every slot's bit set
 
 type Kind = Slots.Kind
 type State = State.State
@@ -112,6 +116,9 @@ type Fields = {
 	sends: { { any } }, -- The keys each block went to this run, one list a send
 	withheldSends: { { any } }, -- And each withheld block
 	network: Network?,
+	pool: any, -- The stand-in pool the relay's workers run in, nil without workers
+	kinds: buffer, -- Anti-ESP's answers' kinds and teams, the same every run
+	teams: buffer,
 }
 
 local function seen(): Seen
@@ -136,14 +143,28 @@ end
     and server tables, which tweak may change first, every viewer's traffic
     at the harness's own count and anti-ESP hiding whatever hide asks and
     giving whatever reason sets. With network, the first viewer is the
-    mock's player and its blocks cross Volt.mock
+    mock's player and its blocks cross Volt.mock. With workers, the relay
+    makes that many in the stand-in pool an override of RelayWorkers.Pool
+    gives, which keeps the pool it made as made, and each run brings them in
 --]]
 
-function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ())?): Self
+function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ())?, workers: number?): Self
 	local shared = Example.shared()
 	local server = Example.server()
 	if tweak then
 		tweak(shared, server)
+	end
+
+	if workers then
+		server.relay = table.clone(server.relay or {})
+		server.relay.workers = workers
+	end
+
+	local kinds: buffer = buffer.create(SLOTS)
+	local teams: buffer = buffer.create(SLOTS * 8)
+	buffer.fill(kinds, 0, LYING)
+	for slot: number = 0, SLOTS - 1 do
+		buffer.writef64(teams, slot * 8, 0 / 0)
 	end
 
 	local layout: Fields.Layout = Fields.compile(shared.fields)
@@ -165,6 +186,9 @@ function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ()
 		sends = {} :: { { any } },
 		withheldSends = {} :: { { any } },
 		network = nil :: Network?,
+		pool = nil :: any,
+		kinds = kinds,
+		teams = teams,
 	}, Harness)
 
 	Relay.start({ shared = shared, server = server, layout = layout }, function (keys: { any }, data: buffer)
@@ -177,7 +201,17 @@ function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ()
 		local hidden: { [number]: boolean }? = self.hidden[viewer.key]
 
 		return hidden ~= nil and hidden[slot] == true
+	end, function (viewers: { Viewer }): any
+		return self:_answers(viewers)
 	end)
+
+	if workers then
+		local Pool: any = require(Tread.Server.RelayWorkers.Pool)
+		self.pool = Pool.made
+		if self.pool == nil then
+			error("The relay made no workers, or the pool's override kept none as made")
+		end
+	end
 
 	Taps.start({
 		layout = layout,
@@ -298,6 +332,33 @@ function Harness.hide(self: Self, client: Client, slot: number, hidden: boolean)
 	self.hidden[client.viewer.key][slot] = hidden
 end
 
+--[[
+    Anti-ESP's answers as the harness's isHidden gives them: every slot a
+    sleeper's or body's kind with no team, so a worker's stand-in reads
+    each pair from its bit, set unless hide hides the slot from the viewer
+--]]
+
+function Harness._answers(self: Self, viewers: { Viewer }): { kinds: buffer, teams: buffer, visible: buffer }
+	local visible: buffer = buffer.create(#viewers * ROW_BYTES)
+	buffer.fill(visible, 0, ALL_SHOWN)
+
+	for index: number, viewer: Viewer in viewers do
+		local row: number = (index - 1) * ROW_BYTES
+		for slot: number, hidden: boolean in self.hidden[viewer.key] or {} do
+			if hidden then
+				local at: number = row + slot // BITS
+				buffer.writeu8(
+					visible,
+					at,
+					bit32.band(buffer.readu8(visible, at), bit32.bnot(bit32.lshift(1, slot % BITS)))
+				)
+			end
+		end
+	end
+
+	return { kinds = self.kinds, teams = self.teams, visible = visible }
+end
+
 -- Sets the send reason anti-ESP gives the taps for a slot a viewer is sent or has withheld
 function Harness.reason(self: Self, client: Client, slot: number, reason: string)
 	self.reasons[client.viewer.key][slot] = reason
@@ -305,9 +366,10 @@ end
 
 --[[
     One relay tick: every client's view of the run starts empty, the relay
-    runs, a network harness flushes and steps the mock, the taps hand their
-    frames to their sinks as the relay stage does, and each viewer's
-    acknowledgment is what its client had read lag runs before
+    runs, its workers' round is delivered and brought in, a network harness
+    flushes and steps the mock, the taps hand their frames to their sinks as
+    the relay stage does, and each viewer's acknowledgment is what its
+    client had read lag runs before
 --]]
 
 function Harness.run(self: Self)
@@ -320,6 +382,14 @@ function Harness.run(self: Self)
 	end
 
 	Relay.run(self.tick, self.viewers, self.states, self.commands, self.platforms)
+
+	local pool: any = self.pool
+	if pool then
+		pool:deliver()
+		if not Relay.finish() then
+			error("The relay's round was still out after its pool delivered every round sent")
+		end
+	end
 
 	local network: Network? = self.network
 	if network then

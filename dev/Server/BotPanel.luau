@@ -53,9 +53,10 @@ local RATE: string = "%.1f" -- The Heartbeats a second
 local SEPARATOR: string = ", " -- Between the stages of one line
 local PARTS: string = "; " -- Between the parts of a refusal
 local NEWLINE: string = "\n"
+local FINISH: string = "finish" -- What the panel calls the relay's finish, which a held tick's total takes
 
--- The stages shown beside the tick stages, whose times never join their total
-local SHOWN_BESIDE: { string } = { BESIDE, BOTS_STAGE }
+-- What the panel shows beside the tick stages, the stages whose times never join their total and the finish
+local SHOWN_BESIDE: { string } = { BESIDE, BOTS_STAGE, FINISH }
 
 type Area = Config.Area
 type Key = Player | Volt.Bot
@@ -83,6 +84,14 @@ export type Read = {
 	stages: { [string]: number }, -- Each shown stage's high end over its own runs, for the stages the tick has
 }
 
+-- The relay's finishes over one window, on a server started with workers: their ring, its head as the window opened,
+-- and the newest tick whose work is all done
+export type Finished = {
+	ring: Tick.Ring,
+	head: number,
+	through: number,
+}
+
 local Made: number = 0 -- The panel's bots on the server, which the fleet holds alone while there are any
 local Building: boolean = false -- Whether a spawn is building, beside which nothing else spawns or clears
 local Spawned: number = 0 -- Bots the panel ever built, each bot's own number and seed
@@ -93,8 +102,9 @@ local Watchers: { [Player]: boolean } = {} -- The players whose panel shows
 local Beats: RBXScriptConnection? = nil -- The window's Heartbeat listener, connected while anyone watches
 local Frames: { number } = {} -- The window's Heartbeat intervals, milliseconds
 local Elapsed: number = 0 -- The window's seconds
-local Ticks: number = 0 -- The ticks run when the window opened
+local Ticks: number = 0 -- The newest tick whose work was all done when the window opened
 local Heads: { [string]: number } = {} -- Each stage's ring head when the window opened
+local FinishHead: number = 0 -- And the finishes' ring head
 
 local BotPanel = {}
 
@@ -110,13 +120,13 @@ local function percentile(samples: { number }, share: number): number
 end
 
 -- A ring's times since its head stood at head, in seconds, no more than the ring holds
-local function since(stage: Tick.Stage, head: number): { number }
-	local capacity: number = #stage.times
-	local runs: number = math.min((stage.head - head) % capacity, stage.held)
+local function since(ring: { times: { number }, held: number, head: number }, head: number): { number }
+	local capacity: number = #ring.times
+	local runs: number = math.min((ring.head - head) % capacity, ring.held)
 	local times: { number } = {}
 
 	for back: number = runs, 1, -1 do
-		table.insert(times, stage.times[(stage.head - back) % capacity + 1])
+		table.insert(times, ring.times[(ring.head - back) % capacity + 1])
 	end
 
 	return times
@@ -155,9 +165,10 @@ end
 --[[
     The server's numbers over one window: its Heartbeats a second and its
     frame times' middle and high end, the tick stages' sums over the ticks
-    it ran, and each shown stage's high end over its own runs since its
-    ring's head stood where heads has it, 0 for a stage added since. It
-    sorts frames in place
+    it ran, each held one's finish among them given finished, and each
+    shown stage's high end over its own runs since its ring's head stood
+    where heads has it, 0 for a stage added since, and the finish's beside
+    them given finished. It sorts frames in place
 --]]
 
 function BotPanel.read(
@@ -165,10 +176,18 @@ function BotPanel.read(
 	elapsed: number,
 	stages: { Tick.Stage },
 	heads: { [string]: number },
-	ticks: number
+	ticks: number,
+	finished: Finished?
 ): Read
+	local ring: Tick.Ring? = nil
+	local through: number? = nil
+	if finished then
+		ring = finished.ring
+		through = finished.through
+	end
+
 	local totals: { number } = {}
-	for _, total: number in Run.tickTotals(stages, ticks) do
+	for _, total: number in Run.tickTotals(stages, ticks, ring, through) do
 		table.insert(totals, total * MILLISECONDS)
 	end
 
@@ -177,6 +196,10 @@ function BotPanel.read(
 		if table.find(TICK_STAGES, stage.name) or table.find(SHOWN_BESIDE, stage.name) then
 			highs[stage.name] = percentile(since(stage, heads[stage.name] or 0), HIGH) * MILLISECONDS
 		end
+	end
+
+	if finished then
+		highs[FINISH] = percentile(since(finished.ring, finished.head), HIGH) * MILLISECONDS
 	end
 
 	return {
@@ -233,13 +256,20 @@ function BotPanel.describe(read: Read, heartbeatTime: number, real: number, bots
 	return table.concat(lines, NEWLINE)
 end
 
--- A new window from now: no frames yet, and the ticks run and each stage's ring head as they stand
+-- A new window from now: no frames yet, and the ticks done and each ring's head, any finishes' too, as they stand
 local function open()
-	local ran: number = Tick.counts()
 	Frames = {}
 	Elapsed = 0
-	Ticks = ran
 	Heads = {}
+
+	-- With workers a held tick's finish is still to come, so the window that ends after it takes the tick
+	if Run.workers() > 0 then
+		Ticks = Run.settled()
+		FinishHead = Tick.finishes().head
+	else
+		local ran: number = Tick.counts()
+		Ticks = ran
+	end
 
 	for _, stage: Tick.Stage in Tick.stages() do
 		Heads[stage.name] = stage.head
@@ -265,11 +295,18 @@ local function beat(delta: number)
 	local elapsed: number = Elapsed
 	local heads: { [string]: number } = Heads
 	local opened: number = Ticks
+	local finishHead: number = FinishHead
 	open()
+
+	-- With workers, each held tick's finish joins its total, up to the newest tick whose work is all done
+	local finished: Finished? = nil
+	if Run.workers() > 0 then
+		finished = { ring = Tick.finishes(), head = finishHead, through = Ticks }
+	end
 
 	-- Stats.HeartbeatTime is in seconds, and the panel shows milliseconds
 	local heartbeatTime: number = Stats.HeartbeatTime * MILLISECONDS
-	local read: Read = BotPanel.read(frames, elapsed, Tick.stages(), heads, Ticks - opened)
+	local read: Read = BotPanel.read(frames, elapsed, Tick.stages(), heads, Ticks - opened, finished)
 	local text: string = BotPanel.describe(read, heartbeatTime, #Players:GetPlayers(), #Fleet.entries())
 
 	for player: Player in Watchers do

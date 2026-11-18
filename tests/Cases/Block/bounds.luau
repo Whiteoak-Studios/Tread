@@ -102,8 +102,8 @@ return function (): (boolean, string | nil)
 	end
 
 	hides.hideCount = 255
-	if Block.write(hides, data) ~= 9 + 255 * 2 then
-		return false, "255 hides didn't fill 9 + 510 B"
+	if Block.write(hides, data) ~= 9 + 255 * 3 then
+		return false, "255 hides didn't fill 9 + 765 B"
 	end
 
 	hides.hideCount = 256

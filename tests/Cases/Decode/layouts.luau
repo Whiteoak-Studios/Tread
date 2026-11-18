@@ -129,7 +129,7 @@ return function (): (boolean, string | nil)
 	local block: any = Block.new()
 	block.sequence, block.tick = 2, 3
 	block.reveals[1] = { slot = 1, generation = 2, kind = "Sleeper" }
-	block.hides[1] = { slot = 4, generation = 5 }
+	block.hides[1] = { slot = 4, generation = 5, culled = true }
 	block.revealCount, block.hideCount = 1, 1
 	block.looks[1] = {
 		slot = 1,
@@ -163,6 +163,7 @@ return function (): (boolean, string | nil)
 		or decoded.tick ~= 3
 		or decoded.reveals[1].kind ~= "Sleeper"
 		or decoded.hides[1].slot ~= 4
+		or decoded.hides[1].culled ~= true
 	then
 		return false, "The relay block decoded with another header, reveal or hide"
 	elseif Same(server, decoded.looks[1].look, "look") or buffer.len(decoded.looks[1].held) ~= 0 then

@@ -38,7 +38,7 @@ local FAR_SPREAD: number = 200
 
 -- The digest the layout gives, which changes only with what a viewer is sent. It rests on the order Luau walks the
 -- states table in, which the relay's own order follows
-local EXPECTED: string = "6dbd5fc995cf5087548a8a932d090ef694f511949b947add530eb6aef00f5b75"
+local EXPECTED: string = "c715eb39bdd60deb279e5ecfec7c900b77d234fcf790cf35a1b8c0fb73374966"
 
 type Generator = () -> number
 

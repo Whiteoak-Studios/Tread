@@ -17,7 +17,8 @@ local Pool = {}
 --[[
     A fresh pool. Its module answers the handle's require of Rigs, and new
     hands back the pool's rigs, refusing what the real pool refuses: a
-    second checkout for a slot, and any other call for a slot with no rig
+    second checkout for a slot, any other call for a slot with no rig, and
+    the freeze of a ragdoll or of a rig its last pose left out of Workspace
 --]]
 
 function Pool.new(): Pool
@@ -27,6 +28,9 @@ function Pool.new(): Pool
 	}
 
 	local slots: { [number]: any } = {}
+	local freezable: { [any]: boolean } = {} -- Whether each rig out stands in Workspace by its last pose, no ragdoll
+	local frozen: { [any]: boolean } = {} -- Whether each stands frozen, from its freeze to its next pose
+	local placed: { [any]: vector } = {} -- Where each rig's last pose inside the draw distance put its feet
 	local listeners: { [{ nil }]: (slot: number, marker: string, value: string) -> () } = {}
 
 	local function record(call: Call)
@@ -60,11 +64,22 @@ function Pool.new(): Pool
 	function rigs.release(_: any, slot: number)
 		local rig: any = entry(slot, "release")
 		slots[slot] = nil
+		freezable[rig] = nil
+		frozen[rig] = nil
+		placed[rig] = nil
 		record({ member = "release", slot = slot, rig = rig })
 	end
 
+	-- A pose draws a rig inside the draw distance and takes it out past it, and thaws a frozen one, as the real pool's
 	function rigs.pose(_: any, slot: number, state: any, distance: number, pitch: number)
 		local rig: any = entry(slot, "pose")
+		freezable[rig] = distance <= pool.drawDistance
+		frozen[rig] = nil
+
+		if freezable[rig] then
+			placed[rig] = state.position
+		end
+
 		record({
 			member = "pose",
 			slot = slot,
@@ -73,6 +88,24 @@ function Pool.new(): Pool
 			distance = distance,
 			pitch = pitch,
 		})
+	end
+
+	-- Freezes a rig that stands in Workspace and answers whether it is frozen, true again for one already frozen
+	function rigs.freeze(_: any, slot: number): boolean
+		local rig: any = entry(slot, "freeze")
+		local answer: boolean = frozen[rig] == true or freezable[rig] == true
+		frozen[rig] = answer or nil
+		record({ member = "freeze", slot = slot, rig = rig, frozen = answer })
+
+		return answer
+	end
+
+	-- Where a slot's rig stands in the world, as its last pose inside the draw distance placed it, nil before any
+	function rigs.placeOf(_: any, slot: number): vector?
+		local rig: any = entry(slot, "placeOf")
+		record({ member = "placeOf", slot = slot, rig = rig })
+
+		return placed[rig]
 	end
 
 	function rigs.turn(_: any, slot: number, headYaw: number, headPitch: number)
@@ -87,6 +120,8 @@ function Pool.new(): Pool
 
 		slots[slot] = nil
 		slots[body] = rig
+		freezable[rig] = false
+		frozen[rig] = nil
 		record({ member = "ragdoll", slot = slot, body = body, push = push, rig = rig })
 	end
 
