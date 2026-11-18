@@ -70,6 +70,7 @@ export type Answers = {
 	kinds: buffer, -- u8 by slot: 0 free, 1 player, 2 sleeper or body, 3 NPC
 	teams: buffer, -- f64 by slot: the team its current life carries, NaN for none
 	visible: buffer, -- A row of ROW_BYTES by each viewer's place in the list from 0: bit slot % 8 of byte slot // 8
+	quiet: buffer, -- Laid out as visible: set where an ask would only stamp its pair asked, read as if no team matched
 }
 
 -- What anti-ESP keeps for one viewer, made at its first pair and reused for another once it leaves
@@ -190,8 +191,14 @@ local Holding: boolean = false
 local Held: { () -> () } = {}
 
 -- What AntiEsp.answers hands out, and each asked viewer's row's first byte by its place in Sights while it runs
-local Answered: Answers = { kinds = buffer.create(SLOTS), teams = buffer.create(SLOTS * 8), visible = buffer.create(0) }
+local Answered: Answers = {
+	kinds = buffer.create(SLOTS),
+	teams = buffer.create(SLOTS * 8),
+	visible = buffer.create(0),
+	quiet = buffer.create(0),
+}
 local RowOf: { [number]: number } = {}
+local AnsweredAt: number = -1 -- The slice count the last answers were made at, -1 before any, as a slice can move a bit
 
 -- Every pair by its index, each field an array, and the indexes a dropped pair left free
 local PairSights: { number } = {} -- Its viewer's place in Sights, NONE while free
@@ -935,11 +942,13 @@ end
 
 --[[
     What isHidden would answer if asked now, for a relay worker's stand-in,
-    changing nothing: each slot's kind and its life's team, and a row for
-    each viewer in the list, by its place there, with a slot's bit set when
-    the viewer's pair with it would answer visible on its own verdict. The
+    changing no pair: each slot's kind and its life's team, and two rows for
+    each viewer in the list, by its place there. A slot's visible bit is set
+    when the viewer's pair with it would answer visible on its own verdict,
+    and its quiet bit when an ask would only stamp that pair asked, which
+    AntiEsp.asked may then do in its place until the next slice. The
     stand-in shows a free slot, an NPC, a player carrying the team of the
-    viewer's own slot, and a set bit, in that order, and hides the rest
+    viewer's own slot, and a set visible bit, in that order
 --]]
 
 function AntiEsp.answers(viewers: { Viewer }): Answers
@@ -957,14 +966,18 @@ function AntiEsp.answers(viewers: { Viewer }): Answers
 		buffer.writef64(teams, slot * 8, teamOf(slot, LifeOf[slot + 1]) or NO_TEAM)
 	end
 
-	-- A row a viewer, made again only when their count changes
+	-- Rows a viewer, made again only when their count changes
 	local size: number = #viewers * ROW_BYTES
 	local visible: buffer = Answered.visible
+	local quiet: buffer = Answered.quiet
 	if buffer.len(visible) ~= size then
 		visible = buffer.create(size)
+		quiet = buffer.create(size)
 		Answered.visible = visible
+		Answered.quiet = quiet
 	else
 		buffer.fill(visible, 0, 0)
+		buffer.fill(quiet, 0, 0)
 	end
 
 	for index: number, viewer: Viewer in viewers do
@@ -979,6 +992,8 @@ function AntiEsp.answers(viewers: { Viewer }): Answers
 	if Ran then
 		round += 1
 	end
+
+	AnsweredAt = Slice
 
 	-- A viewer with no pair for a slot yet would make it hidden, so only made pairs can set a bit
 	for pair: number = 1, PairTop do
@@ -996,19 +1011,30 @@ function AntiEsp.answers(viewers: { Viewer }): Answers
 		local lying: boolean = kind == LYING
 		local verdict: number = PairVerdicts[pair]
 		local checked: number = PairChecked[pair]
+		local kept: boolean = true
 
 		-- As the ask would leave it: afresh for a new life or a pair the relay left out of its last run, and for a
 		-- sleep or a wake its verdict kept with its fail-open counted from now
 		if PairLives[pair] ~= LifeOf[slot + 1] or PairAsked[pair] < round - 1 then
 			verdict = UNTESTED
 			checked = Now
+			kept = false
 		elseif PairLying[pair] ~= lying then
 			checked = Now
+			kept = false
 		end
 
-		if verdict < HIDDEN or (not lying and Now - checked > FailOpen) then
-			local byte: number = row + slot // BITS
-			buffer.writeu8(visible, byte, bit32.bor(buffer.readu8(visible, byte), bit32.lshift(1, slot % BITS)))
+		local byte: number = row + slot // BITS
+		local bit: number = bit32.lshift(1, slot % BITS)
+		local failing: boolean = not lying and Now - checked > FailOpen
+
+		if verdict < HIDDEN or failing then
+			buffer.writeu8(visible, byte, bit32.bor(buffer.readu8(visible, byte), bit))
+		end
+
+		-- Kept as it is and not failing open while hidden, the ask would change nothing but its stamp
+		if kept and (verdict < HIDDEN or not failing) then
+			buffer.writeu8(quiet, byte, bit32.bor(buffer.readu8(quiet, byte), bit))
 		end
 	end
 
@@ -1020,6 +1046,53 @@ function AntiEsp.answers(viewers: { Viewer }): Answers
 	end
 
 	return Answered
+end
+
+--[[
+    Takes a viewer's asks about the first count of slots in isHidden's
+    place, each one whose quiet bit the last AntiEsp.answers set: the viewer
+    is found and the round opened as an ask does, and each pair is stamped
+    asked, which is all those asks would change. A count of 0 changes
+    nothing. It refuses a call after a slice since those answers, and a slot
+    with no pair an ask would stamp, after stamping the slots before it
+--]]
+
+function AntiEsp.asked(viewer: Viewer, slots: { number }, count: number)
+	if not Started then
+		error("AntiEsp.asked ran before AntiEsp.start", 2)
+	elseif AnsweredAt ~= Slice then
+		error("AntiEsp.asked ran with no AntiEsp.answers since the last slice, and quiet bits hold only until one", 2)
+	elseif count == 0 then
+		return
+	end
+
+	if Ran or viewer ~= Asker then
+		attend(viewer)
+	end
+
+	-- The first ask since a slice ran is the relay's next run
+	if Ran then
+		Round += 1
+		Ran = false
+	end
+
+	local targets: buffer = AskerTargets
+	local round: number = Round
+
+	for index: number = 1, count do
+		local slot: number = slots[index]
+		local kind: number? = KindOf[slot + 1]
+		local pair: number = NONE
+		if kind == PLAYER or kind == LYING then
+			pair = buffer.readu32(targets, slot * 4)
+		end
+
+		if pair == NONE then
+			error(`AntiEsp.asked found no pair of the viewer's with slot {slot} that an ask would stamp`, 2)
+		end
+
+		PairAsked[pair] = round
+	end
 end
 
 --[[

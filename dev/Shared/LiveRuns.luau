@@ -76,6 +76,7 @@ local LiveRuns = {
 		{ name = "GoA0", minutes = 0.5 }, -- Every real player sent to a fresh A0 server, whose quick program then runs there
 		{ name = "RelayWorkers", minutes = 1.5 }, -- Two relay copies matched, the pool, S4 and S3 on it, 10 s and 20 s each
 		{ name = "BenchWorkers", minutes = 11 }, -- S3 and S4 serial then on the workers, a 30 s warm-up and 120 s each
+		{ name = "BenchSpread", minutes = 12 }, -- 149 and 299 bots a cell each, serial then on the workers, 30 s and 120 s
 	} :: { Run },
 
 	-- What Run all runs one after another on one server, each a listed run needing neither a player's hands nor a server

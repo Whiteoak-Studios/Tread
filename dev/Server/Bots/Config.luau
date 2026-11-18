@@ -1,6 +1,6 @@
 --[[
-    The bot harness's numbers: scenarios S0 to S7 and the gates' loads, the
-    seeded runs' timings, the calibration, the relevancy, versus and relay
+    The bot harness's numbers: scenarios S0 to S7, the gates' and spread loads,
+    the seeded runs' timings, the calibration, the relevancy, versus and relay
     workers runs, how a bot roams, what each cheat sends, its floors and spawns
 --]]
 
@@ -32,6 +32,7 @@ export type Group = {
 	lag: { number }?, -- Seconds each bot holds its Moves back, drawn per bot from the first to the second
 	loss: { number }?, -- The share of Moves each bot loses, drawn per bot the same way
 	cheat: Cheat?,
+	cells: boolean?, -- true spawns and roams each body only in its own cell of an even grid over the spawn area
 }
 
 export type Scenario = {
@@ -71,6 +72,10 @@ local FIGHT: Area = { center = Vector3.new(0, 0, 0), size = Vector2.new(100, 100
 
 -- S9's spread sleepers' square, about 50.5 of them within the 500-stud reveal radius of any map viewer, on the island
 local SPREAD: Area = { center = Vector3.new(0, 0, 0), size = Vector2.new(5400, 5400) }
+
+-- The spread loads' square, its bots one to a cell over it, so players stand spread out rather than bunched
+local FIELD_SIDE: number = 4000 -- Studs along each of its sides
+local FIELD: Area = { center = Vector3.new(0, 0, 0), size = Vector2.new(FIELD_SIDE, FIELD_SIDE) }
 
 local BOTS: number = 149 -- A 150-slot server's players beside the one real client
 local IN_CITY: number = 60 -- S3's bots on the plaza, the rest spread over the map
@@ -255,6 +260,21 @@ local SCENARIOS: { [string]: Scenario } = {
 		follow = true,
 		storm = false,
 	},
+
+	-- The spread loads: 150 and 300 players evenly over the square around the real player, a cell each
+	Spread150 = {
+		groups = { { name = "spread", count = BOTS, spawn = FIELD, roam = FIELD, cells = true } },
+		viewer = FIELD.center,
+		follow = true,
+		storm = false,
+	},
+
+	Spread300 = {
+		groups = { { name = "spread", count = SCALE, spawn = FIELD, roam = FIELD, cells = true } },
+		viewer = FIELD.center,
+		follow = true,
+		storm = false,
+	},
 }
 
 return {
@@ -318,6 +338,12 @@ return {
 	-- The relay's two modes compared: the city mix and the fight, each with its workers off and then on, one seed each
 	workers = {
 		scenarios = { "S3", "S4" },
+		timing = { seeds = { 1 }, warmup = 30, window = 120, interval = 1 } :: Timing,
+	},
+
+	-- The relay's two modes over the spread loads, timed as workers' so the lines compare row by row
+	spread = {
+		scenarios = { "Spread150", "Spread300" },
 		timing = { seeds = { 1 }, warmup = 30, window = 120, interval = 1 } :: Timing,
 	},
 

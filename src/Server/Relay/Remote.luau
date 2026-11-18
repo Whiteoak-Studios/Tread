@@ -15,6 +15,7 @@ local Wire = require(script.Parent.Wire)
 local SLOTS: number = Constants.SLOTS
 local MAX_WATCHERS: number = Constants.MAX_WATCHERS
 local BITS: number = 8 -- A byte's, each one slot's answer in a viewer's row
+local ROW_BYTES: number = Wire.ROW_BYTES -- A viewer's visible row, its quiet row right behind it
 
 -- Anti-ESP's kinds as AntiEsp.answers gives them, which its stand-in reads
 local FREE: number = 0
@@ -78,8 +79,8 @@ local Writer: Wire.Writer = Wire.writer()
 local Own: buffer = buffer.create(0) -- This run's own hand-in, whose rows the stand-in for anti-ESP reads
 local Recipients: { number } = {} -- The ids of the turn's recipients
 
--- The turn being taken: its viewer's row of answers in Own, its own team, its traffic, and whether a sink observes
--- any of its recipients
+-- The turn being taken: its viewer's visible row in Own, its quiet row behind it, its own team, its traffic, and
+-- whether a sink observes any of its recipients
 local TurnRow: number = 0
 local TurnTeam: number = 0
 local TurnTraffic: number = 0
@@ -171,20 +172,30 @@ end
     Anti-ESP's stand-in, from the answers the front exported for this run:
     a free slot and an NPC visible, a player carrying the team of the
     viewer's own slot visible, a slot whose bit is set visible, and any
-    other hidden. Each ask is marked at its walk place for the front's replay
+    other hidden. Each ask is kept at its walk place for the front's replay,
+    as a mark where its quiet bit is set, the first three always as asks
 --]]
 
 local function isHidden(_: Viewer, slot: number): boolean
-	Wire.ask(Writer, buffer.readu16(Places, slot * 2))
-
+	local place: number = buffer.readu16(Places, slot * 2)
 	local kind: number = buffer.readu8(AntiKinds, slot)
-	if kind == FREE or kind == NPC then
-		return false
-	elseif kind == PLAYER and buffer.readf64(AntiTeams, slot * 8) == TurnTeam then
+
+	-- The quiet bit ignores teams, and a teammate's ask can make its viewer's record, so it goes as an ask
+	if kind == FREE or kind == NPC or (kind == PLAYER and buffer.readf64(AntiTeams, slot * 8) == TurnTeam) then
+		Wire.ask(Writer, place)
+
 		return false
 	end
 
-	return not bit32.btest(buffer.readu8(Own, TurnRow + slot // BITS), bit32.lshift(1, slot % BITS))
+	local at: number = TurnRow + slot // BITS
+	local bit: number = bit32.lshift(1, slot % BITS)
+	if bit32.btest(buffer.readu8(Own, at + ROW_BYTES), bit) then
+		Wire.mark(Writer, place)
+	else
+		Wire.ask(Writer, place)
+	end
+
+	return not bit32.btest(buffer.readu8(Own, at), bit)
 end
 
 local function observing(): boolean

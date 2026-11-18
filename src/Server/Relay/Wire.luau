@@ -40,7 +40,7 @@ local STEP_BYTES: number = 15 + FOOTSTEP_BYTES -- slot u16, kind u8, place 3 f32
 local UNPARKED: number = 2 ^ 0 -- A body's flag: in the states and not Parked
 
 -- A worker's own hand-in: its calls in call order, then its viewers in the front's order, each with no target followed
--- by its row of anti-ESP's answers
+-- by its two rows of anti-ESP's answers, visible then quiet
 local OWN_BYTES: number = 7 -- calls u32, viewers u16, flags u8
 local RESEND: number = 2 ^ 0 -- Its flag: the worker drops its shadows first, so each view it runs goes whole
 local CALL_BYTES: number = 15 -- kind u8, id u32, slot u16, value f64
@@ -54,7 +54,8 @@ local BACK: number = 2 ^ 3
 -- A worker's result: its header, each turn's section, the changes to each view it ran, each watcher's answer and the
 -- text of a turn that threw
 local RESULT_BYTES: number = 36
-local SECTION_BYTES: number = 7 -- length u32, place u16, recipients u8, before the recipients' ids
+local SECTION_BYTES: number = 7 -- length u32, place u16, recipients u8, before the recipients' ids, its row of asks,
+-- its row of marks and its events
 local VIEW_BYTES: number = 9 -- id u32, own u16, withheld u8, facts u16, before the facts
 local FACT_BYTES: number = 6 -- slot u16, marks u8, life u8, kind u8, withheld life u8
 local CHANGE_BYTES: number = 4 -- tracked index u16, slot u16
@@ -123,8 +124,8 @@ export type Hand = {
 	back: boolean, -- Whether a viewer with no target is back from a spectate this run, its back in sequence
 	traffic: number, -- Volt's count read at dispatch, for a viewer with no target
 	team: number, -- Anti-ESP's team for its own slot, NaN for none
-	row: number, -- Its row of anti-ESP's answers' offset in the buffer holding it: the export's when written, the
-	-- hand-in's when read
+	row: number, -- Its visible row's offset in the buffer holding it: the export's when written, where its quiet row
+	-- has the same offset in the quiet buffer, and the hand-in's when read, its quiet row ROW_BYTES past it
 }
 
 -- A copy of a view's withheld set
@@ -147,11 +148,12 @@ export type Copy = {
 export type Writer = {
 	data: buffer,
 	at: number,
-	places: number, -- This run's walk places, which each turn's row of asks holds a bit for
+	places: number, -- This run's walk places, which each turn's rows of asks and marks hold a bit for
 	rowBytes: number,
 	turns: number,
 	section: number, -- Where the turn being written starts
 	asks: number, -- Where its row of asks starts
+	marks: number, -- And its row of marks, the asks the front hands anti-ESP as only stamping their pairs
 	events: number, -- Where its count of events is
 	views: number,
 	viewsStart: number, -- Where the first view's changes start
@@ -180,6 +182,7 @@ export type Reader = {
 	_at: number, -- Where the next turn starts
 	_turn: number, -- The turns read
 	_asks: number,
+	_marks: number,
 	_event: number,
 	_left: number, -- The events of the turn still to read
 	_view: number, -- The views read
@@ -527,18 +530,25 @@ end
 --[[
     A worker's own hand-in: the calls queued for its views, then its first
     count hands in the front's order, each with no target followed by its
-    row of anti-ESP's answers, copied from visible at the hand's row. With
-    resend, the worker sends every view it runs whole, as to an empty copy
+    rows of anti-ESP's answers, copied from visible and quiet at the hand's
+    row. With resend, the worker sends every view it runs whole
 --]]
 
-function Wire.writeOwn(calls: Calls, hands: { Hand }, count: number, visible: buffer, resend: boolean): buffer
+function Wire.writeOwn(
+	calls: Calls,
+	hands: { Hand },
+	count: number,
+	visible: buffer,
+	quiet: buffer,
+	resend: boolean
+): buffer
 	bounded(count, "viewers")
 
 	local callBytes: number = calls.count * CALL_BYTES
 	local size: number = OWN_BYTES + callBytes + count * HAND_BYTES
 	for index: number = 1, count do
 		if hands[index].target == nil then
-			size += ROW_BYTES
+			size += ROW_BYTES * 2
 		end
 	end
 
@@ -592,7 +602,8 @@ function Wire.writeOwn(calls: Calls, hands: { Hand }, count: number, visible: bu
 
 		if target == nil then
 			buffer.copy(data, at, visible, hand.row, ROW_BYTES)
-			at += ROW_BYTES
+			buffer.copy(data, at + ROW_BYTES, quiet, hand.row, ROW_BYTES)
+			at += ROW_BYTES * 2
 		end
 	end
 
@@ -647,8 +658,8 @@ end
 
 --[[
     Reads an own hand-in's viewers into hands, in order, each table made the
-    first time the list holds that many and reused after, each row given as
-    its offset in data, and gives how many
+    first time the list holds that many and reused after, each visible row
+    given as its offset in data, its quiet row behind it, and gives how many
 --]]
 
 function Wire.readOwn(data: buffer, hands: { Hand }): number
@@ -696,7 +707,7 @@ function Wire.readOwn(data: buffer, hands: { Hand }): number
 		hand.row = 0
 		if target == nil then
 			hand.row = at
-			at += ROW_BYTES
+			at += ROW_BYTES * 2
 		end
 	end
 
@@ -716,6 +727,7 @@ function Wire.writer(): Writer
 		turns = 0,
 		section = 0,
 		asks = 0,
+		marks = 0,
 		events = 0,
 		views = 0,
 		viewsStart = 0,
@@ -739,7 +751,7 @@ end
 
 --[[
     Starts a writer's result for a run of a number of walk places, which
-    each turn's row of asks holds a bit for
+    each turn's rows of asks and marks hold a bit for
 --]]
 
 function Wire.begin(writer: Writer, places: number)
@@ -781,12 +793,12 @@ end
 --[[
     Starts a turn's section: the viewer's place from 1 in the worker's list
     and the ids of its recipients, the viewer then each watcher by bit, with
-    an empty row of asks and no events yet
+    empty rows of asks and marks and no events yet
 --]]
 
 function Wire.turn(writer: Writer, place: number, ids: { number }, count: number)
 	local rowBytes: number = writer.rowBytes
-	room(writer, SECTION_BYTES + count * ID_BYTES + rowBytes + 2)
+	room(writer, SECTION_BYTES + count * ID_BYTES + rowBytes * 2 + 2)
 
 	local data: buffer = writer.data
 	local section: number = writer.at
@@ -800,8 +812,9 @@ function Wire.turn(writer: Writer, place: number, ids: { number }, count: number
 	end
 
 	writer.asks = at
-	buffer.fill(data, at, 0, rowBytes)
-	at += rowBytes
+	writer.marks = at + rowBytes
+	buffer.fill(data, at, 0, rowBytes * 2)
+	at += rowBytes * 2
 
 	writer.events = at
 	buffer.writeu16(data, at, 0)
@@ -813,21 +826,36 @@ function Wire.turn(writer: Writer, place: number, ids: { number }, count: number
 	writer.turns += 1
 end
 
---[[
-    Marks the turn's ask of anti-ESP about the slot at a walk place from 1,
-    which the front replays in viewer then walk order
---]]
-
-function Wire.ask(writer: Writer, place: number)
+-- Sets a walk place's bit from 1 in the row of the turn being written that starts at row
+local function setPlace(writer: Writer, row: number, place: number)
 	if not (place >= 1 and place <= writer.places) then
 		error(`A relay worker asked anti-ESP about walk place {place}, outside this run's 1 to {writer.places}`)
 	end
 
 	local index: number = place - 1
 	local data: buffer = writer.data
-	local at: number = writer.asks + index // BITS
+	local at: number = row + index // BITS
 
 	buffer.writeu8(data, at, bit32.bor(buffer.readu8(data, at), bit32.lshift(1, index % BITS)))
+end
+
+--[[
+    Marks the turn's ask of anti-ESP about the slot at a walk place from 1,
+    which the front replays in viewer then walk order
+--]]
+
+function Wire.ask(writer: Writer, place: number)
+	setPlace(writer, writer.asks, place)
+end
+
+--[[
+    Marks the turn's ask about the slot at a walk place from 1 as one whose
+    quiet bit was set, so it would only stamp its pair asked, which the
+    front hands anti-ESP after the turn's asks in one call
+--]]
+
+function Wire.mark(writer: Writer, place: number)
+	setPlace(writer, writer.marks, place)
 end
 
 -- Room for an event of bytes after its kind, its kind written, and where its body starts
@@ -1191,6 +1219,7 @@ function Wire.reader(records: buffer): Reader
 		_at = 0,
 		_turn = 0,
 		_asks = 0,
+		_marks = 0,
 		_event = 0,
 		_left = 0,
 		_view = 0,
@@ -1238,7 +1267,8 @@ end
 
 --[[
     Moves to the result's next turn, false past the last: its viewer's
-    place and its recipients' ids, with its asks and events next to read
+    place and its recipients' ids, with its asks, marks and events next to
+    read
 --]]
 
 function Wire.nextTurn(reader: Reader): boolean
@@ -1262,9 +1292,11 @@ function Wire.nextTurn(reader: Reader): boolean
 		recipients[index] = nil
 	end
 
+	local rowBytes: number = (reader.places + BITS - 1) // BITS
 	reader.recipientCount = count
 	reader._asks = at
-	at += (reader.places + BITS - 1) // BITS
+	reader._marks = at + rowBytes
+	at += rowBytes * 2
 
 	reader._left = buffer.readu16(data, at)
 	reader._event = at + 2
@@ -1274,19 +1306,13 @@ function Wire.nextTurn(reader: Reader): boolean
 	return true
 end
 
---[[
-    Fills places with each walk place from 1 at which the turn asked
-    anti-ESP, in walk order, the order the front replays them in, and gives
-    how many; places past that count are left as they were
---]]
-
-function Wire.asks(reader: Reader, places: { number }): number
+-- Fills places with each walk place from 1 whose bit is set in the turn's row that starts at row, and gives how many
+local function placesIn(reader: Reader, row: number, places: { number }): number
 	local data: buffer = reader.data
-	local asks: number = reader._asks
 	local count: number = 0
 
 	for index: number = 0, (reader.places + BITS - 1) // BITS - 1 do
-		local byte: number = buffer.readu8(data, asks + index)
+		local byte: number = buffer.readu8(data, row + index)
 
 		-- Each set bit, lowest first, cleared as it is read
 		while byte ~= 0 do
@@ -1297,6 +1323,26 @@ function Wire.asks(reader: Reader, places: { number }): number
 	end
 
 	return count
+end
+
+--[[
+    Fills places with each walk place from 1 at which the turn asked
+    anti-ESP, in walk order, the order the front replays them in, and gives
+    how many; places past that count are left as they were
+--]]
+
+function Wire.asks(reader: Reader, places: { number }): number
+	return placesIn(reader, reader._asks, places)
+end
+
+--[[
+    Fills places with each walk place from 1 the turn marked, in walk order,
+    the order the front hands their slots to anti-ESP in after the turn's
+    asks, and gives how many; places past that count are left as they were
+--]]
+
+function Wire.marks(reader: Reader, places: { number }): number
+	return placesIn(reader, reader._marks, places)
 end
 
 -- A buffer of exactly length bytes for the front to hand a block on in, made the first time that length is read

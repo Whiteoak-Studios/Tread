@@ -99,12 +99,13 @@ export type Viewer = {
 	look: vector?, -- The newest look its client sent, a unit vector on the ground; nil before any
 }
 
--- Anti-ESP's answers for a run's viewers, as AntiEsp.answers lays them out: each slot's kind and team, and a row of
--- bits a viewer by its place in the list
+-- Anti-ESP's answers for a run's viewers, as AntiEsp.answers lays them out: each slot's kind and team, and two rows of
+-- bits a viewer by its place in the list, visible and quiet
 type Answers = {
 	kinds: buffer,
 	teams: buffer,
 	visible: buffer,
+	quiet: buffer,
 }
 
 -- What the queries read of a view: the in-process Turn's own, or the front's copy of one a worker hosts
@@ -216,6 +217,7 @@ local SendWithheld: (keys: { Key }, data: buffer) -> ()
 local Traffic: (key: Key) -> number
 local IsHidden: (viewer: Viewer, slot: number) -> boolean
 local AnswersOf: (viewers: { Viewer }) -> Answers
+local Asked: (viewer: Viewer, slots: { number }, count: number) -> ()
 
 -- The workers while relay.workers is above 0, nil otherwise, each kept as a Worker, and whether new views go to them
 local Workers: Pool? = nil
@@ -305,10 +307,11 @@ local Frozen: Facts = {
 -- The workers' running totals of the records placed and cut and the bodies gathered, summed from their results
 local Totals: { sent: number, cut: number, visited: number } = { sent = 0, cut = 0, visited = 0 }
 
--- A worker turn's recipients as keys, then its watchers alone, its asks' walk places and a list of one key
+-- A worker turn's recipients as keys, then its watchers alone, its asks' and then its marks' walk places, the marks
+-- turned into slots in place, and a list of one key
 local Recipients: { Key } = {}
 local Watchers: { Key } = {}
-local Asked: { number } = {}
+local Places: { number } = {}
 local One: { Key } = {}
 
 local Relay = {}
@@ -360,8 +363,9 @@ end
     sendWithheld one withheld block to those moderators, each in one
     fireList over the relay's own list, valid during the call; traffic is
     Volt's count of the bytes sent to a viewer over the last second,
-    isHidden is anti-ESP's answer for a pair, and answers anti-ESP's export
-    of them, which relay.workers above 0 needs. It runs once
+    isHidden is anti-ESP's answer for a pair, answers anti-ESP's export of
+    them, and asked takes a viewer's asks whose quiet bit was set in their
+    place, both of which relay.workers above 0 needs. It runs once
 --]]
 
 function Relay.start(
@@ -370,7 +374,8 @@ function Relay.start(
 	sendWithheld: (keys: { Key }, data: buffer) -> (),
 	traffic: (key: Key) -> number,
 	isHidden: (viewer: Viewer, slot: number) -> boolean,
-	answers: ((viewers: { Viewer }) -> Answers)?
+	answers: ((viewers: { Viewer }) -> Answers)?,
+	asked: ((viewer: Viewer, slots: { number }, count: number) -> ())?
 )
 	if Started then
 		error("Relay.start runs once, and it has already run", 2)
@@ -394,6 +399,8 @@ function Relay.start(
 
 	if workers > 0 and type(answers) ~= "function" then
 		error("Relay.start takes anti-ESP's answers as a function while relay.workers is above 0", 2)
+	elseif workers > 0 and type(asked) ~= "function" then
+		error("Relay.start takes anti-ESP's asked as a function while relay.workers is above 0", 2)
 	end
 
 	Started = true
@@ -473,8 +480,9 @@ function Relay.start(
 		withheld = tapWithheld,
 	})
 
-	if workers > 0 and answers then
+	if workers > 0 and answers and asked then
 		AnswersOf = answers
+		Asked = asked
 		UseWorkers = true
 		Frozen.records = buffer.create(SLOTS * RECORD_BYTES)
 		Frozen.helds = buffer.create(SLOTS * MAX_HELD)
@@ -1050,7 +1058,7 @@ local function dispatch(pool: Pool, viewers: { Viewer })
 				fill(handAt(hands, place), host.list[place], host.places[place], answers.teams)
 			end
 
-			host.own = Wire.writeOwn(host.calls, hands, host.count, answers.visible, host.resend)
+			host.own = Wire.writeOwn(host.calls, hands, host.count, answers.visible, answers.quiet, host.resend)
 		end
 	end
 
@@ -1261,8 +1269,9 @@ end
 
 --[[
     Replays one worker turn through the front's own ports, as its turn
-    called them: its asks of anti-ESP in walk order, then its blocks, taps,
-    heard sequences and withheld blocks, to its recipients by key
+    called them: its asks of anti-ESP in walk order, then its marks' slots
+    in walk order in one call to asked, then its blocks, taps, heard
+    sequences and withheld blocks, to its recipients by key
 --]]
 
 local function replay(viewer: Viewer, reader: Reader)
@@ -1284,8 +1293,18 @@ local function replay(viewer: Viewer, reader: Reader)
 	trim(Recipients, count)
 	trim(Watchers, count - 1)
 
-	for index: number = 1, Wire.asks(reader, Asked) do
-		IsHidden(viewer, buffer.readu16(Walk, Asked[index] * 2))
+	for index: number = 1, Wire.asks(reader, Places) do
+		IsHidden(viewer, buffer.readu16(Walk, Places[index] * 2))
+	end
+
+	-- A mark only stamps its pair asked, which no ask of another pair reads, so the marks follow the turn's asks
+	local marks: number = Wire.marks(reader, Places)
+	if marks > 0 then
+		for index: number = 1, marks do
+			Places[index] = buffer.readu16(Walk, Places[index] * 2)
+		end
+
+		Asked(viewer, Places, marks)
 	end
 
 	local kind: number = Wire.nextEvent(reader)
@@ -1604,8 +1623,9 @@ end
     Brings the run's round in once every worker it went to has landed it,
     false until then, and true at once with none out: the watches, the
     copies, the counts, each worker turn in viewer order with its asks
-    replayed and its blocks sent and tapped, the calls made since the run,
-    and last what a port threw, a turn's failure or an overfull target
+    replayed, its marks handed to asked and its blocks sent and tapped, the
+    calls made since the run, and last what a port threw, a turn's failure
+    or an overfull target
 --]]
 
 function Relay.finish(): boolean

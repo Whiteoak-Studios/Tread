@@ -23,6 +23,7 @@ local Tick = require(Packages.Tread.Server.Tick)
 
 local Bot = require(ServerScriptService.Server.Bots.Bot)
 local Calibration = require(ServerScriptService.Server.Calibration)
+local Cells = require(ServerScriptService.Server.Bots.Cells)
 local Config = require(ServerScriptService.Server.Bots.Config)
 local Fleet = require(ServerScriptService.Server.Bots.Fleet)
 local Game = require(ServerScriptService.Server.Game)
@@ -419,7 +420,8 @@ end
     batch a frame. A bot or an NPC whose standing hull would meet test
     content or a body already built draws its spawn again from a generator
     its own seeds, which draws no other body's numbers. A bot takes its
-    group's team and any spectate
+    group's team and any spectate, and a group in cells keeps each body to
+    a cell of its own
 --]]
 
 local function spawnAll(
@@ -464,14 +466,24 @@ local function spawnAll(
 			long = group.cheat == "longMove",
 		}
 
-		for _ = 1, group.count do
+		for place: number = 1, group.count do
 			index += 1
 
+			-- A cell draws none of the run's numbers, so a seed's bodies draw as many as they would without cells
+			local bodySpawn: Area = spawn
+			local bodyRoam: Area? = roam
+			if group.cells then
+				bodySpawn = Cells(spawn, group.count, place)
+				if roam then
+					bodyRoam = bodySpawn
+				end
+			end
+
 			local own: Seeded.Seeded = Seeded.new(seeded:integer(1, SEED_BOUND))
-			local at: CFrame = spawnPoint(spawn, own, params, hull, overlap)
+			local at: CFrame = spawnPoint(bodySpawn, own, params, hull, overlap)
 
 			if group.kind == "npc" then
-				addNpc(group, at, roam, own, gait, made)
+				addNpc(group, at, bodyRoam, own, gait, made)
 			elseif group.kind == "sleeper" then
 				local sleeper: Tread.Sleeper? = server:createSleeper(at, {})
 				if sleeper then
@@ -479,8 +491,8 @@ local function spawnAll(
 				end
 			else
 				local steer: Programs.Steer = Programs.idle()
-				if roam then
-					steer = Programs.roam(roam, own, gait)
+				if bodyRoam then
+					steer = Programs.roam(bodyRoam, own, gait)
 				end
 
 				local entry: Fleet.Entry = Fleet.add({

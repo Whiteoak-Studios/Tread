@@ -1,7 +1,7 @@
 --[[
-    A serial relay and the same front over two stand-in workers, run on the
-    same runs and keys, give the same sends, asks, taps, errors, counts and
-    query answers, the case playing the front's part in place of its Turn
+    A serial relay and the front over two stand-in workers, the case in its
+    Turn's place, give the same sends, asks, taps, errors, counts and query
+    answers, each worker sending back as marks just the asks it should
 --]]
 
 --!strict
@@ -22,6 +22,8 @@ local WRAP: number = 2 ^ 16
 local MODULUS: number = 2 ^ 31 - 1 -- Park and Miller's generator
 local MULTIPLIER: number = 16807
 local SEED: number = 505
+local QUIET_SEED: number = 707 -- The quiet bits' own generator, so the runs' draws are the same with them as without
+local QUIET_SHARE: number = 0.5 -- A slot's chance of its quiet bit a run, whatever its kind
 
 -- Anti-ESP's kinds as AntiEsp.answers gives them
 local FREE: number = 0
@@ -65,11 +67,12 @@ local FAR_DISTANCE: number = 1000
 
 type Generator = () -> number
 
--- What anti-ESP's answers come from on both sides: each slot's kind and team, and each viewer's hidden slots
+-- What anti-ESP's answers come from on both sides: each slot's kind and team, and each viewer's hidden and quiet slots
 type Model = {
 	kinds: { [number]: number },
 	teams: { [number]: number },
 	hidden: { [any]: { [number]: boolean } },
+	quiet: { [any]: { [number]: boolean } },
 	traffic: { [any]: number },
 	top: number, -- The highest slot taken
 }
@@ -124,6 +127,8 @@ type Front = {
 	observed: { any },
 	model: Model,
 	turned: { number }, -- The turns each worker ran
+	marked: number, -- The asks the workers sent back as marks
+	quietAsks: number, -- And those sent as asks though their quiet bit was set
 }
 
 local Names: { [any]: string } = {}
@@ -155,6 +160,29 @@ local function hides(model: Model, viewer: any, slot: number): boolean
 	local hidden: { [number]: boolean }? = model.hidden[viewer.key]
 
 	return hidden ~= nil and hidden[slot] == true
+end
+
+--[[
+    Whether a worker must send its ask about a slot back as a mark: its
+    quiet bit set, and the slot neither free, an NPC nor a player carrying
+    the team of the viewer's own slot, which go as asks whatever their bits
+--]]
+
+local function marks(model: Model, viewer: any, slot: number): boolean
+	local kind: number = model.kinds[slot] or FREE
+	if kind == FREE or kind == NPC then
+		return false
+	end
+
+	local own: number? = viewer.slot
+	local team: number? = model.teams[slot]
+	if kind == PLAYER and own ~= nil and team ~= nil and model.teams[own] == team then
+		return false
+	end
+
+	local quiet: { [number]: boolean }? = model.quiet[viewer.key]
+
+	return quiet ~= nil and quiet[slot] == true
 end
 
 -- The names of keys, in order
@@ -350,6 +378,7 @@ local function dispatch(front: Front, viewers: { any })
 	local kinds: buffer = buffer.create(SLOTS)
 	local teams: buffer = buffer.create(SLOTS * 8)
 	local visible: buffer = buffer.create(#viewers * ROW_BYTES)
+	local quiet: buffer = buffer.create(#viewers * ROW_BYTES)
 	for slot: number = 0, SLOTS - 1 do
 		buffer.writeu8(kinds, slot, model.kinds[slot] or FREE)
 		buffer.writef64(teams, slot * 8, model.teams[slot] or 0 / 0)
@@ -357,10 +386,16 @@ local function dispatch(front: Front, viewers: { any })
 
 	for index: number, viewer: any in viewers do
 		local hidden: { [number]: boolean } = model.hidden[viewer.key] or {}
+		local quieted: { [number]: boolean } = model.quiet[viewer.key] or {}
 		for slot: number = 0, model.top do
+			local at: number = (index - 1) * ROW_BYTES + slot // 8
+			local bit: number = bit32.lshift(1, slot % 8)
 			if not hidden[slot] then
-				local at: number = (index - 1) * ROW_BYTES + slot // 8
-				buffer.writeu8(visible, at, bit32.bor(buffer.readu8(visible, at), bit32.lshift(1, slot % 8)))
+				buffer.writeu8(visible, at, bit32.bor(buffer.readu8(visible, at), bit))
+			end
+
+			if quieted[slot] then
+				buffer.writeu8(quiet, at, bit32.bor(buffer.readu8(quiet, at), bit))
 			end
 		end
 	end
@@ -453,7 +488,12 @@ local function dispatch(front: Front, viewers: { any })
 		end
 
 		local resend: boolean = header.run == RESEND_RUN
-		front.pool:send(worker, front.round, shared, Wire.writeOwn(front.calls[worker], hands, #hands, visible, resend))
+		front.pool:send(
+			worker,
+			front.round,
+			shared,
+			Wire.writeOwn(front.calls[worker], hands, #hands, visible, quiet, resend)
+		)
 		front.calls[worker].count = 0
 
 		if resend then
@@ -501,9 +541,10 @@ end
 
 --[[
     The front's replay of one turn at Turn.turn, in the serial order the
-    front's turn loop calls it: the viewer's asks in walk order through its
-    isHidden, then its sends, taps and heard sequences through its ports,
-    and last the error a throwing turn gave its worker
+    front's turn loop calls it: the viewer's asks and marks merged back in
+    walk order through its isHidden, each checked against the rule for a
+    mark, then its sends, taps and heard sequences through its ports, and
+    last the error a throwing turn gave its worker
 --]]
 
 local function replay(front: Front, viewer: any, back: number?)
@@ -532,8 +573,33 @@ local function replay(front: Front, viewer: any, back: number?)
 	local walk: buffer = front.real.world.walk
 
 	local places: { number } = {}
-	for at: number = 1, Wire.asks(reader, places) do
-		ports.isHidden(viewer, buffer.readu16(walk, places[at] * 2))
+	local marked: { number } = {}
+	local askCount: number = Wire.asks(reader, places)
+	local markCount: number = Wire.marks(reader, marked)
+	local asked: number, took: number = 1, 1
+
+	while asked <= askCount or took <= markCount do
+		local mark: boolean = took <= markCount and (asked > askCount or marked[took] < places[asked])
+		local place: number
+		if mark then
+			place = marked[took]
+			took += 1
+		else
+			place = places[asked]
+			asked += 1
+		end
+
+		local slot: number = buffer.readu16(walk, place * 2)
+		if mark ~= marks(front.model, viewer, slot) then
+			local sent: string = mark and "a mark" or "an ask"
+			error(`{Names[key]}'s ask about slot {slot} came back as {sent}, against the rule for a mark`)
+		elseif mark then
+			front.marked += 1
+		elseif (front.model.quiet[key] or {})[slot] then
+			front.quietAsks += 1
+		end
+
+		ports.isHidden(viewer, slot)
 	end
 
 	local kind: number = Wire.nextEvent(reader)
@@ -722,6 +788,8 @@ local function frontOf(model: Model): Front
 		observed = {},
 		model = model,
 		turned = table.create(WORKERS, 0),
+		marked = 0,
+		quietAsks = 0,
 	} :: any
 
 	return front
@@ -742,7 +810,7 @@ local function compare(what: string, serial: { string }, worker: { string }): st
 end
 
 return function (): (boolean, string | nil)
-	local model: Model = { kinds = {}, teams = {}, hidden = {}, traffic = {}, top = 0 }
+	local model: Model = { kinds = {}, teams = {}, hidden = {}, quiet = {}, traffic = {}, top = 0 }
 	local clients: { [any]: Client } = {}
 	local front: Front = frontOf(model)
 
@@ -760,6 +828,7 @@ return function (): (boolean, string | nil)
 	end
 
 	local random: Generator = generator(SEED)
+	local quietRandom: Generator = generator(QUIET_SEED)
 	local states: { [number]: any } = {}
 	local commands: { [number]: any } = {}
 	local viewers: { any } = {}
@@ -877,6 +946,18 @@ return function (): (boolean, string | nil)
 
 	shuffle(0.35)
 
+	-- Quiet bits on any slot, free ones', NPCs' and teammates' among them, which the workers must still send as asks
+	local function quieten()
+		for _, viewer: any in viewers do
+			local quiet: { [number]: boolean } = {}
+			for slot: number = 0, model.top do
+				quiet[slot] = quietRandom() < QUIET_SHARE
+			end
+
+			model.quiet[viewer.key] = quiet
+		end
+	end
+
 	-- The target's worker is the other one from its moderator's
 	local target: any = players[2]
 	local moderator: any = join("Moderator", CENTER + vector.create(0, 0, 900), false, 1)
@@ -993,6 +1074,7 @@ return function (): (boolean, string | nil)
 			end
 		end
 
+		quieten()
 		tick += 1
 		serial.log = {}
 		workers.log = {}
@@ -1137,6 +1219,8 @@ return function (): (boolean, string | nil)
 
 	if front.resent == 0 then
 		return false, "No view was sent whole into an empty copy after the resend"
+	elseif front.marked == 0 or front.quietAsks == 0 then
+		return false, `The workers sent back {front.marked} marks, and {front.quietAsks} asks with their quiet bit set`
 	end
 
 	-- The stand-in refuses what an Actor's boundary refuses in the settings, as the pool's would

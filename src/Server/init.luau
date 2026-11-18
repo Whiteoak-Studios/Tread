@@ -308,11 +308,14 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 		end,
 	})
 
-	-- With workers the relay hands each round anti-ESP's answers, and the stage gives up a round out past the timeout
+	-- With workers the relay hands each round anti-ESP's answers and its marks, and the stage gives up a round out past
+	-- the timeout
 	local relay: { read workers: number?, read timeout: number? }? = server.relay
 	local answers: typeof(AntiEsp.answers)? = nil
+	local asked: typeof(AntiEsp.asked)? = nil
 	if relay and relay.workers and relay.workers > 0 and relay.timeout then
 		answers = AntiEsp.answers
+		asked = AntiEsp.asked
 		RelayTimeout = relay.timeout
 	end
 
@@ -327,7 +330,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 		local sent: number, pending: number = network.traffic(key)
 
 		return sent + pending
-	end, AntiEsp.isHidden, answers)
+	end, AntiEsp.isHidden, answers, asked)
 
 	Taps.start({ layout = layout, reason = AntiEsp.reason, wearing = Relay.wearing })
 

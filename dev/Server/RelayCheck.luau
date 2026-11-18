@@ -1,7 +1,7 @@
 --[[
     The relay's own check: seeded layouts run through two private copies of
-    the relay, one serial and one on workers, every send, withheld send, ask,
-    tap frame and query compared byte for byte after each run
+    the relay, one serial and one on workers, every send, withheld send, tap
+    frame and query compared byte for byte after each run, the asks as sets
 --]]
 
 --!strict
@@ -139,6 +139,14 @@ type Side = {
 type Client = {
 	newest: number,
 	received: { [number]: boolean },
+}
+
+-- One part of a run's records the comparison walks, each list by name, and whether its lists are read as sets
+type Part = {
+	name: string,
+	serial: { [string]: { string } },
+	workers: { [string]: { string } },
+	set: boolean,
 }
 
 local RelayCheck = {}
@@ -303,19 +311,28 @@ local function namesOf(serial: { [string]: any }, workers: { [string]: any }): {
 	return names
 end
 
+-- A list's entries sorted, in a list of their own
+local function sorted(list: { string }): { string }
+	local copy: { string } = table.clone(list)
+	table.sort(copy)
+
+	return copy
+end
+
 --[[
     Compares what both copies sent, asked and tapped in a run and their
     answers after it, keeping a mismatch for each recipient's or viewer's
     list that differs in length or at its first entry that differs, and for
-    each query that differs, each with its first differing byte
+    each query that differs, each with its first differing byte. A viewer's
+    asks are compared as a set, since the workers hand their marks in last
 --]]
 
 function RelayCheck.compare(layout: string, run: number, serial: Record, workers: Record, summary: Summary)
-	local parts: { { name: string, serial: { [string]: { string } }, workers: { [string]: { string } } } } = {
-		{ name = "block to", serial = serial.blocks, workers = workers.blocks },
-		{ name = "withheld block to", serial = serial.withheld, workers = workers.withheld },
-		{ name = "ask from", serial = serial.asks, workers = workers.asks },
-		{ name = "tap frame of", serial = serial.frames, workers = workers.frames },
+	local parts: { Part } = {
+		{ name = "block to", serial = serial.blocks, workers = workers.blocks, set = false },
+		{ name = "withheld block to", serial = serial.withheld, workers = workers.withheld, set = false },
+		{ name = "ask from", serial = serial.asks, workers = workers.asks, set = true },
+		{ name = "tap frame of", serial = serial.frames, workers = workers.frames, set = false },
 	}
 
 	for _, part in parts do
@@ -323,6 +340,10 @@ function RelayCheck.compare(layout: string, run: number, serial: Record, workers
 			local a: { string } = part.serial[name] or {}
 			local b: { string } = part.workers[name] or {}
 			local where: string = `{layout} run {run}, {part.name} {name}`
+			if part.set then
+				a = sorted(a)
+				b = sorted(b)
+			end
 
 			if #a ~= #b then
 				keep(summary, `{where}: {#a} serially and {#b} on the workers`)
@@ -497,10 +518,20 @@ function RelayCheck.check(plan: Plan, serialCopy: Copy, workersCopy: Copy, setti
 			return own ~= nil and own[slot] == true
 		end
 
-		-- As the serial copy's isHidden answers: every slot read from its bit, set unless hidden from the viewer
-		local function answers(list: { any }): { kinds: buffer, teams: buffer, visible: buffer }
+		-- Each mark the workers' stand-in sent in an ask's place, kept with the asks, which the comparison reads as a set
+		local function asked(viewer: any, marked: { number }, count: number)
+			for index: number = 1, count do
+				append(side.record.asks, names[viewer.key], `{marked[index]}`)
+			end
+		end
+
+		-- As the serial copy's isHidden answers: every slot read from its bit, set unless hidden from the viewer, and
+		-- every quiet bit set, since a sleeper's or body's kind lets every ask go back as a mark
+		local function answers(list: { any }): { kinds: buffer, teams: buffer, visible: buffer, quiet: buffer }
 			local visible: buffer = buffer.create(#list * row)
+			local quiet: buffer = buffer.create(#list * row)
 			buffer.fill(visible, 0, ALL_SHOWN)
+			buffer.fill(quiet, 0, ALL_SHOWN)
 
 			for index: number, viewer: any in list do
 				for slot: number, off: boolean in hidden[viewer.key] or {} do
@@ -513,7 +544,7 @@ function RelayCheck.check(plan: Plan, serialCopy: Copy, workersCopy: Copy, setti
 				end
 			end
 
-			return { kinds = kinds, teams = teams, visible = visible }
+			return { kinds = kinds, teams = teams, visible = visible, quiet = quiet }
 		end
 
 		local layoutOf: any = copy.Fields.compile(settings.shared.fields)
@@ -528,7 +559,8 @@ function RelayCheck.check(plan: Plan, serialCopy: Copy, workersCopy: Copy, setti
 			sendWithheld,
 			trafficOf,
 			isHidden,
-			answers
+			answers,
+			asked
 		)
 
 		copy.Taps.start({

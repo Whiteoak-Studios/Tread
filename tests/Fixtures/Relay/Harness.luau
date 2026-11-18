@@ -203,6 +203,8 @@ function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ()
 		return hidden ~= nil and hidden[slot] == true
 	end, function (viewers: { Viewer }): any
 		return self:_answers(viewers)
+	end, function (_: Viewer, _: { number }, _: number)
+		error("The harness's anti-ESP sets no quiet bit, so the relay hands it no mark")
 	end)
 
 	if workers then
@@ -335,10 +337,14 @@ end
 --[[
     Anti-ESP's answers as the harness's isHidden gives them: every slot a
     sleeper's or body's kind with no team, so a worker's stand-in reads
-    each pair from its bit, set unless hide hides the slot from the viewer
+    each pair from its bit, set unless hide hides the slot from the viewer,
+    and no quiet bit, so every ask goes back as an ask
 --]]
 
-function Harness._answers(self: Self, viewers: { Viewer }): { kinds: buffer, teams: buffer, visible: buffer }
+function Harness._answers(
+	self: Self,
+	viewers: { Viewer }
+): { kinds: buffer, teams: buffer, visible: buffer, quiet: buffer }
 	local visible: buffer = buffer.create(#viewers * ROW_BYTES)
 	buffer.fill(visible, 0, ALL_SHOWN)
 
@@ -356,7 +362,7 @@ function Harness._answers(self: Self, viewers: { Viewer }): { kinds: buffer, tea
 		end
 	end
 
-	return { kinds = self.kinds, teams = self.teams, visible = visible }
+	return { kinds = self.kinds, teams = self.teams, visible = visible, quiet = buffer.create(#viewers * ROW_BYTES) }
 end
 
 -- Sets the send reason anti-ESP gives the taps for a slot a viewer is sent or has withheld

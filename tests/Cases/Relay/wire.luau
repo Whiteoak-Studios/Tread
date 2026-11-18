@@ -28,6 +28,9 @@ local VIEWERS: number = 300
 local STEPS: number = 300 -- Past the 256 a world's footstep buffers start with
 local CALLS: number = 75 -- Past the 64 a call log starts with
 local FAILURE_LENGTH: number = 1000
+local OWN_BYTES: number = 7 -- An own hand-in's header
+local CALL_BYTES: number = 15
+local HAND_BYTES: number = 57
 
 type Check = (boolean, string) -> ()
 
@@ -352,7 +355,7 @@ end
     A worker's own hand-in at its edges: every call kind with its ids and
     values at their tops, more calls than a log starts with, and 300
     viewers with and without a slot, a target, a look and a return, each
-    with no target carrying its row; then one with zero viewers
+    with no target carrying its visible and quiet rows; then one with zero
 --]]
 
 local function own(s: Sides, check: Check)
@@ -375,6 +378,8 @@ local function own(s: Sides, check: Check)
 	end
 
 	local visible: buffer = pattern(VIEWERS * ROW_BYTES, 5)
+	local quiet: buffer = pattern(VIEWERS * ROW_BYTES, 11)
+	local targetless: number = 0
 	local hands: { any } = {}
 	for index: number = 1, VIEWERS do
 		local watching: boolean = index % 3 == 0
@@ -400,6 +405,8 @@ local function own(s: Sides, check: Check)
 		local target: number? = nil
 		if watching then
 			target = index + 1
+		else
+			targetless += 1
 		end
 
 		hands[index] = {
@@ -418,9 +425,11 @@ local function own(s: Sides, check: Check)
 		}
 	end
 
-	local data: buffer = Wire.writeOwn(calls, hands, VIEWERS, visible, true)
+	local data: buffer = Wire.writeOwn(calls, hands, VIEWERS, visible, quiet, true)
+	local size: number = OWN_BYTES + CALLS * CALL_BYTES + VIEWERS * HAND_BYTES + targetless * ROW_BYTES * 2
 	check(Wire.callCount(data) == CALLS, `The own hand-in carried {Wire.callCount(data)} calls, not {CALLS}`)
 	check(Wire.resend(data), "The own hand-in lost its resend flag")
+	check(buffer.len(data) == size, `The own hand-in took {buffer.len(data)} B, not {size} with two rows a turn`)
 
 	for index: number, call: { number } in queued do
 		local kind: number, id: number, slot: number, value: number = Wire.readCall(data, index)
@@ -447,11 +456,15 @@ local function own(s: Sides, check: Check)
 		)
 		if hand.target == nil then
 			check(same(data, back.row, visible, hand.row, ROW_BYTES), `Viewer {index}'s row came back other bytes`)
+			check(
+				same(data, back.row + ROW_BYTES, quiet, hand.row, ROW_BYTES),
+				`Viewer {index}'s quiet row came back other bytes`
+			)
 		end
 	end
 
 	-- No viewers and no calls: the header alone, with no resend
-	local empty: buffer = Wire.writeOwn(Wire.calls(), {}, 0, visible, false)
+	local empty: buffer = Wire.writeOwn(Wire.calls(), {}, 0, visible, quiet, false)
 	check(buffer.len(empty) == 7 and Wire.callCount(empty) == 0, `An empty own hand-in took {buffer.len(empty)} B`)
 	check(not Wire.resend(empty), "An own hand-in with no resend carried the flag")
 	check(Wire.readOwn(empty, read) == 0, "An empty own hand-in's viewers didn't come back 0")
@@ -525,11 +538,13 @@ local function tapOf(slots: { number }): any
 end
 
 --[[
-    A worker's result at its edges: every ask from walk place 1 to 4,096, a
-    turn with a target's 32 recipients, the largest block and tap block,
-    every event kind, a turn with none, each watch answer, a long failure,
-    the u32 counts at their tops, and view changes from slots 0 and 4,095;
-    then a second run's changes after a slot is let go, over zero places
+    A worker's result at its edges: asks and marks from walk place 1 to
+    4,096, each row apart from the other, the marks refused outside the
+    run's places, a turn with a target's 32 recipients, the largest block
+    and tap block, every event kind, a turn with none, each watch answer, a
+    long failure, the u32 counts at their tops, and view changes from slots
+    0 and 4,095; then a second run's changes after a slot is let go, over
+    zero places
 --]]
 
 local function result(s: Sides, check: Check)
@@ -544,6 +559,7 @@ local function result(s: Sides, check: Check)
 	ids[RECIPIENTS] = U32_TOP
 
 	local asked: { number } = { 1, 8, 9, 4000, SLOTS }
+	local marked: { number } = { 1, 2, 7, 4095, SLOTS } -- Both edges asked too, so neither row reads the other's bits
 	local largest: buffer = pattern(MAX_BLOCK, 6)
 	local header: buffer = pattern(HEADER_BLOCK, 7)
 	local tapped: buffer = pattern(TAP_BLOCK, 8)
@@ -562,6 +578,15 @@ local function result(s: Sides, check: Check)
 	for _, place: number in asked do
 		Wire.ask(writer, place)
 	end
+
+	for _, place: number in marked do
+		Wire.mark(writer, place)
+	end
+
+	check(
+		not pcall(Wire.mark, writer, 0) and not pcall(Wire.mark, writer, SLOTS + 1),
+		"A mark outside the run's walk places was taken"
+	)
 
 	Wire.send(writer, largest)
 	Wire.relayed(writer, tapOf({ 0, TOP_SLOT, 5 }), nil)
@@ -634,6 +659,14 @@ local function result(s: Sides, check: Check)
 
 	check(places[#asked + 1] == -1, "The read of the asks wrote past their count")
 
+	local marks: { number } = { 0, 0, 0, 0, 0, -1 }
+	check(Wire.marks(reader, marks) == #marked, "The first turn's marks came back another count")
+	for index: number, expected: number in marked do
+		check(marks[index] == expected, `Mark {index} came back at walk place {marks[index]}, not {expected}`)
+	end
+
+	check(marks[#marked + 1] == -1, "The read of the marks wrote past their count")
+
 	-- Each event in order: its kind, then its bytes, records or sequence
 	local events: { { any } } = {
 		{ Wire.SEND, largest },
@@ -678,7 +711,10 @@ local function result(s: Sides, check: Check)
 		"The second turn came back wrong"
 	)
 	check(
-		#reader.recipients == 1 and Wire.asks(reader, places) == 0 and Wire.nextEvent(reader) == 0,
+		#reader.recipients == 1
+			and Wire.asks(reader, places) == 0
+			and Wire.marks(reader, places) == 0
+			and Wire.nextEvent(reader) == 0,
 		"The empty turn came back with something in it"
 	)
 	check(not Wire.nextTurn(reader), "The result came back with a turn past its last")

@@ -77,7 +77,11 @@ return function (): (boolean, string | nil)
 		local visible: buffer = buffer.create(#viewers * ROW_BYTES)
 		buffer.fill(visible, 0, ALL_SHOWN)
 
-		return { kinds = kinds, teams = teams, visible = visible }
+		return { kinds = kinds, teams = teams, visible = visible, quiet = buffer.create(#viewers * ROW_BYTES) }
+	end
+
+	local function asked(_: any, _: { number }, _: number)
+		error("The case's answers set no quiet bit, so the relay hands it no mark")
 	end
 
 	local viewers: { any } = {}
@@ -101,7 +105,7 @@ return function (): (boolean, string | nil)
 		blocks += 1
 	end
 
-	Relay.start({ shared = shared, server = server, layout = layout }, send, send, traffic, isHidden, answers)
+	Relay.start({ shared = shared, server = server, layout = layout }, send, send, traffic, isHidden, answers, asked)
 	Taps.start({
 		layout = layout,
 		wearing = Relay.wearing,
