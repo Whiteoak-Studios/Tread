@@ -32,6 +32,7 @@ local MAX_COMMANDS: number = Constants.MAX_COMMANDS
 local MOVE_REPEATS: number = Constants.MOVE_REPEATS
 local MOVE_STEPS: number = Constants.MOVE_STEPS
 local ACK_MASK_BITS: number = Constants.ACK_MASK_BITS
+local OWNER_ACK_BYTES: number = Constants.OWNER_ACK_BYTES -- An OwnerState acknowledged, its command, tick and depth
 local MASK: number = 2 ^ ACK_MASK_BITS - 1 -- The acknowledgment mask's bits
 local WRAP: number = 2 ^ 16 -- A command number is a u16
 local DELAY_LIMIT: number = 2 ^ 8 - 1 -- The most milliseconds the Move's u8 delay holds
@@ -78,7 +79,8 @@ export type Hold = {
 
 -- What a bot saw and did, which the harness reads for its run's lines
 export type Measure = {
-	heard: number, -- OwnerStates read
+	heard: number, -- OwnerStates heard, acknowledgments among them
+	acks: number, -- Acknowledgments heard in place of an OwnerState
 	sent: number, -- Moves handed to Volt
 	dropped: number, -- Moves the faults or the cheat dropped
 	held: number, -- Moves held back before they went
@@ -109,8 +111,10 @@ type Fields = {
 	_acknowledged: number, -- The newest relay sequence received
 	_mask: number, -- The 16 before it
 	_receiving: boolean, -- Whether a relay block has arrived
-	_owned: boolean, -- Whether an OwnerState has arrived
-	_server: State.State, -- The body's state as the newest OwnerState gave it
+	_owned: boolean, -- Whether an OwnerState or an acknowledgment has said where the body stands
+	_body: State.State?, -- The server's own state of the bot's body, nil for a bot handed none
+	_server: State.State, -- With no body, the body's state as the newest full OwnerState gave it
+	_position: vector, -- Where the body stood as the newest OwnerState or acknowledgment came, which it steers from
 	_block: Block.Block, -- The newest relay block's sections
 	_windows: number, -- The cheat's windows opened so far
 	_closes: number, -- The tick the open window closes on, or the last one did
@@ -147,10 +151,20 @@ end
     A bot on a client side of Tread's scope: it hears its OwnerState and
     the relay, ignores the rest, and sends its handshake. Its program fills
     each tick's command, and with none it sends only what it is handed. Its
-    seed draws which of its Moves its faults lose
+    seed draws which of its Moves its faults lose. Handed its body, it
+    steers alike whether an OwnerState or an acknowledgment came
+
+    @ body | its character's state on the server, as Characters.stateOf gives it, or nil to read each OwnerState
 --]]
 
-function Bot.new(network: Network, context: Context, steer: Steer?, faults: Faults?, seed: number): Self
+function Bot.new(
+	network: Network,
+	context: Context,
+	steer: Steer?,
+	faults: Faults?,
+	seed: number,
+	body: State.State?
+): Self
 	local link: Faults = faults or { lag = 0, loss = 0, cheat = nil }
 	if not (link.lag >= 0 and link.lag % 1 == 0) then
 		error(`Bot.new takes a lag of whole ticks from 0, not {link.lag}`, 2)
@@ -179,7 +193,9 @@ function Bot.new(network: Network, context: Context, steer: Steer?, faults: Faul
 		_mask = 0,
 		_receiving = false,
 		_owned = false,
+		_body = body,
 		_server = State.new(),
+		_position = vector.zero,
 		_block = Block.new(),
 		_windows = 0,
 		_closes = 0,
@@ -190,6 +206,7 @@ function Bot.new(network: Network, context: Context, steer: Steer?, faults: Faul
 		_live = true,
 		_measure = {
 			heard = 0,
+			acks = 0,
 			sent = 0,
 			dropped = 0,
 			held = 0,
@@ -300,7 +317,7 @@ function Bot.tick(self: Self, tick: number)
 
 	-- Until its first OwnerState a bot knows nowhere its body stands, so it sends its inputs at rest
 	if self._owned then
-		steer(command, tick, self._server.position)
+		steer(command, tick, self._position)
 	end
 
 	table.insert(recent, 1, command)
@@ -529,18 +546,41 @@ function Bot._window(self: Self, cheat: Cheat, tick: number)
 	self._network.flush()
 end
 
--- Reads an OwnerState for where the body stands and how fast it goes, and how far a hold has let it move
+--[[
+    Hears an OwnerState or an acknowledgment, each counted as heard and the
+    acknowledgments apart: where the body stands and how fast it goes, and
+    how far a hold has let it move. A bot handed its body reads them there
+    as the message comes, the values the tick's full OwnerState carries
+    while no tick has run since its relay; one with none decodes each full
+    OwnerState, and an acknowledgment tells it nothing
+--]]
+
 function Bot._hearOwner(self: Self, data: buffer)
-	local server: State.State = self._server
-	OwnerState.read(data, 0, buffer.len(data), server, nil, self._context.limits)
+	local measure: Measure = self._measure
+	local length: number = buffer.len(data)
+	measure.heard += 1
+
+	if length == OWNER_ACK_BYTES then
+		measure.acks += 1
+	end
+
+	local body: State.State? = self._body
+	local state: State.State = body or self._server
+	if body == nil then
+		if length == OWNER_ACK_BYTES then
+			return
+		end
+
+		OwnerState.read(data, 0, length, state, nil, self._context.limits)
+	end
+
 	self._owned = true
 
-	local measure: Measure = self._measure
-	local position: vector = server.position
-	local velocity: vector = server.velocity
+	local position: vector = state.position
+	local velocity: vector = state.velocity
 	local speed: number = math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z)
 
-	measure.heard += 1
+	self._position = position
 	measure.first = measure.first or position
 	measure.position = position
 	measure.fastest = math.max(measure.fastest, speed)

@@ -7,7 +7,7 @@
 --!strict
 local Layout = require(script.Parent.Layout)
 
-type Run = (shared: buffer, own: buffer) -> buffer
+type Run = (shared: buffer, own: buffer) -> (buffer, buffer?)
 
 -- The template sits in the game's packages with no index, so only a clone the pool parents ever works
 local found: Actor? = script:GetActor()
@@ -32,6 +32,7 @@ local event: BindableEvent = made
 
 local Run: Run? = nil -- Remote.run, nil until the setup has loaded Remote and run Remote.setup
 local FireFailed: boolean = false -- Whether a desynchronized fire has failed, which is warned of once
+local Fired: number = 0 -- With relay.clocks on, the seconds the last round's fire took, which the next fire carries
 
 -- The Actor owns both bindings, and the pool destroying it releases them
 actor:BindToMessage(Layout.SETUP, function (remote: ModuleScript, settings: unknown)
@@ -55,12 +56,14 @@ actor:BindToMessageParallel(Layout.RUN, function (round: number, shared: buffer,
 	local run: Run? = Run
 	local result: buffer? = nil
 	local failure: string? = nil
+	local clocks: buffer? = nil
 
 	-- A throw out of Remote.run means a bad hand-in or a broken worker, since Remote catches each viewer's own
 	if run then
-		local ran: boolean, value: any = pcall(run, shared, own)
+		local ran: boolean, value: any, timed: any = pcall(run, shared, own)
 		if ran then
 			result = value
+			clocks = timed
 		else
 			failure = `{value}`
 		end
@@ -70,10 +73,21 @@ actor:BindToMessageParallel(Layout.RUN, function (round: number, shared: buffer,
 
 	local finish: number = os.clock()
 
+	-- With clocks, the round before's fire goes with this one, and this one's is timed from the run's finish
+	local lastFire: number? = nil
+	if clocks then
+		lastFire = Fired
+	end
+
 	-- Whiteoak TODO: the event is the only return path; if G0's numbers pick the SharedTable, this fire becomes each
 	-- worker writing its result into its own keys of one shared table, as anti-ESP's Actor arm does
-	local fired: boolean, thrown: any = pcall(event.Fire, event, round, result, failure, start, finish)
+	local fired: boolean, thrown: any =
+		pcall(event.Fire, event, round, result, failure, start, finish, clocks, lastFire)
 	if fired then
+		if clocks then
+			Fired = os.clock() - finish
+		end
+
 		return
 	end
 
@@ -88,7 +102,11 @@ actor:BindToMessageParallel(Layout.RUN, function (round: number, shared: buffer,
 		warn(`{failed}, so it fires in the serial phase: {thrown}`)
 	end
 
-	event:Fire(round, result, failure, start, finish)
+	event:Fire(round, result, failure, start, finish, clocks, lastFire)
+
+	if clocks then
+		Fired = os.clock() - finish
+	end
 end)
 
 actor:SetAttribute(Layout.BOUND, true)

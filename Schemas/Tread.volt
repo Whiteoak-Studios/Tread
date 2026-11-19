@@ -15,6 +15,7 @@ struct Command {
 	headYaw: i8(-127..127),
 	headPitch: i8(-127..127),
 	fields: buffer(0..64),
+	check: u32,
 }
 
 enum Rig { A, B }

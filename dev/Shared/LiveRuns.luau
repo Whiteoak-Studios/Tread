@@ -77,6 +77,8 @@ local LiveRuns = {
 		{ name = "RelayWorkers", minutes = 1.5 }, -- Two relay copies matched, the pool, S4 and S3 on it, 10 s and 20 s each
 		{ name = "BenchWorkers", minutes = 11 }, -- S3 and S4 serial then on the workers, a 30 s warm-up and 120 s each
 		{ name = "BenchSpread", minutes = 12 }, -- 149 and 299 bots a cell each, serial then on the workers, 30 s and 120 s
+		{ name = "BenchStep", minutes = 7 }, -- S4, Spread150 and Spread300 with the levers off then on, 10 s and 50 s each
+		{ name = "BenchStepNoise", minutes = 7 }, -- The same loads with no lever flipped in either half
 	} :: { Run },
 
 	-- What Run all runs one after another on one server, each a listed run needing neither a player's hands nor a server

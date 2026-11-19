@@ -38,6 +38,7 @@ local QUARTER_TURN: number = TURN / 4 -- The degrees a record's pitch steps reac
 local ROW_BYTES: number = Wire.ROW_BYTES -- A viewer's row of anti-ESP's answers
 local NO_TEAM: number = 0 / 0 -- A hand's team for a viewer with no slot, which equals no team
 local WORKERS_FOLDER: string = "TreadRelayWorkers" -- The folder under ServerScriptService the workers are cloned into
+local WINDOW_SECONDS: number = 10 -- How far back each clock's runs are kept, the span stats reads its p95 over
 
 local TURN_CHANGE: number = 0.5 -- Degrees a yaw or pitch moves by before the move alone counts as a change
 local YAW_CHANGE: number = Constants.ANGLE_STEPS * TURN_CHANGE / TURN -- That move in a record's yaw steps
@@ -59,6 +60,40 @@ local WALK: number = 1
 local SPRINT: number = 2
 local JUMP: number = 3
 local LAND: number = 4
+
+-- The sections the relay's clocks time past a worker's own: the slowest worker's run and fire, the main thread's at the
+-- dispatch and at the finish, its waits, and last the two measured across a worker's clock and the main thread's
+local FRONT_CLOCKS: { string } = {
+	"run",
+	"fire",
+	"walk",
+	"file",
+	"inProcess",
+	"answers",
+	"shared",
+	"own",
+	"handIn",
+	"flushTick",
+	"open",
+	"land",
+	"asks",
+	"sends",
+	"deferred",
+	"flushFinish",
+	"round",
+	"waitBeat",
+	"delivery",
+	"back",
+}
+
+-- Every section, an f64 each in this order: a worker's as Wire.CLOCKS lays them out, summed over the workers so the
+-- run's turns' parts lead, then the rest
+local CLOCKS: { string } = table.move(FRONT_CLOCKS, 1, #FRONT_CLOCKS, #Wire.CLOCKS + 1, table.clone(Wire.CLOCKS))
+
+local CLOCK_AT: { [string]: number } = {} -- Each section's offset in a run's clocks
+for index: number, name: string in CLOCKS do
+	CLOCK_AT[name] = (index - 1) * 8
+end
 
 type Command = State.Command
 type Copy = Wire.Copy
@@ -97,6 +132,14 @@ export type Viewer = {
 	received: number, -- The mask of the 16 sequences before that one, bit 0 the one just before
 	target: Key?, -- The viewer it spectates, whose blocks it gets copies of in place of its own; nil for none
 	look: vector?, -- The newest look its client sent, a unit vector on the ground; nil before any
+}
+
+-- One section of the relay's clocks over its last WINDOW_SECONDS of runs, a run's seconds each, which stats reads
+export type ClockRing = {
+	times: { number }, -- Made at its full size
+	held: number, -- The runs it holds, up to its size, the first that many of times
+	head: number, -- The index the next run goes at
+	last: number, -- The newest run's, 0 before the first
 }
 
 -- Anti-ESP's answers for a run's viewers, as AntiEsp.answers lays them out: each slot's kind and team, and two rows of
@@ -307,6 +350,32 @@ local Frozen: Facts = {
 -- The workers' running totals of the records placed and cut and the bodies gathered, summed from their results
 local Totals: { sent: number, cut: number, visited: number } = { sent = 0, cut = 0, visited = 0 }
 
+-- With relay.clocks on: the running run's seconds in each section at its offset in CLOCK_AT, each section's ring, the
+-- runs a ring holds, whether the laps hold a run the rings don't yet, when the lap being timed began, when the
+-- dispatch ended, the newest result's landing, and how many workers' clocks the finish took in
+local Clock: {
+	on: boolean,
+	laps: buffer,
+	rings: { [string]: ClockRing },
+	capacity: number,
+	pending: boolean,
+	from: number,
+	dispatched: number,
+	landed: number,
+	workers: number,
+} =
+	{
+		on = false,
+		laps = buffer.create(#CLOCKS * 8),
+		rings = {},
+		capacity = 0,
+		pending = false,
+		from = 0,
+		dispatched = 0,
+		landed = 0,
+		workers = 0,
+	}
+
 -- A worker turn's recipients as keys, then its watchers alone, its asks' and then its marks' walk places, the marks
 -- turned into slots in place, and a list of one key
 local Recipients: { Key } = {}
@@ -314,7 +383,10 @@ local Watchers: { Key } = {}
 local Places: { number } = {}
 local One: { Key } = {}
 
-local Relay = {}
+-- The sections the relay's clocks time, in their order, which a dev run's lines print them in
+local Relay = {
+	CLOCKS = CLOCKS,
+}
 
 -- The squared range a footstep kind is heard to, or SILENT for a kind the game gives none
 local function earshot(range: number?): number
@@ -390,7 +462,7 @@ function Relay.start(
 
 	local shared: Shared = settings.shared
 	local server: ServerSettings = settings.server
-	local relay: { read changes: boolean?, read workers: number? }? = server.relay
+	local relay: { read changes: boolean?, read workers: number?, read clocks: boolean? }? = server.relay
 
 	local workers: number = 0
 	if relay and relay.workers then
@@ -435,6 +507,16 @@ function Relay.start(
 		Changes = true
 	end
 
+	-- Each section's ring holds WINDOW_SECONDS of runs
+	if relay and relay.clocks then
+		Clock.on = true
+		Clock.capacity = math.ceil(WINDOW_SECONDS * relayRate)
+
+		for _, name: string in CLOCKS do
+			Clock.rings[name] = { times = table.create(Clock.capacity, 0), held = 0, head = 0, last = 0 }
+		end
+	end
+
 	-- Plain values only, since a worker's setup takes the same table across its Actor's boundary
 	local turnSettings: Turn.Settings = {
 		relayRate = relayRate,
@@ -460,6 +542,7 @@ function Relay.start(
 		earshot = Earshot,
 		outOfView = outOfView,
 		changes = Changes,
+		clocks = Clock.on,
 	}
 
 	Send = send
@@ -1009,6 +1092,18 @@ local function fill(hand: Hand, viewer: Viewer, at: number, teams: buffer)
 	end
 end
 
+-- Adds seconds to the section of the running run's clocks at an offset
+local function add(at: number, seconds: number)
+	buffer.writef64(Clock.laps, at, buffer.readf64(Clock.laps, at) + seconds)
+end
+
+-- Adds the seconds since the lap being timed began to a section of the running run's clocks, and begins the next lap
+local function lap(name: string)
+	local now: number = os.clock()
+	add(CLOCK_AT[name], now - Clock.from)
+	Clock.from = now
+end
+
 --[[
     Sends the run's round: anti-ESP's answers for the run's viewers, the
     shared hand-in, carrying every slot's look and held item for a worker
@@ -1017,7 +1112,12 @@ end
 --]]
 
 local function dispatch(pool: Pool, viewers: { Viewer })
+	local clocked: boolean = Clock.on
 	local answers: Answers = AnswersOf(viewers)
+	if clocked then
+		lap("answers")
+	end
+
 	local header: Wire.Shared = Header
 
 	for index: number, host: Worker in Hosts do
@@ -1048,6 +1148,9 @@ local function dispatch(pool: Pool, viewers: { Viewer })
 	end
 
 	local shared: buffer = Wire.writeShared(World, header)
+	if clocked then
+		lap("shared")
+	end
 
 	-- Every hand-in written before any goes out, so a port that throws on the way leaves no round out and loses no mark
 	-- or call
@@ -1068,6 +1171,10 @@ local function dispatch(pool: Pool, viewers: { Viewer })
 	-- The list as it is sent, which the finish reads in its order however the caller's own list changes meanwhile
 	table.move(viewers, 1, #viewers, 1, RunViewers)
 	trim(RunViewers, #viewers)
+
+	if clocked then
+		lap("own")
+	end
 
 	Round += 1
 	for index: number, host: Worker in Hosts do
@@ -1115,6 +1222,38 @@ local function dispatch(pool: Pool, viewers: { Viewer })
 
 	table.clear(Leaving)
 	Out = true
+
+	-- The dispatch ends here, where the round's wait and each worker's delivery are measured from
+	if clocked then
+		lap("handIn")
+		Clock.dispatched = Clock.from
+	end
+end
+
+--[[
+    Keeps the run before's clocks in their rings, each over its oldest once
+    full, and starts the running run's from 0
+--]]
+
+local function keep()
+	if Clock.pending then
+		local capacity: number = Clock.capacity
+
+		for index: number, name: string in CLOCKS do
+			local ring: ClockRing = Clock.rings[name]
+			local took: number = buffer.readf64(Clock.laps, (index - 1) * 8)
+
+			ring.times[ring.head + 1] = took
+			ring.head = (ring.head + 1) % capacity
+			ring.held = math.min(ring.held + 1, capacity)
+			ring.last = took
+		end
+	end
+
+	buffer.fill(Clock.laps, 0, 0)
+	Clock.pending = true
+	Clock.landed = 0
+	Clock.workers = 0
 end
 
 --[[
@@ -1127,7 +1266,8 @@ end
     carries. A target handed more watchers than it takes errors, naming
     it, once every viewer has had its turn, and a tick, unwrapped, no later
     than the last run's is refused. With workers, their turns go out in a
-    round Relay.finish brings in, and no run starts while one is out
+    round Relay.finish brings in, and no run starts while one is out. With
+    relay.clocks on, the run before's clocks go into their rings first
 --]]
 
 function Relay.run(
@@ -1143,6 +1283,12 @@ function Relay.run(
 		error("Relay.run ran while the last run's round was still out, before Relay.finish or Relay.drop", 2)
 	elseif not (tick > RunTick) then
 		error(`Relay.run takes a relay tick after the last run's {RunTick}, not {tick}`, 2)
+	end
+
+	local clocked: boolean = Clock.on
+	if clocked then
+		keep()
+		Clock.from = os.clock()
 	end
 
 	local pool: Pool? = Workers
@@ -1194,8 +1340,16 @@ function Relay.run(
 		buffer.writeu16(Walk, order * 2, slot)
 	end
 
+	if clocked then
+		lap("walk")
+	end
+
 	Turn.file(order)
 	Header.places = order
+
+	if clocked then
+		lap("file")
+	end
 
 	-- Every view homed where Turn makes it, in the list's order, among the workers ready now
 	if pool then
@@ -1248,6 +1402,16 @@ function Relay.run(
 		end
 	end
 
+	-- The in-process turns' parts join the workers' at the front of the run's clocks
+	if clocked then
+		local turns: buffer = Turn.clocks()
+		for at: number = 0, buffer.len(turns) - 8, 8 do
+			add(at, buffer.readf64(turns, at))
+		end
+
+		lap("inProcess")
+	end
+
 	if pool and dispatched then
 		dispatch(pool, viewers)
 
@@ -1275,6 +1439,7 @@ end
 --]]
 
 local function replay(viewer: Viewer, reader: Reader)
+	local clocked: boolean = Clock.on
 	local count: number = reader.recipientCount
 	local recipients: { number } = reader.recipients
 
@@ -1307,6 +1472,10 @@ local function replay(viewer: Viewer, reader: Reader)
 		Asked(viewer, Places, marks)
 	end
 
+	if clocked then
+		lap("asks")
+	end
+
 	local kind: number = Wire.nextEvent(reader)
 	while kind ~= 0 do
 		if kind == Wire.SEND then
@@ -1322,6 +1491,10 @@ local function replay(viewer: Viewer, reader: Reader)
 		end
 
 		kind = Wire.nextEvent(reader)
+	end
+
+	if clocked then
+		lap("sends")
 	end
 end
 
@@ -1441,6 +1614,10 @@ local function land(viewers: { Viewer }): (string?, unknown)
 				Watching[viewer.key] = nil
 			end
 		end
+	end
+
+	if Clock.on then
+		lap("land")
 	end
 
 	local replayed: boolean, failure: unknown = pcall(replayTurns, viewers)
@@ -1619,13 +1796,48 @@ local function runDeferred()
 	end
 end
 
+-- Keeps a section of the running run's clocks as the slowest worker's: the first worker's, then any larger
+local function slowest(name: string, seconds: number)
+	local at: number = CLOCK_AT[name]
+	if Clock.workers == 1 or seconds > buffer.readf64(Clock.laps, at) then
+		buffer.writef64(Clock.laps, at, seconds)
+	end
+end
+
+--[[
+    Takes one landed worker's clocks into the running run's: its sections
+    added to the other workers', and its run, its last fire, its delivery
+    and its back kept as the slowest worker's, the last two across its clock
+    and the main thread's. A round it ran with no clocks, as a run that
+    threw, adds nothing
+--]]
+
+local function clockWorker(pool: Pool, index: number)
+	local start: number, finish: number, clocks: buffer?, landed: number, fired: number = pool:times(index)
+	if clocks == nil then
+		return
+	end
+
+	for at: number = 0, Wire.CLOCK_BYTES - 8, 8 do
+		add(at, buffer.readf64(clocks, at))
+	end
+
+	Clock.workers += 1
+	Clock.landed = math.max(Clock.landed, landed)
+	slowest("run", finish - start)
+	slowest("fire", fired)
+	slowest("delivery", start - Clock.dispatched)
+	slowest("back", landed - finish)
+end
+
 --[[
     Brings the run's round in once every worker it went to has landed it,
     false until then, and true at once with none out: the watches, the
     copies, the counts, each worker turn in viewer order with its asks
     replayed, its marks handed to asked and its blocks sent and tapped, the
     calls made since the run, and last what a port threw, a turn's failure
-    or an overfull target
+    or an overfull target. With relay.clocks on it times each of those and
+    takes in each worker's clocks
 --]]
 
 function Relay.finish(): boolean
@@ -1647,6 +1859,14 @@ function Relay.finish(): boolean
 		end
 	end
 
+	-- The finish's laps begin where the round's wait ends
+	local clocked: boolean = Clock.on
+	local began: number = 0
+	if clocked then
+		began = os.clock()
+		Clock.from = began
+	end
+
 	Out = false
 	for index: number, host: Worker in Hosts do
 		host.failure = nil
@@ -1661,13 +1881,31 @@ function Relay.finish(): boolean
 				host.resend = true
 				host.sent = 0
 			end
+
+			if clocked then
+				clockWorker(pool, index)
+			end
 		end
+	end
+
+	-- The round's waits by the main thread's clock: from the dispatch's end to the last result's landing, and on to here
+	if clocked then
+		if Clock.workers > 0 then
+			add(CLOCK_AT.round, Clock.landed - Clock.dispatched)
+			add(CLOCK_AT.waitBeat, began - Clock.landed)
+		end
+
+		lap("open")
 	end
 
 	local failure: string?, thrown: unknown = land(RunViewers)
 	local overfull: Key? = Overfull
 	Overfull = nil
 	runDeferred()
+
+	if clocked then
+		lap("deferred")
+	end
 
 	if thrown ~= nil then
 		error(thrown, 0)
@@ -2094,6 +2332,31 @@ function Relay.counts(): (number, number, number)
 	local sent: number, cut: number, visited: number = Turn.counts()
 
 	return sent + Totals.sent, cut + Totals.cut, visited + Totals.visited
+end
+
+--[[
+    With relay.clocks on, each section's ring of the runs before the one
+    running, by the section's name, as CLOCKS lists them; empty while the
+    clocks are off. The rings are the relay's own, which each run rewrites
+--]]
+
+function Relay.clocks(): { [string]: ClockRing }
+	return Clock.rings
+end
+
+--[[
+    Adds a time the server handle measured to a section of the running
+    run's clocks, in seconds: flushTick, the relay stage's flush, and
+    flushFinish, its finish's. Errors on a name that is no section
+--]]
+
+function Relay.clocked(name: string, seconds: number)
+	local at: number? = CLOCK_AT[name]
+	if at == nil then
+		error(`Relay.clocked takes one of the relay's clock sections, not {name}`, 2)
+	end
+
+	add(at, seconds)
 end
 
 return Relay

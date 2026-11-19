@@ -1,7 +1,7 @@
 --[[
     The relay's layouts across an Actor's boundary: the hand-in every worker
-    shares, each worker's own, and its result with the copy of each view it
-    ran, every writer the exact inverse of its reader
+    shares, each worker's own, its result with the copy of each view it ran
+    and its clocks' order, every writer the exact inverse of its reader
 --]]
 
 --!strict
@@ -82,6 +82,30 @@ local WITHHELD_TAP: number = 6 -- A tap on the withheld block just sent
 local UNWATCHED: number = 0 -- Its target runs no turn here
 local OVERFULL: number = 1
 local WATCHED: number = 2
+
+-- The sections a worker's clocks time with relay.clocks on, an f64 each in this order: its turns' parts summed over
+-- them, as Turn.clocks lays them out, then its run's own parts
+local CLOCKS: { string } = {
+	"head",
+	"gather",
+	"measure",
+	"settle",
+	"schedule",
+	"place",
+	"send",
+	"unpack",
+	"bodies",
+	"grid",
+	"ready",
+	"turns",
+	"views",
+	"pack",
+}
+
+local CLOCK_AT: { [string]: number } = {} -- Each section's offset in a worker's clocks
+for index: number, name: string in CLOCKS do
+	CLOCK_AT[name] = (index - 1) * 8
+end
 
 type Steps = Turn.Steps
 type View = Turn.View
@@ -206,6 +230,9 @@ local Wire = {
 	HEARD = HEARD,
 	WITHHELD = WITHHELD_SEND,
 	WITHHELD_TAP = WITHHELD_TAP,
+	CLOCKS = CLOCKS,
+	CLOCK_AT = CLOCK_AT,
+	CLOCK_BYTES = #CLOCKS * 8, -- A worker's clocks' length
 }
 
 -- Errors naming a count past the u16 its field holds

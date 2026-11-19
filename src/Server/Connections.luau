@@ -22,6 +22,7 @@ local Records: { [Player | Bot]: Connection } = {}
 
 local Smoothing: number = 0 -- The server settings' rewind.rttSmoothing, the smoothing's time constant in seconds
 local BotRtt: number = 0 -- The server settings' bots.rtt in seconds, 0 on a server that creates no bots
+local BotsAgree: boolean = false -- The server settings' bots.agree, off when left out
 local Started: boolean = false
 
 local Connections = {}
@@ -43,11 +44,12 @@ end
 --[[
     Takes the server settings' rewind.rttSmoothing, the seconds every
     connection's ping samples are smoothed over, and its bots table, whose
-    rtt every bot's connection reports, or nil on a server that creates no
+    rtt every bot's connection reports and whose agree has every bot taken
+    as agreeing with its OwnerState, or nil on a server that creates no
     bots. It runs once, before the first add
 --]]
 
-function Connections.start(smoothing: number, bots: { rtt: number }?)
+function Connections.start(smoothing: number, bots: { rtt: number, read agree: boolean? }?)
 	if Started then
 		error("Connections.start runs once, and it has already run", 2)
 	elseif not positive(smoothing) then
@@ -60,6 +62,7 @@ function Connections.start(smoothing: number, bots: { rtt: number }?)
 		end
 
 		BotRtt = bots.rtt
+		BotsAgree = bots.agree == true
 	end
 
 	Smoothing = smoothing
@@ -146,6 +149,16 @@ function Connection.rtt(self: Self): number
 
 	-- Whiteoak TODO: Volt's batching overhead joins the round trip once G0 measures it live; until then none is added
 	return self._mean
+end
+
+--[[
+    Whether the server takes this connection's client as agreeing with
+    every OwnerState it ran a command for: a bot's while bots.agree is on,
+    since a bot predicts nothing, and never a player's
+--]]
+
+function Connection.agrees(self: Self): boolean
+	return BotsAgree and self._engine == nil
 end
 
 --[[

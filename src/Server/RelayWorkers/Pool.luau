@@ -33,6 +33,9 @@ type Fields = {
 	_failures: { [number]: string? },
 	_starts: { number }, -- And when that run began and ended, by the worker's own os.clock()
 	_finishes: { number },
+	_clocks: { [number]: buffer? }, -- With relay.clocks on, the run's clocks, nil for a run that gave none
+	_landed: { number }, -- And when its event fired here, by this os.clock(), 0 for a run with no clocks
+	_fired: { number }, -- And the seconds the worker's fire of the round before took
 }
 
 --[[
@@ -62,6 +65,9 @@ function Pool.new(count: number, name: string, remote: ModuleScript, settings: u
 		_failures = {} :: { [number]: string? },
 		_starts = table.create(count, 0),
 		_finishes = table.create(count, 0),
+		_clocks = {} :: { [number]: buffer? },
+		_landed = table.create(count, 0),
+		_fired = table.create(count, 0),
 	}, Pool)
 
 	for index: number = 1, count do
@@ -78,12 +84,28 @@ function Pool.new(count: number, name: string, remote: ModuleScript, settings: u
 		table.insert(
 			self._connections,
 			event.Event:Connect(
-				function (round: number, result: buffer?, failure: string?, start: number, finish: number)
+				function (
+					round: number,
+					result: buffer?,
+					failure: string?,
+					start: number,
+					finish: number,
+					clocks: buffer?,
+					fired: number?
+				)
+					local landed: number = 0
+					if clocks then
+						landed = os.clock()
+					end
+
 					self._rounds[index] = round
 					self._results[index] = result
 					self._failures[index] = failure
 					self._starts[index] = start
 					self._finishes[index] = finish
+					self._clocks[index] = clocks
+					self._landed[index] = landed
+					self._fired[index] = fired or 0
 				end
 			)
 		)
@@ -164,9 +186,16 @@ function Pool.landed(self: Self, worker: number, round: number): (buffer?, strin
 	return self._results[worker], self._failures[worker]
 end
 
--- When a worker's last landed run began and ended, by its own os.clock()
-function Pool.times(self: Self, worker: number): (number, number)
-	return self._starts[worker], self._finishes[worker]
+--[[
+    When a worker's last landed run began and ended, by its own os.clock(),
+    0 before any; then with relay.clocks on, that run's clocks, nil for a
+    run that gave none, when its result landed by the pool's own os.clock(),
+    0 with no clocks, and the seconds the worker took to fire the round
+    before's result
+--]]
+
+function Pool.times(self: Self, worker: number): (number, number, buffer?, number, number)
+	return self._starts[worker], self._finishes[worker], self._clocks[worker], self._landed[worker], self._fired[worker]
 end
 
 --[[

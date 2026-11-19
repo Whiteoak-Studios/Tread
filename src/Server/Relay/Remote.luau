@@ -91,6 +91,11 @@ local Sent: number = 0
 local Cut: number = 0
 local Visited: number = 0
 
+-- With relay.clocks on, each run's clocks, laid out as Wire.CLOCKS names them and made at setup, and when the part of
+-- the run being timed began
+local Clock: { on: boolean, laps: buffer, from: number } = { on = false, laps = buffer.create(0), from = 0 }
+local AT: { [string]: number } = Wire.CLOCK_AT -- Each section's offset in the clocks
+
 local Remote = {}
 
 -- The handle Turn keeps an id's view under, made the first time the id is handed in
@@ -228,11 +233,16 @@ end
 
 --[[
     Starts Turn in this worker's VM with the settings the front built for
-    its own Turn.start, copied across the boundary, and this worker's ports
+    its own Turn.start, copied across the boundary, and this worker's ports,
+    with its clocks while relay.clocks is on
 --]]
 
 function Remote.setup(settings: Settings)
 	Changes = settings.changes
+	Clock.on = settings.clocks == true
+	if Clock.on then
+		Clock.laps = buffer.create(Wire.CLOCK_BYTES)
+	end
 
 	Turn.start(settings, {
 		send = send,
@@ -246,6 +256,13 @@ function Remote.setup(settings: Settings)
 		relayed = relayed,
 		withheld = tapWithheld,
 	})
+end
+
+-- Writes the seconds since the part of the run being timed began as that part's, and begins the next part
+local function lapped(at: number)
+	local now: number = os.clock()
+	buffer.writef64(Clock.laps, at, now - Clock.from)
+	Clock.from = now
 end
 
 --[[
@@ -305,10 +322,16 @@ end
     when they were made, then the run's bodies, then the viewers handed in,
     whose watches and turns run as the front's serial run of the same list
     would. A turn that throws is kept with its place and text and ends the
-    turns after it here. Gives the run's result
+    turns after it here. Gives the run's result, and while relay.clocks is
+    on its clocks, a buffer this worker keeps and rewrites every run
 --]]
 
-function Remote.run(shared: buffer, own: buffer): buffer
+function Remote.run(shared: buffer, own: buffer): (buffer, buffer?)
+	local clocked: boolean = Clock.on
+	if clocked then
+		Clock.from = os.clock()
+	end
+
 	Own = own
 
 	-- A front that lost a result starts its copies again empty, so each view this worker runs from now goes whole
@@ -340,6 +363,10 @@ function Remote.run(shared: buffer, own: buffer): buffer
 		end
 	end
 
+	if clocked then
+		lapped(AT.unpack)
+	end
+
 	Turn.begin(header.run, header.tick, header.elapsed, header.wire)
 	Wire.readBodies(shared, at, World, header, Changes)
 
@@ -349,7 +376,15 @@ function Remote.run(shared: buffer, own: buffer): buffer
 		buffer.writeu16(Places, buffer.readu16(walk, place * 2) * 2, place)
 	end
 
+	if clocked then
+		lapped(AT.bodies)
+	end
+
 	Turn.file(places)
+
+	if clocked then
+		lapped(AT.grid)
+	end
 
 	table.clear(Observed)
 	for index: number = 1, header.observedCount do
@@ -406,6 +441,10 @@ function Remote.run(shared: buffer, own: buffer): buffer
 		end
 	end
 
+	if clocked then
+		lapped(AT.ready)
+	end
+
 	local failed: number = 0
 	local failure: string = ""
 	for index: number = 1, count do
@@ -420,6 +459,10 @@ function Remote.run(shared: buffer, own: buffer): buffer
 		end
 	end
 
+	if clocked then
+		lapped(AT.turns)
+	end
+
 	-- Every view due a turn this run, taken or not after a throw, as it now stands against what the front holds
 	for index: number = 1, count do
 		local viewer: Viewer = List[index]
@@ -432,13 +475,25 @@ function Remote.run(shared: buffer, own: buffer): buffer
 		end
 	end
 
+	if clocked then
+		lapped(AT.views)
+	end
+
 	local sent: number, cut: number, visited: number = Turn.counts()
 	local result: buffer = Wire.finish(Writer, sent - Sent, cut - Cut, visited - Visited, failed, failure)
 	Sent = sent
 	Cut = cut
 	Visited = visited
 
-	return result
+	if not clocked then
+		return result, nil
+	end
+
+	-- The turns' parts lead the clocks, as Turn.clocks lays them out
+	lapped(AT.pack)
+	buffer.copy(Clock.laps, 0, Turn.clocks())
+
+	return result, Clock.laps
 end
 
 return Remote

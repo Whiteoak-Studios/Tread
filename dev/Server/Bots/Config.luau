@@ -1,7 +1,7 @@
 --[[
-    The bot harness's numbers: scenarios S0 to S7, the gates' and spread loads,
-    the seeded runs' timings, the calibration, the relevancy, versus and relay
-    workers runs, how a bot roams, what each cheat sends, its floors and spawns
+    The bot harness's numbers: its scenarios, the seeded runs' timings, the
+    calibration, the relevancy, versus, relay workers and step benchmark runs,
+    how a bot roams, what each cheat sends, its floors and spawns
 --]]
 
 --!strict
@@ -49,6 +49,12 @@ export type Timing = {
 	warmup: number, -- Seconds the bots run before the window
 	window: number, -- Seconds of the window, its stats read once each interval
 	interval: number,
+}
+
+-- One load of the step benchmark: its scenario, and each half's levers in the order the halves run, off for before
+export type StepLoad = {
+	scenario: string,
+	order: { boolean },
 }
 
 -- The fixed workload a run's calibration times, a sample at a time, against a part it lays for the casts
@@ -352,6 +358,19 @@ return {
 		scenarios = { "S4", "S3" },
 		timing = { seeds = { 1 }, warmup = 10, window = 20, interval = 1 } :: Timing,
 		ready = 10, -- Seconds the check waits for every worker to be ready
+	},
+
+	-- The step benchmark: the fight and the spread loads, each a half with the session's levers off and one with them
+	-- on, the relay's workers on in both, one short seed each
+	step = {
+		session = 1, -- The performance build's step whose levers the halves flip
+		loads = {
+			{ scenario = "S4", order = { false, true } },
+			{ scenario = "Spread150", order = { true, false } }, -- After first, so a slowdown lands on either half
+			{ scenario = "Spread300", order = { false, true } },
+		} :: { StepLoad },
+		timing = { seeds = { 1 }, warmup = 10, window = 50, interval = 1 } :: Timing,
+		drift = 0.05, -- The share the halves' calibration loops may differ by before the table flags them
 	},
 
 	stage = "bots", -- The stage every bot sends from, after the relay

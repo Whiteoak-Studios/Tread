@@ -17,6 +17,7 @@ local WALK_TICKS: number = 40 -- Ticks each way the input walks, forward then ba
 local FRAME: number = 1 / 60 -- Seconds between each side's frames, unless a case sets its own
 local ONE_WAY: number = 0.05 -- Seconds each way a packet takes, unless a case sets its own
 local BUFFER_BYTES: number = 128 -- Past the largest OwnerState
+local ACK_BYTES: number = 5 -- An acknowledgment's: an OwnerState's command, tick and queue depth
 local TOLERANCE: number = 1e-9 -- Seconds two events count as at once
 
 -- A packet in flight, which arrives at its time and no sooner than the one sent before it
@@ -28,6 +29,8 @@ type Packet = {
 	delay: number,
 	wires: { any },
 	data: buffer?,
+	tick: number, -- An OwnerState's or acknowledgment's wire tick and queue depth
+	depth: number,
 }
 
 -- What the rig counts, all of it since its window last opened
@@ -43,8 +46,10 @@ export type Window = {
 	corrections: number, -- Replays the client raised onCorrected for
 	reports: { [string]: number }, -- Reports fired, by kind
 	furthest: number, -- The furthest ahead an ahead report measured, 0 for none
-	depths: { [number]: number }, -- OwnerStates sent, by their queue depth
+	depths: { [number]: number }, -- OwnerStates sent, by their queue depth, acknowledgments among them
 	leads: { number }, -- Each decoded Move's newest command less the newest tick stepped, in arrival order
+	acks: number, -- Acknowledgments sent in place of an OwnerState
+	trips: { number }, -- The round trip in commands each read the client's clock calibrates from would give
 }
 
 local Link = {}
@@ -64,6 +69,7 @@ local function copyWire(wire: any): any
 		headYaw = wire.headYaw,
 		headPitch = wire.headPitch,
 		fields = fields,
+		check = wire.check,
 	}
 end
 
@@ -82,6 +88,8 @@ local function newWindow(): Window
 		furthest = 0,
 		depths = {},
 		leads = {},
+		acks = 0,
+		trips = {},
 	}
 end
 
@@ -100,6 +108,7 @@ function Link.new(): { [string]: any }
 	local Commands: any = load(tread.Server.Commands)
 	local Connections: any = load(tread.Server.Connections)
 	local Fields: any = load(tread.Codec.Fields)
+	local Hash: any = load(tread.Codec.Hash)
 	local OwnerState: any = load(tread.Codec.OwnerState)
 	local Predict: any = load(tread.Client.Predict)
 	local Reports: any = load(tread.Server.Reports)
@@ -138,6 +147,9 @@ function Link.new(): { [string]: any }
 		serverFrame = FRAME, -- Seconds between the server's Heartbeats
 		clientFrame = FRAME, -- Seconds between the client's frames
 		catchUp = server.catchUp,
+		acks = false, -- Whether a real command whose check agrees gets an acknowledgment in place of its OwnerState
+		ackDelay = 0, -- Seconds an acknowledgment leaves after the OwnerState it stands in for would have
+		fullEvery = nil :: number?, -- Ticks apart a full OwnerState goes though the check agreed, as with no checks
 		now = 0,
 		tick = 0, -- The newest tick the server ran, unwrapped
 		newest = nil :: number?, -- The newest command number the client sent
@@ -175,6 +187,8 @@ function Link.new(): { [string]: any }
 	local inbound: { Packet } = {}
 	local lastUp: number = 0
 	local lastDown: number = 0
+	local checks: { [number]: number } = {} -- The newest check the server heard for each command number
+	local issued: boolean = false -- Whether a Move carried a command since the client's last read
 
 	-- Puts each Move in flight, its wires copied, arriving no sooner than the Move before it
 	local function send(move: any)
@@ -191,11 +205,14 @@ function Link.new(): { [string]: any }
 			received = move.received,
 			delay = move.delay,
 			wires = wires,
+			tick = 0,
+			depth = 0,
 		})
 
 		rig.window.moves += 1
 		if #wires > 0 then
 			rig.newest = move.command
+			issued = true
 			table.insert(rig.window.numbers, move.command)
 		end
 	end
@@ -234,12 +251,22 @@ function Link.new(): { [string]: any }
 	local nextServer: number = rig.serverFrame
 	local nextClient: number = rig.clientFrame
 
-	-- One server tick: the Moves that arrived decoded, the body stepped, and its OwnerState put in flight
+	--[[
+	    One server tick: the Moves that arrived decoded, each command's newest
+	    check kept, the body stepped, and its OwnerState put in flight, or in
+	    acknowledgment mode its first bytes alone a while later when the
+	    command it ran was real and its check agreed
+	--]]
+
 	local function serverTick()
 		for _, packet: Packet in inbound do
 			-- A Move with no command carries no number to measure
 			if #packet.wires > 0 then
 				table.insert(rig.window.leads, Sequence.difference(packet.command, rig.tick % WRAP))
+			end
+
+			for index: number, wire: any in packet.wires do
+				checks[(packet.command - (index - 1)) % WRAP] = wire.check
 			end
 
 			Commands.receive(
@@ -272,10 +299,24 @@ function Link.new(): { [string]: any }
 		rig.window.depths[body.depth] = (rig.window.depths[body.depth] or 0) + 1
 
 		local length: number = OwnerState.write(body, scratch, 0, layout, limits)
+		local late: number = 0
+
+		local every: number? = rig.fullEvery
+		local forced: boolean = every ~= nil and rig.tick % every == 0
+		if rig.acks and not standIn and not forced then
+			local hash: number = Hash.range(scratch, ACK_BYTES, length - ACK_BYTES)
+
+			if checks[command.number] == hash then
+				length = ACK_BYTES
+				late = rig.ackDelay
+				rig.window.acks += 1
+			end
+		end
+
 		local data: buffer = buffer.create(length)
 		buffer.copy(data, 0, scratch, 0, length)
 
-		lastDown = math.max(rig.now + rig.down, lastDown)
+		lastDown = math.max(rig.now + rig.down + late, lastDown)
 		table.insert(toClient, {
 			arrival = lastDown,
 			command = 0,
@@ -284,6 +325,8 @@ function Link.new(): { [string]: any }
 			delay = 0,
 			wires = {},
 			data = data,
+			tick = wire,
+			depth = body.depth,
 		})
 	end
 
@@ -311,10 +354,26 @@ function Link.new(): { [string]: any }
 		end
 	end
 
-	-- A client frame: the OwnerStates arrived by now read, then the frame's time run
+	--[[
+	    A client frame: the OwnerStates and acknowledgments arrived by now
+	    read, each one whose queue shows the trip with room left noting the
+	    trip it gives when a command went since the last read, as the clock
+	    calibrates, then the frame's time run
+	--]]
+
 	local function clientFrame()
+		local ahead: number = shared.ticks.ahead
+
 		while toClient[1] and toClient[1].arrival <= rig.now + TOLERANCE do
 			local packet: Packet = table.remove(toClient, 1) :: Packet
+			local newest: number? = rig.newest
+
+			-- A command's number is the tick it runs on, so the trip is the newest sent less the tick and the queue
+			if newest ~= nil and issued and packet.depth > 0 and packet.depth < ahead - 1 then
+				table.insert(rig.window.trips, Sequence.difference(newest, packet.tick) - packet.depth)
+			end
+
+			issued = false
 			Predict.receive(packet.data)
 		end
 

@@ -13,7 +13,7 @@ local Refuses = require("../../Fixtures/Codec/Refuses")
 
 local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
 local SCRATCH_BYTES: number = 896 -- Past the largest layout built here
-local PLAIN_COMMAND: number = 12 -- Tread's 11 B of a command and a u8 length of 0, with no game fields
+local PLAIN_COMMAND: number = 16 -- Tread's 11 B of a command, a u8 length of 0 and a u32 check, with no game fields
 
 -- A copy of length bytes of data from at
 local function slice(data: buffer, at: number, length: number): buffer
@@ -180,10 +180,12 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- A command carries no position, and its game fields come back as their bytes
+	-- A command carries no position, its game fields come back as their bytes, and its check as a number
 	local decoded: any = Tread.decode(version, "command", buffer.create(PLAIN_COMMAND))
 	if decoded.forward ~= 0 or typeof(decoded.fields) ~= "buffer" or buffer.len(decoded.fields) ~= 0 then
 		return false, "Tread.decode of a command with no game fields gave other fields than it holds"
+	elseif decoded.check ~= 0 then
+		return false, `Tread.decode of a command whose check is 0 gave {decoded.check}`
 	end
 
 	-- What it refuses: a version it has no reader for and a layout it doesn't name

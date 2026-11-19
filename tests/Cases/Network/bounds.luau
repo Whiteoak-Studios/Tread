@@ -1,6 +1,7 @@
 --[[
     The generated writers hold each bounded endpoint to the bound the design
-    gives it: a value at the bound is sent, and one past it is refused
+    gives it: a value at the bound is sent, one past it is refused, and the
+    largest Move is 640 B past an empty one, 16 B a command and 64 B of fields
 --]]
 
 --!strict
@@ -8,10 +9,13 @@ local Environment = require("../../Environment")
 
 local SERVER: string = "src/Network/Server.luau"
 local CLIENT: string = "src/Network/Client.luau"
+local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
 local COMMANDS: number = 8 -- The most a Move carries
 local FIELDS: number = 64 -- The most bytes of game fields a command carries
+local COMMAND_WIRE: number = 16 -- A command's own bytes: Tread's 11 B, its fields' u8 length and its u32 check
 local PITCH: number = 16384 -- A command's pitch at 90°
 local STEPS: number = 127 -- An i8 lean's or head offset's steps to its limit either way
+local CHECK: number = 2 ^ 32 - 1 -- The largest check a u32 holds
 local BLOCK: number = 896 -- A relay or withheld block's bytes
 local OWNER: number = 96
 local FEED: number = 160
@@ -33,17 +37,18 @@ local function command(field: string, value: number, fields: number): { [string]
 		headYaw = 0,
 		headPitch = 0,
 		fields = buffer.create(fields),
+		check = 0,
 	}
 	made[field] = value
 
 	return made
 end
 
-local function commands(count: number, fields: number): { { [string]: any } }
+local function commands(count: number, fields: number, check: number?): { { [string]: any } }
 	local made: { { [string]: any } } = {}
 
 	for _ = 1, count do
-		table.insert(made, command("buttons", 0, fields))
+		table.insert(made, command("check", check or 0, fields))
 	end
 
 	return made
@@ -59,6 +64,15 @@ local function entries(count: number): { { [string]: any } }
 	return made
 end
 
+-- The bytes the client sends for a Move fired alone and flushed, by its own count
+local function flushed(client: any, wires: { { [string]: any } }): number
+	local before: number = client.stats().bytesOut
+	client.Move.fire(0, 0, 0, 0, wires)
+	client.flush()
+
+	return client.stats().bytesOut - before
+end
+
 return function (): (boolean, string | nil)
 	local server: any = Environment.load(SERVER)
 	local client: any = Environment.load(CLIENT)
@@ -66,13 +80,15 @@ return function (): (boolean, string | nil)
 	local move: (...any) -> () = client.Move.fire
 
 	local sends: { Send } = {
-		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, commands(COMMANDS, FIELDS) }, sent = true },
+		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, commands(COMMANDS, FIELDS, CHECK) }, sent = true },
 		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, commands(COMMANDS + 1, 0) }, sent = false },
 		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, commands(1, FIELDS + 1) }, sent = false },
 		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, { command("pitch", -PITCH, 0) } }, sent = true },
 		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, { command("pitch", PITCH + 1, 0) } }, sent = false },
 		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, { command("headYaw", -STEPS, 0) } }, sent = true },
 		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, { command("lean", -STEPS - 1, 0) } }, sent = false },
+		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, commands(1, 0, CHECK + 1) }, sent = false },
+		{ name = "Move", send = move, arguments = { 0, 0, 0, 0, commands(1, 0, -1) }, sent = false },
 		{ name = "Relay", send = server.Relay.fireAll, arguments = { buffer.create(BLOCK) }, sent = true },
 		{ name = "Relay", send = server.Relay.fireAll, arguments = { buffer.create(BLOCK + 1) }, sent = false },
 		{ name = "Withheld", send = server.Withheld.fireAll, arguments = { buffer.create(BLOCK) }, sent = true },
@@ -101,6 +117,24 @@ return function (): (boolean, string | nil)
 		if not sent and string.find(`{message}`, row.name, 1, true) ~= 1 then
 			return false, `{row.name} send {index} failed with something other than its writer's refusal: {message}`
 		end
+	end
+
+	-- The Move's size, each flush framed alike, after a first flush has sent the handshake
+	local globals: any = Environment.load(GLOBALS)
+	local network: any = globals.game:GetService("ReplicatedStorage").Packages.Tread.Network
+	globals.require(network.Server)
+
+	local joined: any = globals.require(network.Client)
+	joined.flush()
+
+	local empty: number = flushed(joined, {})
+	local one: number = flushed(joined, commands(1, 0))
+	local largest: number = flushed(joined, commands(COMMANDS, FIELDS, CHECK))
+	local most: number = COMMANDS * (COMMAND_WIRE + FIELDS)
+	if one - empty ~= COMMAND_WIRE then
+		return false, `A command with no game fields took {one - empty} B of a Move, not {COMMAND_WIRE}`
+	elseif largest - empty ~= most then
+		return false, `The largest Move took {largest - empty} B past an empty one, not {most}`
 	end
 
 	return true, nil

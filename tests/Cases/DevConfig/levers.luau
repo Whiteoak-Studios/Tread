@@ -1,7 +1,7 @@
 --[[
     The dev server's settings keep the out-of-view rate and records as
-    changes on when Workspace's TreadLeversOff is absent or false, and turn
-    both off when it is true, with every other setting the same
+    changes on when Workspace's TreadLeversOff is absent or false, turn both
+    off when it is true, and change nothing else but the owner's checks
 --]]
 
 --!strict
@@ -59,16 +59,17 @@ return function (): (boolean, string | nil)
 		return false, `With {ATTRIBUTE} true, relay holds more or less than changes set false`
 	end
 
-	-- 3) True, nothing else changed: the levers put back, the settings hash as they do absent
+	-- 3) True, nothing else changed: the three levers put back, the settings hash as they do absent
 	local tiers: { [string]: any } = table.clone(off.tiers)
 	tiers.outOfView = absent.tiers.outOfView
 
 	local restored: { [string]: any } = table.clone(off)
 	restored.tiers = tiers
 	restored.relay = absent.relay
+	restored.owner = absent.owner
 
 	if Config.hash(restored) ~= Config.hash(absent) then
-		return false, `With {ATTRIBUTE} true, a setting besides the two levers changed`
+		return false, `With {ATTRIBUTE} true, a setting besides the three levers changed`
 	end
 
 	return true, nil

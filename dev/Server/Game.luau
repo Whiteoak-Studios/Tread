@@ -184,6 +184,7 @@ function Game.start()
 		relevancy = SETTINGS.relevancy,
 		tiers = SETTINGS.tiers,
 		relay = SETTINGS.relay,
+		owner = SETTINGS.owner,
 		weights = SETTINGS.weights,
 		shotNear = SETTINGS.shotNear,
 		budget = SETTINGS.budget,

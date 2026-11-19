@@ -36,6 +36,7 @@ local RECORD_PITCH_STEPS: number = 127 -- A record's i8 pitch, steps to 90°
 local MAX_COMMANDS: number = 8
 local MOVE_REPEATS: number = 2 -- The commands each Move repeats before its new ones, so one lost Move costs nothing
 local COMMAND_BYTES: number = 11 -- Tread's own fields in a command, before the game's
+local CHECK_BYTES: number = 4 -- A command's u32 check, which follows the u8 length of its game fields
 local MOVE_STEPS: number = 127 -- A command's i8 move axes, steps to a full input
 local ACK_MASK_BITS: number = 16 -- The relay sequences before the newest acknowledged one that a Move's mask covers
 local FIRST_SEQUENCE: number = 1 -- The first relay sequence a viewer is sent, so an acknowledgment of 0 means none
@@ -50,6 +51,9 @@ local MAX_HELD: number = 16 -- The held-item fields
 -- OwnerState, server to owner once a relay tick: Tread's fields, then the two game blocks behind their prefixes
 local OWNER_STATE_BYTES: number = 42
 local MAX_OWNER_STATE: number = OWNER_STATE_BYTES + PREFIX_BYTES + MAX_SERVER_SET + PREFIX_BYTES + MAX_RULE_STATE
+
+-- An OwnerState's first bytes, its command, tick and queue depth: an acknowledgment, and what a check leaves out
+local OWNER_ACK_BYTES: number = 5
 
 -- The state word's fields wider than a bit, beside its sprint, aim and heavy landing flags
 local MODE_BITS: number = 3 -- The step's mode, with one value spare beside the one kept for a mounted mode
@@ -134,6 +138,7 @@ return {
 	MAX_COMMANDS = MAX_COMMANDS,
 	MOVE_REPEATS = MOVE_REPEATS,
 	COMMAND_BYTES = COMMAND_BYTES,
+	CHECK_BYTES = CHECK_BYTES,
 	MOVE_STEPS = MOVE_STEPS,
 	ACK_MASK_BITS = ACK_MASK_BITS,
 	FIRST_SEQUENCE = FIRST_SEQUENCE,
@@ -144,6 +149,7 @@ return {
 	MAX_HELD = MAX_HELD,
 	OWNER_STATE_BYTES = OWNER_STATE_BYTES,
 	MAX_OWNER_STATE = MAX_OWNER_STATE,
+	OWNER_ACK_BYTES = OWNER_ACK_BYTES,
 	MODE_BITS = MODE_BITS,
 	POSTURE_BITS = POSTURE_BITS,
 	WATER_BITS = WATER_BITS,

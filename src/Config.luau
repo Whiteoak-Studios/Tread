@@ -179,7 +179,14 @@ local SERVER: Specs = {
 		["outOfView?"] = { rate = "positive", cone = "cone", radius = "nonNegative" },
 	},
 
-	["relay?"] = { ["changes?"] = "boolean", ["workers?"] = "whole", ["timeout?"] = "positive" },
+	["relay?"] = {
+		["changes?"] = "boolean",
+		["workers?"] = "whole",
+		["timeout?"] = "positive",
+		["clocks?"] = "boolean",
+	},
+
+	["owner?"] = { ["checks?"] = "boolean" },
 	weights = { near = "positive", far = "positive", shooter = "positive", cone = "positive" },
 	shotNear = { rate = "positive", seconds = "positive" },
 	budget = { soft = "positive", hard = "positive" },
@@ -230,7 +237,7 @@ local SERVER: Specs = {
 	teleport = { timeout = "positive" },
 	beforeCommand = "function",
 	["prestream?"] = "function",
-	["bots?"] = { rtt = "positive" },
+	["bots?"] = { rtt = "positive", ["agree?"] = "boolean" },
 }
 
 local CLIENT: Specs = {
@@ -429,9 +436,14 @@ export type ServerSettings = {
 	},
 
 	-- Whether each record goes as its change since what the viewer last acknowledged, left out or false whole, how
-	-- many Actor workers take the viewers' turns, left out or 0 none, and the seconds a round out on them may take
-	-- before it is given up, which workers need. Read only, as tiers.outOfView is, so a game's own relay table fits
-	read relay: { read changes: boolean?, read workers: number?, read timeout: number? }?,
+	-- many Actor workers take the viewers' turns, left out or 0 none, the seconds a round out on them may take before
+	-- it is given up, which workers need, and whether the relay times each part of its runs for stats, left out or
+	-- false not. Read only, as tiers.outOfView is, so a game's own relay table fits
+	read relay: { read changes: boolean?, read workers: number?, read timeout: number?, read clocks: boolean? }?,
+
+	-- Whether a player whose check agrees with the server's state is sent an acknowledgment in place of its OwnerState,
+	-- left out or false not. Read only, as relay is, so a game's own owner table fits
+	read owner: { read checks: boolean? }?,
 
 	weights: { near: number, far: number, shooter: number, cone: number }, -- The allocator's priorities
 	shotNear: { rate: number, seconds: number },
@@ -479,7 +491,9 @@ export type ServerSettings = {
 
 	beforeCommand: (character: Character, command: Command) -> (),
 	prestream: ((player: Player, at: CFrame) -> any)?, -- Returns a Promise that resolves once the destination is ready
-	bots: { rtt: number }?, -- Seconds a bot's connection reports; only a server that creates bots sets it
+	-- Seconds a bot's connection reports, which only a server that creates bots sets, and whether every bot is taken
+	-- as agreeing with its OwnerState, left out or false not
+	bots: { rtt: number, read agree: boolean? }?,
 }
 
 -- The client entry point's own settings

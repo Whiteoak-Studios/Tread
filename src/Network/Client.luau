@@ -12,7 +12,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Volt = require(ReplicatedStorage.Packages.Volt)
 
-export type Command = { moveX: number, moveZ: number, buttons: number, yaw: number, pitch: number, lean: number, headYaw: number, headPitch: number, fields: buffer }
+export type Command = { moveX: number, moveZ: number, buttons: number, yaw: number, pitch: number, lean: number, headYaw: number, headPitch: number, fields: buffer, check: number }
 export type Rig = "A" | "B"
 export type SlotEntry = { slot: number, taken: { rig: Rig, player: Instance? }? }
 
@@ -47,7 +47,7 @@ local markUnreliable: () -> ()
 local SLOTS_TAKEN_RIG: { "A" | "B" } = { "A", "B" }
 
 local function writeMove(command: number, acknowledged: number, received: number, delay: number, commands: { Command })
-	local offset: number, out: buffer = beginUnreliable(617)
+	local offset: number, out: buffer = beginUnreliable(649)
 	buffer.writeu8(out, offset, 1)
 
 	if type(command) ~= "number" or bit32.band(command, 65535) ~= command then
@@ -159,7 +159,14 @@ local function writeMove(command: number, acknowledged: number, received: number
 		end
 
 		buffer.writeu8(out, offset + 11, buffer.len(fields))
-		offset += 12
+		local check = commandsEntry.check
+
+		if type(check) ~= "number" or bit32.band(check, 4294967295) ~= check then
+			refuseUnreliable("Move.commands[].check: expected u32")
+		end
+
+		buffer.writeu32(out, offset + 12, check)
+		offset += 16
 		buffer.copy(out, offset, fields)
 		offset += buffer.len(fields)
 	end
@@ -426,7 +433,7 @@ end
 
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x12E2915A,
+	hash = 0x0200619C,
 	scope = "Tread",
 	side = "client",
 	idBytes = 1,
@@ -454,7 +461,7 @@ runtime = Volt.start({
 	},
 
 	outgoing = {
-		[1] = { name = "Move", kind = "event", reliable = false, minBytes = 9, maxBytes = 617 },
+		[1] = { name = "Move", kind = "event", reliable = false, minBytes = 9, maxBytes = 649 },
 		[2] = { name = "View", kind = "event", reliable = true, minBytes = 3, maxBytes = 3 },
 	},
 })

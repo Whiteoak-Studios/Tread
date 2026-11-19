@@ -19,7 +19,8 @@ local Tap = require(script.Parent.Tap)
 
 -- Lean and the head offset come back as shares of the game's limits, from -1 to 1, since a decoder isn't given them
 local SHARES: Command.Limits = { lean = 1, headCone = 1 }
-local WIRE_COMMAND_BYTES: number = Constants.COMMAND_BYTES + Constants.PREFIX_BYTES -- Before its game fields
+local CHECK_AT: number = Constants.COMMAND_BYTES + Constants.PREFIX_BYTES -- A command's check, after its fields' length
+local WIRE_COMMAND_BYTES: number = CHECK_AT + Constants.CHECK_BYTES -- Before its game fields
 
 -- A change record's fields in the record's units, as Record reads them
 local YAW_SCALE: number = Constants.ANGLE_STEPS / (2 * math.pi)
@@ -330,7 +331,7 @@ local function readOwnerState(data: buffer): Decoded
 	return readOwner(data, 0, buffer.len(data))
 end
 
--- One command as Move carries it: Tread's 11 B, then the game's fields behind their u8 length
+-- One command as Move carries it: Tread's 11 B, its game fields' u8 length, its u32 check, then those fields
 local function readCommand(data: buffer): Decoded
 	local length: number = buffer.len(data)
 	if length < WIRE_COMMAND_BYTES then
@@ -352,6 +353,7 @@ local function readCommand(data: buffer): Decoded
 		headYaw = buffer.readi8(data, 9),
 		headPitch = buffer.readi8(data, 10),
 		fields = slice(data, WIRE_COMMAND_BYTES, fieldsLength),
+		check = buffer.readu32(data, CHECK_AT),
 	}
 
 	local command: State.Command = Command.new()
@@ -370,6 +372,7 @@ local function readCommand(data: buffer): Decoded
 		headYaw = command.headYaw,
 		headPitch = command.headPitch,
 		fields = wire.fields,
+		check = wire.check,
 	}
 end
 

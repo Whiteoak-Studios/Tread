@@ -53,6 +53,10 @@ local MAX_WATCHERS: number = Constants.MAX_WATCHERS
 
 local STEP_START: number = 256 -- The steps one run holds before the front grows their buffers
 
+-- Each part of a turn the relay's clocks time, its place from 0 in the order Wire.CLOCKS names them first
+local LAP: { [string]: number } = { head = 0, gather = 1, measure = 2, settle = 3, schedule = 4, place = 5, send = 6 }
+local LAPS: number = 7 -- The parts LAP numbers
+
 -- What a viewer holds for a slot, a bit each
 local RELEVANT: number = 2 ^ 0 -- Inside its relevancy for the slot's kind
 local NEAR: number = 2 ^ 1 -- Inside the near tier
@@ -138,6 +142,7 @@ export type Settings = {
 	earshot: { number }, -- Each footstep kind's squared range by its code, negative for a kind the game gives none
 	outOfView: OutOfView?, -- Nil while the game gives none, so no player is held to it
 	changes: boolean, -- Whether records go as changes
+	clocks: boolean, -- Whether each turn times its parts, as relay.clocks says
 }
 
 -- Everything a turn calls outside itself, handed in once at start
@@ -336,6 +341,10 @@ local Elapsed: number = 1 -- The relay ticks since the run before, more than 1 a
 local TickWire: number = 0 -- The relay tick this run's blocks carry, a u16
 local RecordsSent: number = 0 -- The records the tier ticks' lists placed in a block, since start
 local RecordsCut: number = 0 -- And those a viewer's room left out
+
+-- With relay.clocks on, the seconds each part of this run's turns took, summed over the turns, an f64 a part by its
+-- place in LAP, and when the part being timed began
+local Clock: { on: boolean, laps: buffer, from: number } = { on = false, laps = buffer.create(LAPS * 8), from = 0 }
 
 -- The world's buffers, each also held here so a turn reads it as an upvalue
 local Present: buffer = buffer.create(SLOTS * 4)
@@ -536,6 +545,7 @@ function Turn.start(settings: Settings, ports: Ports)
 	NpcNearSquared = settings.npcNearSquared
 	NpcFarRate = settings.npcFarRate
 	Earshot = settings.earshot
+	Clock.on = settings.clocks == true
 
 	-- The history and the changes' cache, about 4.6 MiB made once, only while records go as changes
 	if settings.changes then
@@ -549,8 +559,9 @@ end
 
 --[[
     Begins a run: its count, its relay tick unwrapped, the relay ticks since
-    the run before and the tick its blocks carry, and while records go as
-    changes, the history's plane its records go in
+    the run before and the tick its blocks carry, its turns' clocks from 0
+    while they are on, and while records go as changes, the history's plane
+    its records go in
 --]]
 
 function Turn.begin(run: number, tick: number, elapsed: number, wire: number)
@@ -558,6 +569,10 @@ function Turn.begin(run: number, tick: number, elapsed: number, wire: number)
 	RunTick = tick
 	Elapsed = elapsed
 	TickWire = wire
+
+	if Clock.on then
+		buffer.fill(Clock.laps, 0, 0)
+	end
 
 	-- The plane names the run and its tick for every change against its records
 	if Deltas.on then
@@ -1494,6 +1509,14 @@ local function claim(view: View, own: number?)
 	buffer.writeu16(view.flags, own * 2, flags)
 end
 
+-- Adds the seconds since the part being timed began to that part of the run's turns, and begins the next part
+local function lapped(part: number)
+	local now: number = os.clock()
+	local at: number = part * 8
+	buffer.writef64(Clock.laps, at, buffer.readf64(Clock.laps, at) + now - Clock.from)
+	Clock.from = now
+end
+
 --[[
     Every other present body against the viewer that the run could change:
     those in the cells its kind's reach spans, the lesser of the kind's
@@ -1508,6 +1531,7 @@ end
 --]]
 
 local function consider(view: View, viewer: Viewer, own: number?)
+	local clocked: boolean = Clock.on
 	local origin: vector = viewer.position
 	local distance: number = view.distance
 	local grid: Grid = Radii.grid
@@ -1610,6 +1634,10 @@ local function consider(view: View, viewer: Viewer, own: number?)
 
 	grid.visited += count
 
+	if clocked then
+		lapped(LAP.gather)
+	end
+
 	-- Out of range and holding nothing is all the rest would leave a pair, so only the others stay listed. SLOTS is a
 	-- power of two, so a visit's slot is its low bits
 	local viewFlags: buffer = view.flags
@@ -1689,6 +1717,10 @@ local function consider(view: View, viewer: Viewer, own: number?)
 		table.sort(visits)
 	end
 
+	if clocked then
+		lapped(LAP.measure)
+	end
+
 	local viewGenerations: buffer = view.generations
 	local viewKinds: buffer = view.kinds
 	local places: buffer = view.places
@@ -1753,6 +1785,10 @@ local function consider(view: View, viewer: Viewer, own: number?)
 		end
 
 		buffer.writeu16(viewFlags, slot * 2, flags)
+	end
+
+	if clocked then
+		lapped(LAP.settle)
 	end
 end
 
@@ -2357,13 +2393,19 @@ end
     against it, then its blocks, each copied to its watchers: pending hides,
     reveals and looks, the footsteps it can hear, the records it is owed
     inside the hard budget and the rest inside the soft budget, and last
-    the withheld block, to its watchers alone
+    the withheld block, to its watchers alone, each part timed into
+    Turn.clocks while relay.clocks is on
 
     @ back | the newest block its client was sent watching, on the run it
     is back from a spectate, nil on any other
 --]]
 
 function Turn.turn(viewer: Viewer, back: number?)
+	local clocked: boolean = Clock.on
+	if clocked then
+		Clock.from = os.clock()
+	end
+
 	local key: Key = viewer.key
 	local view: View = viewOf(key)
 
@@ -2392,6 +2434,11 @@ function Turn.turn(viewer: Viewer, back: number?)
 	end
 
 	claim(view, own)
+
+	if clocked then
+		lapped(LAP.head)
+	end
+
 	consider(view, viewer, own)
 
 	-- Where the view cone looks while the viewer has a body: its newest look with the out-of-view rate, until its
@@ -2410,6 +2457,10 @@ function Turn.turn(viewer: Viewer, back: number?)
 
 	local hides: number, reveals: number, restyles: number, floors: number, fills: number =
 		schedule(view, own, origin, looking)
+
+	if clocked then
+		lapped(LAP.schedule)
+	end
 
 	-- Its traffic is read the first time it needs room, so a viewer with nothing due makes no read
 	Used = nil
@@ -2447,10 +2498,19 @@ function Turn.turn(viewer: Viewer, back: number?)
 
 	placeRecords(view, Floors, floors, Hard)
 	placeRecords(view, Fills, fills, Soft)
+
+	if clocked then
+		lapped(LAP.place)
+	end
+
 	flush()
 
 	if view.watcherCount > 0 then
 		withhold(view)
+	end
+
+	if clocked then
+		lapped(LAP.send)
 	end
 end
 
@@ -2529,6 +2589,17 @@ end
 
 function Turn.counts(): (number, number, number)
 	return RecordsSent, RecordsCut, Radii.grid.visited
+end
+
+--[[
+    With relay.clocks on, the seconds each part of this run's turns took so
+    far, summed over them, an f64 a part: head, gather, measure, settle,
+    schedule, place and send, as Wire.CLOCKS names them first. The buffer is
+    the core's own, rewritten by each turn and zeroed by each begin
+--]]
+
+function Turn.clocks(): buffer
+	return Clock.laps
 end
 
 return Turn

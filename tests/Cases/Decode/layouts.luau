@@ -12,6 +12,7 @@ local Same = require("../../Fixtures/Codec/Same")
 
 local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
 local CLOSE: number = 1e-9
+local CHECK: number = 0xC0FFEE42 -- A command's check with its top bit set, so a signed or narrower read would show
 
 -- A copy of length bytes of data from at
 local function slice(data: buffer, at: number, length: number): buffer
@@ -78,7 +79,7 @@ return function (): (boolean, string | nil)
 		return false, differs
 	end
 
-	-- A command in Move's layout: Tread's 11 B, then its game fields behind their length
+	-- A command in Move's layout: Tread's 11 B, its game fields' length, its check, then those fields
 	local command: { [string]: any } = Command.new()
 	command.forward, command.jump, command.headYaw = 1, true, 75
 	command.fields = Game.high.command
@@ -87,22 +88,30 @@ return function (): (boolean, string | nil)
 	Command.write(command, wire, layout, Game.limits)
 
 	local fieldsLength: number = buffer.len(wire.fields)
-	local commandData: buffer = buffer.create(12 + fieldsLength)
+	local commandData: buffer = buffer.create(16 + fieldsLength)
 	buffer.writei8(commandData, 1, wire.moveZ)
 	buffer.writeu16(commandData, 2, wire.buttons)
 	buffer.writei8(commandData, 9, wire.headYaw)
 	buffer.writeu8(commandData, 11, fieldsLength)
-	buffer.copy(commandData, 12, wire.fields)
+	buffer.writeu32(commandData, 12, CHECK)
+	buffer.copy(commandData, 16, wire.fields)
 
 	decoded = Decode.decode(version, "command", commandData)
 	if decoded.forward ~= 1 or decoded.jump ~= true or decoded.headYaw ~= 1 or decoded.crouch ~= false then
 		return false, "The command decoded with other fields than it was written with"
+	elseif decoded.check ~= CHECK then
+		return false, `The command decoded with check {decoded.check}, not the {CHECK} it was written with`
 	end
 
 	differs = Same(wire.fields, decoded.fields, "command fields")
 	if differs then
 		return false, differs
 	end
+
+	-- Game fields straight after their length, with no check between, are no command
+	local unchecked: buffer = buffer.create(12 + fieldsLength)
+	buffer.writeu8(unchecked, 11, fieldsLength)
+	buffer.copy(unchecked, 12, wire.fields)
 
 	-- OwnerState, its two game blocks as their bytes
 	local state: { [string]: any } = State.new()
@@ -223,8 +232,9 @@ return function (): (boolean, string | nil)
 		{ "not ghost", version, "ghost", recordData },
 		{ "not a string", version, "record", "bytes" },
 		{ "record is 16 B, not 15", version, "record", buffer.create(15) },
-		{ "at least 12 B", version, "command", buffer.create(11) },
+		{ "at least 16 B", version, "command", buffer.create(15) },
 		{ "don't end", version, "command", slice(commandData, 0, buffer.len(commandData) - 1) },
+		{ "don't end", version, "command", unchecked },
 	}
 
 	for _, row: { any } in refusals do

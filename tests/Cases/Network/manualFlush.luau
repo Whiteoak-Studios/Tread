@@ -11,6 +11,7 @@ local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
 local STEPS: number = 3 -- Heartbeats, each of which would send at Volt's default cadence of one
 local BLOCK: string = "relay block"
 local FIELDS: string = "game fields"
+local CHECK: number = 0xDEADBEEF -- A check with its top bit set, so a signed read would show
 
 return function (): (boolean, string | nil)
 	local globals: any = Environment.load(GLOBALS)
@@ -48,6 +49,7 @@ return function (): (boolean, string | nil)
 		headYaw = -4,
 		headPitch = 9,
 		fields = buffer.fromstring(FIELDS),
+		check = CHECK,
 	}
 
 	client.Move.fire(7, 6, 1, 100, { sent })

@@ -51,6 +51,7 @@ type Slot = {
 	headPitch: number,
 	fields: buffer, -- Its game fields' bytes
 	length: number, -- How many of them it filled
+	check: number, -- The newest check a copy carried from a Move not older than the newest heard, 0 for none
 }
 
 -- Everything Commands keeps for one connection
@@ -70,7 +71,11 @@ type Intake = {
 
 local Intakes: { [Connection]: Intake } = {}
 local Incoming: Move.Incoming = Move.incoming() -- Each Move decodes here first, so a refused one changes nothing
+local Skip: { boolean } = table.create(Constants.MAX_COMMANDS, false) -- The positions of a Move the decode passes over
 local Now: number? = nil -- The newest tick stepped, counted on past the u16 wrap, nil before the first
+
+local Lazy: boolean = true -- Whether a copy the same as the one the ring holds for its tick goes unread
+local Skipped: number = 0 -- The commands passed over unread since start
 
 local Clock: () -> number = os.clock -- Seconds, which a command's arrival and the tick that takes it are timed on
 local TookAt: number = 0 -- The clock at the newest tick's first take, which each command that tick takes waited until
@@ -147,6 +152,38 @@ function Commands.now(): number
 	return Clock()
 end
 
+--[[
+    Sets whether the Moves received from now on leave unread each copy whose
+    tick the ring holds with the same first copy, for a dev bench's before
+    and after on one server. It is on from start
+--]]
+
+function Commands.useLazy(on: boolean)
+	if type(on) ~= "boolean" then
+		error(`Commands.useLazy takes true or false, not {on}`, 2)
+	end
+
+	Lazy = on
+end
+
+--[[
+    Whether lazy decode is on, for a dev bench's lines on its before and
+    after
+--]]
+
+function Commands.lazyOn(): boolean
+	return Lazy
+end
+
+--[[
+    How many commands lazy decode has passed over unread since start, a
+    running count a dev bench reads before and after
+--]]
+
+function Commands.skipped(): number
+	return Skipped
+end
+
 -- One slot of a ring, holding no tick yet
 local function slot(): Slot
 	return {
@@ -164,6 +201,7 @@ local function slot(): Slot
 		headPitch = 0,
 		fields = buffer.create(Constants.MAX_COMMAND_FIELDS),
 		length = 0,
+		check = 0,
 	}
 end
 
@@ -321,8 +359,9 @@ end
 
 --[[
     Files a command's first copy in its tick's slot: the wire as Volt
-    delivered it, which every later copy is compared with, and the decoded
-    command, swapped with the one the slot held so neither is made anew
+    delivered it, which every later copy is compared with, its check, and
+    the decoded command, swapped with the one the slot held so neither is
+    made anew
 --]]
 
 local function keep(held: Slot, full: number, status: Status, arrived: number, wire: Wire, position: number)
@@ -337,6 +376,7 @@ local function keep(held: Slot, full: number, status: Status, arrived: number, w
 	held.lean = wire.lean
 	held.headYaw = wire.headYaw
 	held.headPitch = wire.headPitch
+	held.check = wire.check
 
 	local length: number = buffer.len(wire.fields)
 	buffer.copy(held.fields, 0, wire.fields, 0, length)
@@ -380,13 +420,51 @@ local function advance(intake: Intake, command: Command): boolean
 end
 
 --[[
+    Marks in Skip each command of a Move the filing loop would find held and
+    the same as its first copy: inside the ring's window, its tick in its
+    slot, and no difference that differs finds, so the decode numbers it
+    and reads nothing else. Gives Skip, or nil when it marks none
+--]]
+
+local function mark(intake: Intake, now: number, command: number, wires: { Wire }): { boolean }?
+	local slots: { Slot } = intake.slots
+	local marked: number = 0
+
+	for position: number = 1, #wires do
+		local lead: number = Sequence.difference((command - (position - 1)) % WRAP, now)
+		local same: boolean = false
+
+		if lead <= Ahead and lead > -Behind then
+			local full: number = now + lead
+			local held: Slot = slots[full % Size + 1]
+			same = held.full == full and not differs(held, wires[position])
+		end
+
+		Skip[position] = same
+		if same then
+			marked += 1
+		end
+	end
+
+	if marked == 0 then
+		return nil
+	end
+
+	Skipped += marked
+
+	return Skip
+end
+
+--[[
     Files each command of a Move as Volt's Move listener delivers it by the
     tick it belongs to: a first copy up to ticks.ahead past the newest tick
     stepped waits for its tick, one further ahead is dropped, and one whose
     tick has run is discarded, its jump and crouch presses and its carried
     fields kept for the next real command. A later copy that differs from
-    the first is ignored and reported. A Move whose game fields fail their
-    declarations is refused whole, its acknowledgments included
+    the first is ignored and reported, and one the same is not read again
+    while lazy decode is on, its check kept in place of the first's when
+    its Move is not older than the newest heard. A Move whose game fields
+    fail their declarations is refused whole, its acknowledgments included
 
     @ arrived | the clock when Volt delivered the Move, Commands.now() when left out
 --]]
@@ -407,7 +485,14 @@ function Commands.receive(
 
 	local intake: Intake = intakeOf(connection)
 
-	local failed: number? = Move.decode(command, acknowledged, received, delay, wires, layout, Limits, Incoming)
+	-- Until a tick has run the ring holds nothing, so there is nothing to pass over
+	local now: number? = Now
+	local skip: { boolean }? = nil
+	if Lazy and now ~= nil then
+		skip = mark(intake, now, command, wires)
+	end
+
+	local failed: number? = Move.decode(command, acknowledged, received, delay, wires, layout, Limits, Incoming, skip)
 	if failed then
 		Reports.fire(connection.player, "schema", failed)
 
@@ -428,7 +513,6 @@ function Commands.receive(
 	end
 
 	-- Until a tick has run there is none to file a command against
-	local now: number? = Now
 	if now == nil then
 		return
 	end
@@ -453,8 +537,12 @@ function Commands.receive(
 			local wire: Wire = wires[position]
 
 			if held.full == full then
-				if differs(held, wire) then
+				-- A copy marked before the decode was compared there and found the same. A client that replayed
+				-- sends the same command with a newer check, which a Move older than the newest heard can't carry
+				if not (skip and skip[position]) and differs(held, wire) then
 					Reports.fire(connection.player, "moveTamper", number)
+				elseif newer >= 0 then
+					held.check = wire.check
 				end
 			else
 				advance(intake, decoded)
@@ -768,6 +856,29 @@ function Commands.depth(connection: Connection): number
 	end
 
 	return depth
+end
+
+--[[
+    The check kept with the command of a number, the hash of the state its
+    client predicted after it, 0 for none, while the ring still holds that
+    command and its tick ran it. Nil for a tick that ran a stand-in, a
+    command late, dropped or not yet run, and one the ring no longer holds
+--]]
+
+function Commands.check(connection: Connection, number: number): number?
+	local intake: Intake? = Intakes[connection]
+	local now: number? = Now
+	if not intake or now == nil then
+		return nil
+	end
+
+	local full: number = now + Sequence.difference(number, now)
+	local held: Slot = intake.slots[full % Size + 1]
+	if held.full ~= full or held.status ~= "ran" then
+		return nil
+	end
+
+	return held.check
 end
 
 --[[

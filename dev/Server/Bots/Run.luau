@@ -18,12 +18,14 @@ local Tread = require(Packages.Tread)
 local Volt = require(Packages.Volt)
 
 local Command = require(Packages.Tread.Codec.Command)
+local Commands = require(Packages.Tread.Server.Commands)
 local Relay = require(Packages.Tread.Server.Relay)
 local Tick = require(Packages.Tread.Server.Tick)
 
 local Bot = require(ServerScriptService.Server.Bots.Bot)
 local Calibration = require(ServerScriptService.Server.Calibration)
 local Cells = require(ServerScriptService.Server.Bots.Cells)
+local Compare = require(ServerScriptService.Server.Bots.Compare)
 local Config = require(ServerScriptService.Server.Bots.Config)
 local Fleet = require(ServerScriptService.Server.Bots.Fleet)
 local Game = require(ServerScriptService.Server.Game)
@@ -58,6 +60,9 @@ local APART: number = 16807 -- Scales a spawn's redraw seed off the stream every
 local TURN: number = 2 * math.pi
 local MILLISECONDS: number = 1000 -- A second's, which stage times print in
 local PERCENT: number = 100 -- Turns a share into the number a pNN label shows
+local P50: number = 0.5
+local P95: number = 0.95
+local LOOP: string = "^native loop .-p50/p95 ([%d%.]+)/" -- The calibration line's native loop p50, its first figure
 local FIGURE: string = "%.3f" -- Each stats figure and stage time as the summaries print it
 local RAW: string = "%.4g" -- Four significant digits, for frame times and Stats' figures, whose units differ
 local SEPARATOR: string = "; " -- Between the parts of one line
@@ -72,6 +77,7 @@ local PROBES: { Vector2 } = { Vector2.zero, Vector2.new(-1, -1), Vector2.new(-1,
 local PLACES: { string } = { "the tick's Heartbeat", "the one after", "the one after that", "later" }
 
 type Area = Config.Area
+type Figures = Compare.Figures
 type Group = Config.Group
 type Scenario = Config.Scenario
 type Timing = Config.Timing
@@ -97,6 +103,19 @@ export type Readout = {
 	bots: { number }, -- Seconds of the bots' stage in each
 	through: number, -- The newest Heartbeat taken, by the loop's count
 	lost: number, -- Heartbeats the ring no longer held when they came to be taken
+}
+
+-- What a window took, which its closing lines and its figures are made from
+export type Taken = {
+	sampled: Sampled,
+	elapsed: number, -- Seconds the window ran
+	readout: Readout,
+	totals: { number }, -- Each finished tick's summed stages and any finish, in milliseconds
+	finishes: { number }, -- Each held tick's finish alone, in milliseconds
+	roundsDropped: number, -- The relay's rounds given up past its timeout
+	samples: Samples,
+	rates: Samples, -- The configured counts over each read's ticks or relay runs
+	skipped: number, -- Commands lazy decode passed over unread
 }
 
 -- What watches a run's window beside the stats, started after the warm-up's read and stopped after the window
@@ -733,14 +752,8 @@ local function tickLine(
 	return table.concat(parts, SEPARATOR)
 end
 
---[[
-    Tread's time a Heartbeat by its place in the tick at the configured
-    shares, less the bots' stage, which shows apart, with the Heartbeats in
-    each place, the relay's rounds in by the next Heartbeat and later, and
-    the Heartbeats the ring lost before the window took them
---]]
-
-local function heartbeatLine(label: string, readout: Readout): string
+-- Tread's time less the bots' stage and the bots' stage's own in each Heartbeat, in milliseconds, a list a place
+local function byPlace(readout: Readout): ({ { number } }, { { number } })
 	local tread: { { number } } = {}
 	local bots: { { number } } = {}
 	for place: number = 1, #PLACES do
@@ -754,6 +767,19 @@ local function heartbeatLine(label: string, readout: Readout): string
 			table.insert(bots[place], readout.bots[index] * MILLISECONDS)
 		end
 	end
+
+	return tread, bots
+end
+
+--[[
+    Tread's time a Heartbeat by its place in the tick at the configured
+    shares, less the bots' stage, which shows apart, with the Heartbeats in
+    each place, the relay's rounds in by the next Heartbeat and later, and
+    the Heartbeats the ring lost before the window took them
+--]]
+
+local function heartbeatLine(label: string, readout: Readout): string
+	local tread: { { number } }, bots: { { number } } = byPlace(readout)
 
 	local parts: { string } = {}
 	for place: number, name: string in PLACES do
@@ -798,12 +824,19 @@ end
     interval with the real player count and each real player's bytes over
     the last second beside it, each read printed as it comes, the server's
     frames, every finished tick's summed stages and finish, Tread's time
-    each Heartbeat and the counts taken beside, their lines printed after,
-    and the percentiles of every stats figure, with every figure's samples.
-    It ends on its own deadline
+    each Heartbeat, the counts, the relay's clocks while on and the commands
+    lazy decode skipped, their lines printed after, then the percentiles of
+    every stats figure, every figure's samples and the figures the lines
+    carry. It ends on its own deadline
 --]]
 
-local function window(label: string, scenario: Scenario, timing: Timing, made: Made, asked: boolean?): (string, Samples)
+local function window(
+	label: string,
+	scenario: Scenario,
+	timing: Timing,
+	made: Made,
+	asked: boolean?
+): (string, Samples, Figures)
 	local server: Tread.Server = Game.get()
 	local Network = require(Packages.Tread.Network.Server) -- Tread's own scope, which each viewer's bytes are counted on
 	local samples: Samples = {}
@@ -820,6 +853,7 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 
 	local started: number = os.clock()
 	local deadline: number = started + timing.window
+	local skippedBefore: number = Commands.skipped()
 	local stalled: boolean = false
 	local second: number = 0
 
@@ -858,6 +892,7 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 		end
 
 		Run.counts(stats, rates)
+		Run.clocks(stats, samples)
 
 		local relayDropped: any = stats.relayDropped
 		if type(relayDropped) == "number" then
@@ -891,15 +926,27 @@ local function window(label: string, scenario: Scenario, timing: Timing, made: M
 	end
 
 	local elapsed: number = os.clock() - started
+	local skipped: number = Commands.skipped() - skippedBefore
 	beats:Disconnect()
 	made.beats = nil
 
-	print(serverLine(label, sampled, elapsed))
-	print(heartbeatLine(label, readout))
-	print(tickLine(label, totals, samples, finishes, dropped))
-	print(countsLine(label, rates))
+	local taken: Taken = {
+		sampled = sampled,
+		elapsed = elapsed,
+		readout = readout,
+		totals = totals,
+		finishes = finishes,
+		roundsDropped = dropped,
+		samples = samples,
+		rates = rates,
+		skipped = skipped,
+	}
 
-	return `{label} summary over {second} reads, p50/p95/p99: {summary(samples)}`, samples
+	for _, line: string in Run.lines(label, taken) do
+		print(line)
+	end
+
+	return `{label} summary over {second} reads, p50/p95/p99: {summary(samples)}`, samples, Run.figures(taken)
 end
 
 -- A bot group's line: its bots' counts and motion, the holds, and its reports. A moderator's need not hear or send
@@ -1083,7 +1130,8 @@ end
     layout with every viewer at any render distance given, the warm-up, the
     window with any probe beside it, and then the removal of everything it
     made, checked against what the handle lists, the real players put back
-    and the mode off again. A probe that started is stopped whatever happened
+    and the mode off again. A probe that started is stopped whatever happened.
+    It gives the figures its window's lines carry too, nil when none ran
 --]]
 
 local function runSeed(
@@ -1094,14 +1142,14 @@ local function runSeed(
 	probe: Probe?,
 	distance: number?,
 	asked: boolean?
-): (boolean, string)
+): (boolean, string, Figures?)
 	local label: string = `Bots {name} seed {seed}`
 	local server: Tread.Server = Game.get()
 	local testContent: Instance? = Workspace:FindFirstChild("TestContent")
 	if not testContent then
-		return false, `{label}: Workspace.TestContent is missing, so the dev game's casts take no floor laid`
+		return false, `{label}: Workspace.TestContent is missing, so the dev game's casts take no floor laid`, nil
 	elseif #Fleet.entries() > 0 then
-		return false, `{label}: another run's {#Fleet.entries()} bots are still on the server`
+		return false, `{label}: another run's {#Fleet.entries()} bots are still on the server`, nil
 	end
 
 	local params: RaycastParams = castParams(testContent)
@@ -1150,7 +1198,7 @@ local function runSeed(
 	-- Each view is homed when it is made, so the mode is set before any bot joins, and put back off once they are gone
 	local workers: number = Run.workers()
 
-	local ran: boolean, result: any = pcall(function (): string
+	local ran: boolean, result: any, figures: any = pcall(function (): (string, Figures)
 		if workers > 0 then
 			Relay.useWorkers(asked == true)
 		end
@@ -1179,7 +1227,7 @@ local function runSeed(
 			setViewers(distance, made)
 		end
 
-		local line: string, samples: Samples = window(label, scenario, timing, made, asked)
+		local line: string, samples: Samples, carried: Figures = window(label, scenario, timing, made, asked)
 		drove(label, scenario, made, problems)
 
 		if probe then
@@ -1187,11 +1235,13 @@ local function runSeed(
 			print(`{label} probe: {probe.stop(samples)}`)
 		end
 
-		return line
+		return line, carried
 	end)
 
+	local taken: Figures? = nil
 	if ran then
 		print(result)
+		taken = figures
 	else
 		table.insert(problems, `it threw: {result}`)
 	end
@@ -1229,17 +1279,18 @@ local function runSeed(
 	end
 
 	if #problems > 0 then
-		return false, `{label}: {table.concat(problems, SEPARATOR)}`
+		return false, `{label}: {table.concat(problems, SEPARATOR)}`, taken
 	end
 
-	return true, `{label}: drove and cleaned up`
+	return true, `{label}: drove and cleaned up`, taken
 end
 
 --[[
     A scenario's seeds in turn after the server's speed calibration, with
-    its probe, render distance and relay mode, nil leaving its bots' views
-    in process and its name unmarked, and whether every run drove and
-    cleaned up, with a line for each
+    its probe, render distance, relay mode and any step benchmark half, nil
+    leaving its bots' views in process and its name unmarked, and whether
+    every run drove and cleaned up, with a line for each, and the figures
+    the last seed's lines carry with the calibration's loop beside them
 --]]
 
 local function runAll(
@@ -1247,44 +1298,43 @@ local function runAll(
 	timing: Timing,
 	probe: Probe?,
 	distance: number?,
-	workers: boolean?
-): (boolean, string)
+	workers: boolean?,
+	half: string?
+): (boolean, string, Figures?)
 	local scenario: Scenario? = SCENARIOS[name]
 	if not scenario then
-		return false, `Bots {name}: no scenario has that name`
+		return false, `Bots {name}: no scenario has that name`, nil
 	end
 
-	-- A run at a render distance or one that picks the relay's mode is named for it too, in one word, so the report
-	-- still drops its per-second lines
-	local run: string = name
-	if distance then
-		run = `{name}@{distance}`
-	end
-
-	if workers == true then
-		run = `{run}/workers`
-	elseif workers == false then
-		run = `{run}/serial`
-	end
+	local run: string = Run.runName(name, distance, workers, half)
 
 	-- Before the first load, so it times nothing a load does
 	local calibrated: boolean, calibration: string = Calibration.run()
 	if not calibrated then
-		return false, `Bots {run}: {calibration}`
+		return false, `Bots {run}: {calibration}`, nil
 	end
 
 	print(`Bots {run} calibration: {calibration}`)
 
+	local loop: number? = Run.calibrated(calibration)
 	local passed: boolean = true
 	local lines: { string } = {}
+	local figures: Figures? = nil
 
 	for _, seed: number in timing.seeds do
-		local ok: boolean, line: string = runSeed(run, scenario, seed, timing, probe, distance, workers)
+		local ok: boolean, line: string, carried: Figures? =
+			runSeed(run, scenario, seed, timing, probe, distance, workers)
 		passed = passed and ok
 		table.insert(lines, line)
+
+		if carried and loop then
+			carried.calibration = loop
+		end
+
+		figures = carried
 	end
 
-	return passed, table.concat(lines, SEPARATOR)
+	return passed, table.concat(lines, SEPARATOR), figures
 end
 
 --[[
@@ -1296,17 +1346,58 @@ end
 --]]
 
 function Run.run(name: string, timing: Timing, probe: Probe?, distance: number?): (boolean, string)
-	return runAll(name, timing, probe, distance, nil)
+	local passed: boolean, line: string = runAll(name, timing, probe, distance, nil, nil)
+
+	return passed, line
 end
 
 --[[
     Runs a scenario as Run.run does, with its bots' views on the relay's
     workers when workers is true and the server started some, and in
-    process otherwise, its name marked with the mode it asked for
+    process otherwise, its name marked with the step benchmark's half when
+    one is given and with the mode it asked for otherwise. It gives the
+    figures its last seed's lines carry too, nil when no window ran
 --]]
 
-function Run.runWorkers(name: string, timing: Timing, workers: boolean, probe: Probe?): (boolean, string)
-	return runAll(name, timing, probe, nil, workers)
+function Run.runWorkers(
+	name: string,
+	timing: Timing,
+	workers: boolean,
+	probe: Probe?,
+	half: string?
+): (boolean, string, Figures?)
+	return runAll(name, timing, probe, nil, workers, half)
+end
+
+--[[
+    What a run's lines call it: the scenario's name, marked with any render
+    distance, then with the step benchmark's half when one is given and the
+    relay mode it asked for otherwise, in one word, so the report still drops
+    its per-second lines
+--]]
+
+function Run.runName(name: string, distance: number?, workers: boolean?, half: string?): string
+	local run: string = name
+	if distance then
+		run = `{name}@{distance}`
+	end
+
+	if half then
+		run = `{run}/{half}`
+	elseif workers == true then
+		run = `{run}/workers`
+	elseif workers == false then
+		run = `{run}/serial`
+	end
+
+	return run
+end
+
+-- The native loop's p50 a calibration line gives first, nil for a line that gives none
+function Run.calibrated(line: string): number?
+	local matched: string? = string.match(line, LOOP)
+
+	return matched and tonumber(matched)
 end
 
 -- How many relay workers the running dev server started with, 0 for none
@@ -1568,6 +1659,174 @@ function Run.counts(stats: { [string]: any }, samples: Samples)
 			push(samples, name, count / over)
 		end
 	end
+end
+
+--[[
+    A stats read's relay clocks pushed onto samples, each section's newest
+    run in milliseconds as clock <name>Ms. A read with relay.clocks off
+    carries none and pushes nothing
+--]]
+
+function Run.clocks(stats: { [string]: any }, samples: Samples)
+	local clocks: any = stats.relayClocks
+	if type(clocks) ~= "table" then
+		return
+	end
+
+	for name: string, times: any in clocks do
+		push(samples, `clock {name}Ms`, times.last * MILLISECONDS)
+	end
+end
+
+--[[
+    The relay clocks' line over the window, each section's newest run at
+    the configured shares over the reads, in the relay's own order, with
+    the two measured across a worker's clock and the main thread's last.
+    Nil when no read carried the clocks
+--]]
+
+function Run.clocksLine(label: string, samples: Samples): string?
+	local parts: { string } = {}
+	for _, name: string in Relay.CLOCKS do
+		local times: { number }? = samples[`clock {name}Ms`]
+		if times then
+			table.insert(parts, `{name} {spread(times, FIGURE)}`)
+		end
+	end
+
+	if #parts == 0 then
+		return nil
+	end
+
+	local head: string = `{label} relay clocks, ms p50/p95/p99 over the reads`
+	local across: string = "delivery and back across a worker's clock and the main thread's"
+
+	return `{head}, {across}: {table.concat(parts, SEPARATOR)}`
+end
+
+--[[
+    The lines a window prints as it closes, in order: the server's, Tread's
+    time a Heartbeat by its place in the tick, the tick stages', the counts'
+    and, while any read carried them, the relay clocks'
+--]]
+
+function Run.lines(label: string, taken: Taken): { string }
+	local lines: { string } = {
+		serverLine(label, taken.sampled, taken.elapsed),
+		heartbeatLine(label, taken.readout),
+		tickLine(label, taken.totals, taken.samples, taken.finishes, taken.roundsDropped),
+		countsLine(label, taken.rates),
+	}
+
+	local clocks: string? = Run.clocksLine(label, taken.samples)
+	if clocks then
+		table.insert(lines, clocks)
+	end
+
+	return lines
+end
+
+-- Puts a list's value at a share under a name, unless the list has none
+local function put(figures: Figures, name: string, values: { number }?, share: number)
+	if values and #values > 0 then
+		figures[name] = percentile(values, share)
+	end
+end
+
+-- Puts a list's sum under a name, unless there is no list
+local function total(figures: Figures, name: string, values: { number }?)
+	if not values then
+		return
+	end
+
+	local sum: number = 0
+	for _, value: number in values do
+		sum += value
+	end
+
+	figures[name] = sum
+end
+
+--[[
+    The figures a window's lines carry, by the names the step benchmark's
+    table reads: the frames, Tread's time on the place in the tick with the
+    largest p95 with the bots' stage there and what the frame's p95 leaves
+    past it, the tick total, each stage, the finish, anti-ESP's p95, the
+    counts, the viewer's bytes, any OwnerState sends and checks, the
+    commands lazy decode skipped and any relay clocks. A figure with no
+    samples is left out
+--]]
+
+function Run.figures(taken: Taken): Figures
+	local figures: Figures = {}
+	local frames: { number } = taken.sampled.frames
+	local samples: Samples = taken.samples
+
+	local rates: { number } = {}
+	for _, frame: number in frames do
+		table.insert(rates, MILLISECONDS / frame)
+	end
+
+	if taken.elapsed > 0 then
+		figures.heartbeats = #frames / taken.elapsed
+	end
+
+	put(figures, "fps", rates, FPS)
+	put(figures, "frameP50", frames, P50)
+	put(figures, "frameP95", frames, P95)
+
+	-- The heaviest place in the tick is the one whose p95 of Tread's time is largest, the first of any that tie
+	local tread: { { number } }, bots: { { number } } = byPlace(taken.readout)
+	local heaviest: number = 0
+	local largest: number = 0
+	for place: number = 1, #PLACES do
+		local own: { number } = tread[place]
+		local p95: number = percentile(own, P95)
+		if #own > 0 and (heaviest == 0 or p95 > largest) then
+			heaviest, largest = place, p95
+		end
+	end
+
+	local frame: number? = figures.frameP95
+	if heaviest > 0 then
+		put(figures, "treadP50", tread[heaviest], P50)
+		figures.treadP95 = largest
+		put(figures, "botsP50", bots[heaviest], P50)
+		put(figures, "botsP95", bots[heaviest], P95)
+
+		if frame then
+			figures.gap = frame - largest
+		end
+	end
+
+	put(figures, "tickP50", taken.totals, P50)
+	put(figures, "tickP95", taken.totals, P95)
+
+	for _, stage: string in TICK_STAGES do
+		put(figures, stage, samples[`{stage}Ms`], P50)
+	end
+
+	put(figures, FINISH, taken.finishes, P50)
+	put(figures, BESIDE, samples[`{BESIDE}P95Ms`], P50)
+	total(figures, "dropped", samples.dropped)
+	total(figures, "relaySkipped", samples.relaySkipped)
+	put(figures, "records", taken.rates.recordsSent, P50)
+	put(figures, "bytes", taken.rates.bytesOut, P50)
+	put(figures, "viewerP50", samples.viewerBytes, P50)
+	put(figures, "viewerP95", samples.viewerBytes, P95)
+	total(figures, "ownerFull", samples.ownerFull)
+	total(figures, "ownerAcks", samples.ownerAcks)
+	total(figures, "ownerChecked", samples.ownerChecked)
+	total(figures, "ownerMismatches", samples.ownerMismatches)
+	figures.skipped = taken.skipped
+
+	for _, name: string in Relay.CLOCKS do
+		local times: { number }? = samples[`clock {name}Ms`]
+		put(figures, `clock {name} p50`, times, P50)
+		put(figures, `clock {name} p95`, times, P95)
+	end
+
+	return figures
 end
 
 return Run

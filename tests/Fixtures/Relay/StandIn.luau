@@ -11,6 +11,7 @@ StandIn.__index = StandIn
 local Environment = require("../../Environment")
 
 local REMOTE: string = "src/Server/Relay/Remote.luau"
+local FIRED: number = 0 -- Seconds a round's fire takes, since a stand-in round fires nothing
 
 -- One round sent and not yet delivered
 type Round = {
@@ -29,6 +30,8 @@ type Fields = {
 	_failures: { [number]: string? },
 	_starts: { number }, -- And when its Remote.run began and ended, by os.clock()
 	_finishes: { number },
+	_clocks: { [number]: buffer? }, -- And a copy of the clocks it gave, nil for none
+	_landed: { number }, -- And when it landed, its finish, 0 with no clocks
 }
 
 -- A copy of a buffer, as an Actor message or a BindableEvent carries one
@@ -94,6 +97,8 @@ function StandIn.new(count: number, _: string, _: any, settings: any): Self
 		_failures = {} :: { [number]: string? },
 		_starts = table.create(count, 0),
 		_finishes = table.create(count, 0),
+		_clocks = {} :: { [number]: buffer? },
+		_landed = table.create(count, 0),
 	}, StandIn)
 end
 
@@ -115,7 +120,7 @@ end
 --[[
     Runs every round queued, in the order sent, each its worker's Remote.run
     timed by os.clock(), keeping a copy of its result or the text of what
-    it threw
+    it threw, and a copy of any clocks it gave, landed as it finished
 --]]
 
 function StandIn.deliver(self: Self)
@@ -127,12 +132,14 @@ function StandIn.deliver(self: Self)
 		local remote: any = self._remotes[worker]
 
 		local start: number = os.clock()
-		local ran: boolean, value: any = pcall(remote.run, round.shared, round.own)
+		local ran: boolean, value: any, clocks: any = pcall(remote.run, round.shared, round.own)
 		local finish: number = os.clock()
 
 		self._rounds[worker] = round.round
 		self._starts[worker] = start
 		self._finishes[worker] = finish
+		self._clocks[worker] = nil
+		self._landed[worker] = 0
 
 		if ran then
 			self._results[worker] = copyBuffer(value)
@@ -140,6 +147,11 @@ function StandIn.deliver(self: Self)
 		else
 			self._results[worker] = nil
 			self._failures[worker] = `{value}`
+		end
+
+		if ran and clocks ~= nil then
+			self._clocks[worker] = copyBuffer(clocks)
+			self._landed[worker] = finish
 		end
 	end
 end
@@ -157,9 +169,14 @@ function StandIn.landed(self: Self, worker: number, round: number): (buffer?, st
 	return self._results[worker], self._failures[worker]
 end
 
--- When a worker's last delivered run began and ended, by os.clock()
-function StandIn.times(self: Self, worker: number): (number, number)
-	return self._starts[worker], self._finishes[worker]
+--[[
+    When a worker's last delivered run began and ended, by os.clock(), then
+    a copy of its clocks, nil for none, when it landed, and the seconds its
+    fire took, as the pool gives them
+--]]
+
+function StandIn.times(self: Self, worker: number): (number, number, buffer?, number, number)
+	return self._starts[worker], self._finishes[worker], self._clocks[worker], self._landed[worker], FIRED
 end
 
 -- Drops every worker and every round still queued

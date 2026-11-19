@@ -34,6 +34,7 @@ export type Wire = {
 	headYaw: number,
 	headPitch: number,
 	fields: buffer, -- The game's declared fields, packed
+	check: number, -- The hash of the state its sender predicted after it, 0 for none, which no read looks at
 }
 
 -- The game's limits that lean and the head offset count their steps to, both in degrees, from the step's settings
@@ -86,6 +87,7 @@ function Command.wire(): Wire
 		headYaw = 0,
 		headPitch = 0,
 		fields = buffer.create(0),
+		check = 0,
 	}
 end
 

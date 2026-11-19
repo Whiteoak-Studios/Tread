@@ -12,7 +12,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Volt = require(ReplicatedStorage.Packages.Volt)
 
-export type Command = { moveX: number, moveZ: number, buttons: number, yaw: number, pitch: number, lean: number, headYaw: number, headPitch: number, fields: buffer }
+export type Command = { moveX: number, moveZ: number, buttons: number, yaw: number, pitch: number, lean: number, headYaw: number, headPitch: number, fields: buffer, check: number }
 export type Rig = "A" | "B"
 export type SlotEntry = { slot: number, taken: { rig: Rig, player: Instance? }? }
 
@@ -71,14 +71,14 @@ local function readMove(player: (Player | Bot)?, packet: buffer, cursor: number,
 
 	cursor += 8
 
-	if cursor + 12 * commandsLength > length then
+	if cursor + 16 * commandsLength > length then
 		error("Move.commands: truncated")
 	end
 
 	local commands: { Command } = table.create(commandsLength) :: { Command }
 
 	for index = 1, commandsLength do
-		if cursor + 12 > length then
+		if cursor + 16 > length then
 			error("Move.commands: truncated")
 		end
 
@@ -126,7 +126,8 @@ local function readMove(player: (Player | Bot)?, packet: buffer, cursor: number,
 			error("Move.commands[].fields: length out of range")
 		end
 
-		cursor += 12
+		local check: number = buffer.readu32(packet, cursor + 12)
+		cursor += 16
 
 		if cursor + fieldsLength > length then
 			error("Move.commands[].fields: truncated")
@@ -136,7 +137,7 @@ local function readMove(player: (Player | Bot)?, packet: buffer, cursor: number,
 		buffer.copy(fields, 0, packet, cursor, fieldsLength)
 
 		cursor += fieldsLength
-		local commandsEntry = { moveX = moveX, moveZ = moveZ, buttons = buttons, yaw = yaw, pitch = pitch, lean = lean, headYaw = headYaw, headPitch = headPitch, fields = fields }
+		local commandsEntry = { moveX = moveX, moveZ = moveZ, buttons = buttons, yaw = yaw, pitch = pitch, lean = lean, headYaw = headYaw, headPitch = headPitch, fields = fields, check = check }
 		commands[index] = commandsEntry
 	end
 
@@ -421,7 +422,7 @@ end
 
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x12E2915A,
+	hash = 0x0200619C,
 	scope = "Tread",
 	side = "server",
 	idBytes = 1,

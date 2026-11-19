@@ -30,6 +30,7 @@ local Constants = require(script.Parent.Parent.Constants)
 local Engine = require(script.Parent.Parent.Step.Engine)
 local Eye = require(script.Parent.Parent.Step.Eye)
 local Fields = require(script.Parent.Parent.Codec.Fields)
+local Hash = require(script.Parent.Parent.Codec.Hash)
 local History = require(script.Parent.History)
 local Hulls = require(script.Parent.Parent.Step.Hulls)
 local Math = require(script.Parent.Parent.Step.Math)
@@ -67,6 +68,7 @@ local MOVE_MODES: { [string]: boolean } = { Walk = true, Noclip = true, Parked =
 local MAX_WATCHERS: number = Constants.MAX_WATCHERS -- The watchers one target takes
 local FOCUS_RATE: number = 5 -- Hz each player's focus part is moved at, a share of the parts each relay tick
 local FOCUS_HOLDER: string = "TreadFocus" -- The server-only Camera every focus part sits under
+local OWNER_ACK_BYTES: number = Constants.OWNER_ACK_BYTES -- An acknowledgment: OwnerState's command, tick and depth
 
 type Bot = Types.Bot
 type Collision = State.Collision
@@ -216,6 +218,21 @@ local OwnerScratch: buffer = buffer.create(Constants.MAX_OWNER_STATE)
 local OwnerBuffers: { [number]: buffer } = {}
 local HeldScratch: buffer = buffer.create(Constants.MAX_HELD) -- A held item is packed here to check it
 local LookScratch: buffer = buffer.create(Constants.MAX_LOOK) -- And a sleeper's look, before it takes a slot
+
+local Checks: boolean = false -- Whether a client whose check agrees is sent an acknowledgment in place of its OwnerState
+
+-- The acknowledgments a relay run queued, in order, each one's bytes kept at its slot, and the one buffer each is
+-- copied into to fire, which Volt copies in turn
+local AckQueue: { Self } = {}
+local AckCount: number = 0
+local AckBytes: buffer = buffer.create(SLOTS * OWNER_ACK_BYTES)
+local AckData: buffer = buffer.create(OWNER_ACK_BYTES)
+
+-- OwnerStates sent in full and as acknowledgments, the compares made against a real check, and those that missed
+local OwnerFull: number = 0
+local OwnerAcks: number = 0
+local OwnerChecked: number = 0
+local OwnerMismatches: number = 0
 
 local Characters = {}
 
@@ -551,6 +568,9 @@ function Characters.start(context: Context)
 		held = layout.held,
 	}
 
+	local owner: { read checks: boolean? }? = server.owner
+	Checks = owner ~= nil and owner.checks == true
+
 	Sleepers.start(shared, world)
 	Npcs.start(world, npcLanded)
 	Teleport.start({ shared = shared, server = server }, world)
@@ -563,6 +583,28 @@ function Characters.start(context: Context)
 		Versions[character._slot] += 1
 		AntiEsp.moved(character._slot)
 	end)
+end
+
+--[[
+    Sets whether a client whose check agrees with its OwnerState is sent an
+    acknowledgment in its place from the next relay run, for a dev bench's
+    before and after on one server. It starts as owner.checks gives it
+--]]
+
+function Characters.useChecks(on: boolean)
+	if type(on) ~= "boolean" then
+		error(`Characters.useChecks takes true or false, not {on}`, 2)
+	end
+
+	Checks = on
+end
+
+--[[
+    Whether checks are on, for a dev bench's lines on its before and after
+--]]
+
+function Characters.checksOn(): boolean
+	return Checks
 end
 
 --[[
@@ -1451,7 +1493,41 @@ function Characters.history(tick: number, relayTick: number)
 	end
 end
 
--- Fires a character's OwnerState to its owner in a buffer of its exact length, with its queue depth set
+--[[
+    Whether a client agrees with the OwnerState just written in the scratch:
+    the command it names ran on its own tick, and its kept check is the hash
+    of the bytes past an acknowledgment's, or its client is a bot's while
+    bots.agree is on. A check of 0 is none, and each compare made against a
+    real check is counted, with the ones that missed
+--]]
+
+local function agrees(connection: Connection, command: number, length: number): boolean
+	local check: number? = Commands.check(connection, command)
+	if check == nil then
+		return false
+	elseif connection:agrees() then
+		return true
+	elseif check == 0 then
+		return false
+	end
+
+	OwnerChecked += 1
+	if Hash.range(OwnerScratch, OWNER_ACK_BYTES, length - OWNER_ACK_BYTES) == check then
+		return true
+	end
+
+	OwnerMismatches += 1
+
+	return false
+end
+
+--[[
+    Writes a character's OwnerState with its queue depth set, and fires it
+    to its owner in a buffer of its exact length, or while checks are on
+    and its client agrees queues its first bytes alone as an acknowledgment.
+    The moderators watching it and the taps get the whole bytes either way
+--]]
+
 local function sendOwnerState(character: Self, key: Key, connection: Connection, setup: Setup)
 	local slot: number = character._slot
 	local state: StepState = States[slot]
@@ -1462,7 +1538,15 @@ local function sendOwnerState(character: Self, key: Key, connection: Connection,
 	OwnerBuffers[length] = data
 
 	buffer.copy(data, 0, OwnerScratch, 0, length)
-	setup.sendOwner(key, data)
+
+	if Checks and agrees(connection, state.command, length) then
+		buffer.copy(AckBytes, slot * OWNER_ACK_BYTES, OwnerScratch, 0, OWNER_ACK_BYTES)
+		AckCount += 1
+		AckQueue[AckCount] = character
+	else
+		setup.sendOwner(key, data)
+		OwnerFull += 1
+	end
 
 	-- The moderators watching it get the same bytes beside the looks it stepped
 	Spectate.feed(key, data, length)
@@ -1505,10 +1589,11 @@ end
 
 --[[
     The relay stage, on a relay tick: each character whose player is still
-    here samples its ping, sends its OwnerState and is a viewer, with its
-    acknowledgments, its newest look and the target it spectates, then the
-    relay gives every viewer its blocks, with each platform's place at the
-    tick for its riders, and a share of the focus parts moves
+    here samples its ping, sends its OwnerState or queues its
+    acknowledgment, and is a viewer, with its acknowledgments, its newest
+    look and the target it spectates, then the relay gives every viewer its
+    blocks, with each platform's place at the tick for its riders, and a
+    share of the focus parts moves
 
     @ relayTick | the relay tick as the server counts it, unwrapped
     @ tick | the simulation tick that starts it, unwrapped
@@ -1552,6 +1637,53 @@ function Characters.relay(relayTick: number, tick: number)
 
 	Relay.run(relayTick, ViewerList, States, Stepped, PlatformPlaces)
 	focus(relayTick, since, setup.focusGroups)
+end
+
+--[[
+    Fires every acknowledgment the relay queued, in order, through the same
+    port as a full OwnerState, and empties the queue before the first fire,
+    so a fire that throws loses the rest and never sends one twice. A
+    character that ended or whose player left since it was queued is passed
+    over, since its queue may wait out a flush that runs game code
+--]]
+
+function Characters.acks()
+	local setup: Setup = running("Characters.acks")
+	local count: number = AckCount
+	AckCount = 0
+
+	for index: number = 1, count do
+		local character: Self = AckQueue[index]
+		AckQueue[index] = nil
+
+		local slot: number = character._slot
+		if character._live and not Departed[slot] then
+			buffer.copy(AckData, 0, AckBytes, slot * OWNER_ACK_BYTES, OWNER_ACK_BYTES)
+			setup.sendOwner(character.player, AckData)
+			OwnerAcks += 1
+		end
+	end
+end
+
+--[[
+    The OwnerStates sent in full and as acknowledgments since start, and
+    the compares made against a real check with how many of them missed,
+    running counts that stats reads the change of
+--]]
+
+function Characters.owners(): (number, number, number, number)
+	return OwnerFull, OwnerAcks, OwnerChecked, OwnerMismatches
+end
+
+--[[
+    A character's step state, its body's own table, which every step and
+    teleport rewrites in place, for the dev bot harness to read where its
+    body stands as a full OwnerState would carry it, with no public state's
+    queries. It is the character's until it ends
+--]]
+
+function Characters.stateOf(character: Self): StepState
+	return States[slotOf(character, "Characters.stateOf")]
 end
 
 --[[

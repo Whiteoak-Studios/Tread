@@ -1,7 +1,7 @@
 --[[
     The live runs' trigger on the dev server: a player's ask runs a scenario
     or the Run all queue through the Runner, each run's Output its report,
-    sent in pieces, and the queue's reports kept, saved and listed too
+    sent in pieces, the queue's kept and listed, its and listed runs' saved
 --]]
 
 --!strict
@@ -27,6 +27,7 @@ local PIECE_BYTES: number = require(ServerScriptService.Server.Config.Live).piec
 local REPORT_BYTES: number = require(ServerScriptService.Server.Config.Live).reportBytes
 local VERDICT_WAIT: number = require(ServerScriptService.Server.Config.Live).verdictWait
 local DROPPED: { string } = require(ServerScriptService.Server.Config.Live).dropped
+local SAVED: { string } = require(ServerScriptService.Server.Config.Live).saved
 local STORE: string = require(ServerScriptService.Server.Config.Live).queue.store
 local TRIES: number = require(ServerScriptService.Server.Config.Live).queue.tries
 local RETRY_WAIT: number = require(ServerScriptService.Server.Config.Live).queue.retryWait
@@ -115,11 +116,14 @@ local function pieces(player: Player, text: string): boolean
 	return player.Parent ~= nil
 end
 
--- One run for the player who asked: running as it starts, then its report in pieces and its verdict
+-- One run for the player who asked: running as it starts, then its report saved if listed, in pieces and its verdict
 local function single(player: Player, name: string)
+	local started: number = os.time()
 	Network.runReport.fire(player, "Running", name)
 
 	local passed: boolean, text: string = collect(name)
+	Live.saveRun(started, name, text)
+
 	if pieces(player, text) then
 		local verdict: LiveRuns.State = passed and "Passed" or "Failed"
 		Network.runReport.fire(player, verdict, name)
@@ -149,6 +153,18 @@ local function tellAll()
 	for _, player: Player in Players:GetPlayers() do
 		tell(player)
 	end
+end
+
+-- The experience's DataStore the reports are saved to, or nil and why it did not open
+local function open(): (DataStore?, any)
+	local opened: boolean, result: any = pcall(function (): DataStore
+		return DataStoreService:GetDataStore(STORE)
+	end)
+	if not opened then
+		return nil, result
+	end
+
+	return result, nil
 end
 
 --[[
@@ -218,14 +234,9 @@ end
 
 local function runAll()
 	local started: number = os.time()
-	local store: DataStore? = nil
-	local opened: boolean, result: any = pcall(function (): DataStore
-		return DataStoreService:GetDataStore(STORE)
-	end)
-	if opened then
-		store = result
-	else
-		warn(`Run all saves nothing, since the experience's DataStore {STORE} did not open: {result}`)
+	local store: DataStore?, failure: any = open()
+	if not store then
+		warn(`Run all saves nothing, since the experience's DataStore {STORE} did not open: {failure}`)
 	end
 
 	table.clear(Queue)
@@ -334,6 +345,29 @@ function Live.drain(
 		if not kept then
 			warn(`Run all could not keep {name}'s report, and went on: {failure}`)
 		end
+	end
+end
+
+--[[
+    Saves a single run's report to the experience's DataStore under the
+    run's start time and its name, each write tried as Run all's are, when
+    the save list names the run, warning of a save that failed. A run off
+    the list opens no DataStore
+--]]
+
+function Live.saveRun(started: number, name: string, text: string)
+	if not table.find(SAVED, name) then
+		return
+	end
+
+	local key: string = `{started}-{name}`
+	local store: DataStore?, failure: any = open()
+	if store then
+		failure = save(store, key, text)
+	end
+
+	if failure then
+		warn(`{name}'s report was not saved under {key}: {failure}`)
 	end
 end
 

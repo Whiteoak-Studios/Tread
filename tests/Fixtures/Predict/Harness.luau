@@ -10,6 +10,7 @@ local Environment = require("../../Environment")
 local PREDICT: string = "src/Client/Predict.luau"
 local COMMAND: string = "src/Codec/Command.luau"
 local FIELDS: string = "src/Codec/Fields.luau"
+local HASH: string = "src/Codec/Hash.luau"
 local OWNER_STATE: string = "src/Codec/OwnerState.luau"
 local SEQUENCE: string = "src/Codec/Sequence.luau"
 local STATE: string = "src/Step/State.luau"
@@ -34,6 +35,7 @@ local DELAY: number = 0.15 -- The stub's interpolation delay, in seconds
 local SEQUENCE_ACKED: number = 7 -- The stub's newest relay sequence received and its mask
 local MASK: number = 3
 local BUFFER_BYTES: number = 128 -- Past the largest OwnerState
+local ACK_BYTES: number = 5 -- An acknowledgment's: an OwnerState's command, tick and queue depth
 
 export type Recorded = {
 	command: number,
@@ -41,6 +43,7 @@ export type Recorded = {
 	received: number,
 	delay: number,
 	numbers: { number }, -- Each command's number, newest first
+	checks: { number }, -- Each command's check, in the same order
 }
 
 export type Options = {
@@ -52,6 +55,7 @@ export type Options = {
 	step: { [string]: any }?, -- The step settings both worlds take, Frontier Zero's unless given
 	parts: { any }?, -- The fixture parts both worlds cast against, the step's fixture geometry unless given
 	spawn: vector?, -- Where the spawn OwnerState stands the body, on that geometry's floor unless given
+	rules: ((step: any, allow: any) -> number)?, -- The game's rules both worlds run, ones that refuse nothing unless given
 }
 
 local Harness = {}
@@ -71,9 +75,11 @@ local function copyWire(wire: any): any
 		headYaw = wire.headYaw,
 		headPitch = wire.headPitch,
 		fields = fields,
+		check = wire.check,
 	}
 end
 
+-- Whether two copies of a command hold the same inputs, by the fields the server compares, so never the check
 local function sameWire(a: any, b: any): boolean
 	return a.moveX == b.moveX
 		and a.moveZ == b.moveZ
@@ -102,6 +108,7 @@ function Harness.new(options: Options?): { [string]: any }
 	local given: Options = options or {}
 	local Command: any = Environment.load(COMMAND)
 	local Fields: any = Environment.load(FIELDS)
+	local Hash: any = Environment.load(HASH)
 	local OwnerState: any = Environment.load(OWNER_STATE)
 	local Sequence: any = Environment.load(SEQUENCE)
 	local State: any = Environment.load(STATE)
@@ -126,6 +133,7 @@ function Harness.new(options: Options?): { [string]: any }
 		Constants = Environment.load(CONSTANTS),
 		moves = {} :: { Recorded },
 		wires = {} :: { [number]: any }, -- The first copy of each command the stub was sent
+		checks = {} :: { [number]: number }, -- The check each command was last sent with
 		samples = 0,
 		tampered = false, -- Whether a later copy of a command differed from its first
 		corrections = {} :: { { size: number, flagged: boolean } },
@@ -135,17 +143,23 @@ function Harness.new(options: Options?): { [string]: any }
 		looks = 0, -- How many times Predict read it
 	}
 
-	-- The client's rules function refuses nothing, and throws while the case says so
-	local function clientRules(_: any, _: any): number
+	local function free(_: any, _: any): number
+		return math.huge
+	end
+
+	local rules: (step: any, allow: any) -> number = given.rules or free
+
+	-- The client's rules function is the server's, and throws while the case says so
+	local function clientRules(step: any, allow: any): number
 		if rig.fail then
 			error("The game's rules function threw")
 		end
 
-		return math.huge
+		return rules(step, allow)
 	end
 
-	local function serverRules(_: any, _: any): number
-		return math.huge
+	local function serverRules(step: any, allow: any): number
+		return rules(step, allow)
 	end
 
 	local step: any = given.step or Scene.settings
@@ -207,10 +221,13 @@ function Harness.new(options: Options?): { [string]: any }
 	-- Records each Move as Volt would send it, keeping the first copy of each command, which the server runs
 	local function send(move: any)
 		local numbers: { number } = {}
+		local checks: { number } = {}
 
 		for index: number, wire: any in move.commands do
 			local number: number = (move.command - (index - 1)) % WRAP
 			table.insert(numbers, number)
+			table.insert(checks, wire.check)
+			rig.checks[number] = wire.check
 
 			local first: any = rig.wires[number]
 			if first == nil then
@@ -226,6 +243,7 @@ function Harness.new(options: Options?): { [string]: any }
 			received = move.received,
 			delay = move.delay,
 			numbers = numbers,
+			checks = checks,
 		})
 	end
 
@@ -257,6 +275,22 @@ function Harness.new(options: Options?): { [string]: any }
 		buffer.copy(data, 0, scratch, 0, length)
 
 		return data
+	end
+
+	-- The acknowledgment the server sends for a state whose check agreed: its OwnerState's first bytes alone
+	function rig.ack(state: any, depth: number?): buffer
+		local data: buffer = rig.owner(state, depth)
+		local ack: buffer = buffer.create(ACK_BYTES)
+		buffer.copy(ack, 0, data, 0, ACK_BYTES)
+
+		return ack
+	end
+
+	-- The server's hash of a state, as it writes it at a queue depth, past its first bytes, which a check is held to
+	function rig.hash(state: any, depth: number?): number
+		local data: buffer = rig.owner(state, depth)
+
+		return Hash.range(data, ACK_BYTES, buffer.len(data) - ACK_BYTES)
 	end
 
 	-- Steps a state on the commands from one number through another, read from their wires as the server reads them

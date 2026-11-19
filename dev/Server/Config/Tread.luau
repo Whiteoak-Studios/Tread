@@ -29,8 +29,8 @@ local FOOTSTEP_RANGE: { [string]: number } = { walk = 40, sprint = 60, jump = 60
 -- What anti-ESP's rays may hit, the occluders and solid terrain, typed as the list the setting takes
 local OCCLUSION: { Instance } = { Occluders, MonumentOccluders, Workspace.Terrain }
 
--- Set true on Workspace before the server starts to boot it with the out-of-view rate and records as changes off,
--- since the relay reads both levers only at its start
+-- Set true on Workspace before the server starts to boot it with the out-of-view rate, records as changes and the
+-- owner's checks off, since the server reads all three levers at its start
 local LEVERS_OFF_ATTRIBUTE: string = "TreadLeversOff"
 local LEVERS_OFF: boolean = Workspace:GetAttribute(LEVERS_OFF_ATTRIBUTE) == true
 
@@ -44,11 +44,21 @@ if type(WORKERS) ~= "number" or WORKERS < 0 or WORKERS % 1 ~= 0 then
 	error(`Workspace's {WORKERS_ATTRIBUTE} takes a whole number of relay workers from 0, not {WORKERS}`)
 end
 
--- Records as changes, and with workers their count and the timeout they need, left out with none
-local RELAY: { changes: boolean, workers: number?, timeout: number? } = { changes = not LEVERS_OFF }
+-- Set true on Workspace before the server starts to boot the relay with its clocks on, which stats then reads, since
+-- the relay reads it only at its start
+local CLOCKS_ATTRIBUTE: string = "TreadRelayClocks"
+local CLOCKS: boolean = Workspace:GetAttribute(CLOCKS_ATTRIBUTE) == true
+
+-- Records as changes, with workers their count and the timeout they need, and the clocks while on, each left out
+-- while off
+local RELAY: { changes: boolean, workers: number?, timeout: number?, clocks: boolean? } = { changes = not LEVERS_OFF }
 if WORKERS > 0 then
 	RELAY.workers = WORKERS
 	RELAY.timeout = RELAY_TIMEOUT
+end
+
+if CLOCKS then
+	RELAY.clocks = true
 end
 
 return {
@@ -72,7 +82,8 @@ return {
 		outOfView = not LEVERS_OFF and { rate = 5, cone = 70, radius = 40 } or nil,
 	},
 
-	relay = RELAY, -- Each record as its change since what the viewer last acknowledged, and any workers
+	relay = RELAY, -- Each record as its change since what the viewer last acknowledged, any workers and the clocks
+	owner = { checks = not LEVERS_OFF }, -- A player whose check agrees gets an acknowledgment for its OwnerState
 	weights = { near = 1, far = 0.5, shooter = 2, cone = 1.5 },
 	shotNear = { rate = 10, seconds = 5 },
 	budget = { soft = 64, hard = 96 }, -- KB/s a viewer gets across every Volt stream
@@ -148,5 +159,6 @@ return {
 	},
 
 	teleport = { timeout = 3 },
-	bots = { rtt = 0.1 }, -- Seconds a bot's connection reports as its round trip
+	-- Seconds a bot's connection reports as its round trip, and every bot taken as agreeing, since none predicts
+	bots = { rtt = 0.1, agree = true },
 }

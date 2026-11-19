@@ -40,6 +40,7 @@ export type Side = {
 	Characters: any,
 	Tap: any,
 	pool: any, -- The stand-in pool the relay made, nil in process
+	client: any, -- The client's network, on which a case may fire its Moves
 	keys: { [string]: any }, -- Each character's player or bot, by its name
 	characters: { [string]: any },
 	owners: { string }, -- Each OwnerState the client was sent, as its bytes
@@ -47,16 +48,21 @@ export type Side = {
 	frames: { [string]: { string } }, -- Each viewer's tap frames, by its name
 	withheld: { string }, -- The withheld tap frames of the client's character, which the moderator watches
 	order: { string }, -- What the case marks, each marker stage's run and each of the client's frames, as they came
+	-- Each beat, and each Owner message and relay block the client heard, as "beat", "owner <tick> <bytes>" and
+	-- "relay <tick>", in the order they came
+	arrivals: { string },
 }
 
 --[[
     A side on the example's tables with every slice given time for every
     pair due and no fail-open, relaying in process or, given a relay table,
-    on that many stand-in workers with its timeout, every character built,
-    the moderator watching the client and every viewer's frames observed
+    on that many stand-in workers with its timeout, with the relay's clocks
+    on given clocks and any other settings tweak changes, every character
+    built, the moderator watching the client and every viewer's frames
+    observed
 --]]
 
-function Lockstep.side(relay: Relay?): Side
+function Lockstep.side(relay: Relay?, clocks: boolean?, tweak: ((settings: any) -> ())?): Side
 	local made: { pool: any } = { pool = nil }
 	local overrides: { [string]: any }? = nil
 	if relay then
@@ -78,6 +84,15 @@ function Lockstep.side(relay: Relay?): Side
 		if relay then
 			settings.relay = { changes = true, workers = relay.workers, timeout = relay.timeout }
 		end
+
+		if clocks then
+			settings.relay = table.clone(settings.relay or {})
+			settings.relay.clocks = true
+		end
+
+		if tweak then
+			tweak(settings)
+		end
 	end, overrides)
 
 	local server: any = rig:start()
@@ -91,6 +106,7 @@ function Lockstep.side(relay: Relay?): Side
 		Characters = rig:require(tread.Server.Characters),
 		Tap = rig:require(tread.Codec.Tap),
 		pool = made.pool,
+		client = client,
 		keys = { Client = rig.mock.players[1] },
 		characters = {},
 		owners = {},
@@ -98,18 +114,22 @@ function Lockstep.side(relay: Relay?): Side
 		frames = {},
 		withheld = {},
 		order = {},
+		arrivals = {},
 	}
 
 	if relay and side.pool == nil then
 		error("The relay made no workers in the stand-in pool")
 	end
 
+	-- An OwnerState and an acknowledgment carry their tick at byte 2, and a relay block its relay tick
 	client.Owner.on(function (data: buffer)
 		table.insert(side.owners, buffer.tostring(data))
+		table.insert(side.arrivals, `owner {buffer.readu16(data, 2)} {buffer.len(data)}`)
 	end)
 
 	client.Relay.on(function (data: buffer)
 		table.insert(side.blocks, buffer.tostring(data))
+		table.insert(side.arrivals, `relay {buffer.readu16(data, 2)}`)
 	end)
 
 	client.flush()
@@ -156,6 +176,7 @@ end
 -- One Heartbeat of a share of a tick's time, marked in the side's order, with the mock stepped after
 function Lockstep.beat(side: Side, share: number)
 	table.insert(side.order, "beat")
+	table.insert(side.arrivals, "beat")
 	side.rig.frames:run(share / side.rig.rate)
 	side.rig:deliver()
 end

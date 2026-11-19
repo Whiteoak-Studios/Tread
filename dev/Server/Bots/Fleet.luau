@@ -12,6 +12,8 @@ local Packages = ReplicatedStorage.Packages
 local Tread = require(Packages.Tread)
 local Volt = require(Packages.Volt)
 
+local Characters = require(Packages.Tread.Server.Characters)
+
 local Bot = require(ServerScriptService.Server.Bots.Bot)
 local Game = require(ServerScriptService.Server.Game)
 local Programs = require(ServerScriptService.Server.Bots.Programs)
@@ -129,7 +131,8 @@ function Fleet.add(plan: Plan): Entry
 		error(character, 0)
 	end
 
-	local made: boolean, bot: any = pcall(Bot.new, network, context, plan.steer, plan.faults, plan.seed)
+	local made: boolean, bot: any =
+		pcall(Bot.new, network, context, plan.steer, plan.faults, plan.seed, Characters.stateOf(character))
 	if not made then
 		character:destroy()
 		Volt.removeBot(volt)

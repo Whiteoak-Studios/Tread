@@ -10,6 +10,7 @@ local Command = require(script.Parent.Parent.Codec.Command)
 local Constants = require(script.Parent.Parent.Constants)
 local Eye = require(script.Parent.Parent.Step.Eye)
 local Fields = require(script.Parent.Parent.Codec.Fields)
+local Hash = require(script.Parent.Parent.Codec.Hash)
 local Mantle = require(script.Parent.Parent.Step.Mantle)
 local Math = require(script.Parent.Parent.Step.Math)
 local Move = require(script.Parent.Parent.Codec.Move)
@@ -24,6 +25,7 @@ local ANGLE_STEPS: number = Constants.ANGLE_STEPS
 local LEAN_STEPS: number = Constants.LEAN_STEPS
 local MAX_COMMANDS: number = Constants.MAX_COMMANDS
 local MOVE_REPEATS: number = Constants.MOVE_REPEATS
+local OWNER_ACK_BYTES: number = Constants.OWNER_ACK_BYTES
 local TURN: number = 2 * math.pi -- Radians a turn, which a u16 angle counts in ANGLE_STEPS
 local WRAP: number = 2 ^ 16 -- The numbers a u16 command number or wire tick holds
 local DELAY_LIMIT: number = 2 ^ 8 - 1 -- The most milliseconds the Move's u8 delay holds
@@ -68,6 +70,7 @@ type Entry = {
 	command: Command,
 	state: State,
 	predicted: boolean, -- Whether state holds its prediction
+	check: number, -- The hash of that prediction's OwnerState past its first bytes, 0 with none, which its Moves carry
 }
 
 -- What start was handed, which every later call reads
@@ -94,8 +97,10 @@ local Server: State = State.new()
 local Held: { Entry } = {} -- The commands kept, oldest first, each numbered one past the one before or past a skip
 local Spare: { Entry } = {} -- Released entries, which the next commands reuse
 local Outgoing: { Command } = {} -- The commands the next Move carries, newest first
+local Checks: { number } = {} -- Their checks, by the same positions
 local Outbound: Move.Move = Move.new() -- The Move each relay tick encodes into
 local Scratch: Wire = Command.wire() -- Each sampled command's trip through the wire and back
+local Written: buffer = buffer.create(Constants.MAX_OWNER_STATE) -- Each prediction's OwnerState, written to hash
 local Last: Pressed = { jump = false, crouch = false, sprint = false, aim = false } -- The previous command's levels
 local Listeners: { Listener } = {} -- The correction callbacks, in the order they connected
 
@@ -191,7 +196,7 @@ local function take(): Entry
 		return entry
 	end
 
-	return { command = Command.new(), state = State.new(), predicted = false }
+	return { command = Command.new(), state = State.new(), predicted = false, check = 0 }
 end
 
 -- Puts Tread's own fields of a reused command back at rest, so a field the sample leaves alone carries nothing old
@@ -230,6 +235,22 @@ local function advance(run: Run, command: Command): boolean
 	return stepped
 end
 
+--[[
+    A prediction's check: the hash of the bytes OwnerState writes for it
+    past the command, tick and depth, the bytes the server's own state
+    writes alike when the two agree. A state OwnerState can't hold, such as
+    a rule-state value past its declaration, has no check, so 0
+--]]
+
+local function checkOf(run: Run, state: State): number
+	local wrote: boolean, length: unknown = pcall(OwnerState.write, state, Written, 0, run.settings.layout, run.limits)
+	if not wrote then
+		return 0
+	end
+
+	return Hash.range(Written, OWNER_ACK_BYTES, (length :: number) - OWNER_ACK_BYTES)
+end
+
 -- Releases the oldest commands the server ran once no Move repeats them, and any past the held limit
 local function release()
 	while #Held > HELD_LIMIT or (#Held > MAX_COMMANDS and Sequence.difference(Held[1].command.number, Acked) <= 0) do
@@ -245,7 +266,7 @@ end
     Makes this tick's command: the game's sample, a trip through the wire
     and back so the step runs the numbers the server will read, the next
     number, its presses against the previous command's levels, and the
-    body stepped on it
+    body stepped on it, with the check of where it stepped to
 --]]
 
 local function issue(run: Run)
@@ -277,8 +298,10 @@ local function issue(run: Run)
 	Last.aim = command.aim
 
 	entry.predicted = advance(run, command)
+	entry.check = 0
 	if entry.predicted then
 		State.copy(Current, entry.state)
+		entry.check = checkOf(run, entry.state)
 	end
 
 	table.insert(Held, entry)
@@ -290,8 +313,9 @@ end
 --[[
     Sends the Move: every command made since the last one and the ones
     before them it repeats, newest first and back only as far as the
-    numbers run without a skip, with the acknowledgments and the delay. With
-    no command made since the last it carries those alone
+    numbers run without a skip, each with its prediction's check as it
+    stands now, with the acknowledgments and the delay. With no command
+    made since the last it carries those alone
 --]]
 
 local function sendMove(run: Run)
@@ -301,13 +325,14 @@ local function sendMove(run: Run)
 		local expected: number = Newest
 
 		for index: number = #Held, 1, -1 do
-			local command: Command = Held[index].command
-			if count >= wanted or command.number ~= expected then
+			local entry: Entry = Held[index]
+			if count >= wanted or entry.command.number ~= expected then
 				break
 			end
 
 			count += 1
-			Outgoing[count] = command
+			Outgoing[count] = entry.command
+			Checks[count] = entry.check
 			expected = (expected - 1) % WRAP
 		end
 	end
@@ -317,7 +342,7 @@ local function sendMove(run: Run)
 	local settings: Settings = run.settings
 	local sequence: number, mask: number = run.acknowledged()
 	local delay: number = math.clamp(math.round(settings.delay() * MILLISECONDS), 0, DELAY_LIMIT)
-	Move.encode(Outbound, Outgoing, count, sequence, mask, delay, settings.layout, run.limits)
+	Move.encode(Outbound, Outgoing, count, sequence, mask, delay, settings.layout, run.limits, Checks)
 	run.send(Outbound)
 end
 
@@ -501,10 +526,10 @@ end
 --[[
     Moves the body and every prediction after the server's command by the
     differences the server's state shows inside the tolerance, with no
-    replay
+    replay, each moved prediction's check taken again from where it moved
 --]]
 
-local function shift(server: State, predicted: State)
+local function shift(run: Run, server: State, predicted: State)
 	local moved: vector = server.position - predicted.position
 	local sped: vector = server.velocity - predicted.velocity
 	local raised: number = server.apex - predicted.apex
@@ -520,6 +545,7 @@ local function shift(server: State, predicted: State)
 	for _, entry: Entry in Held do
 		if entry.predicted and Sequence.difference(entry.command.number, server.command) > 0 then
 			move(entry.state, moved, sped, raised, lowered)
+			entry.check = checkOf(run, entry.state)
 		end
 	end
 end
@@ -533,8 +559,10 @@ end
 
 --[[
     Resets the body to the server's state and replays every command after
-    the server's from it. A step that throws ends the replay, and the body
-    snaps to the server's state and gives false
+    the server's from it, each with the check of its new prediction. A step
+    that throws ends the replay, and the body snaps to the server's state,
+    leaves that command and every later one with no prediction or check, and
+    gives false
 --]]
 
 local function replay(run: Run): boolean
@@ -553,14 +581,16 @@ local function replay(run: Run): boolean
 			State.copy(Server, Current)
 			State.copy(Server, Previous)
 
-			for later: number = index + 1, #Held do
+			for later: number = index, #Held do
 				Held[later].predicted = false
+				Held[later].check = 0
 			end
 
 			return false
 		end
 
 		State.copy(Current, entry.state)
+		entry.check = checkOf(run, entry.state)
 	end
 
 	return true
@@ -644,7 +674,7 @@ local function reconcile(run: Run)
 	local flagged: boolean = true
 	if predicted then
 		if fits(run, Server, predicted, toleranceOf(run, Server) * QUANTUM) then
-			shift(Server, predicted)
+			shift(run, Server, predicted)
 
 			return
 		end
@@ -837,17 +867,57 @@ local function clock(run: Run)
 	end
 end
 
+-- What each newer OwnerState and acknowledgment does once it is held: its tick read, its command acknowledged, the
+-- commands no Move repeats released, and the clock held at its lead
+local function accept(run: Run)
+	LastTick = Server.tick
+	if Sequence.difference(Server.command, Acked) > 0 then
+		Acked = Server.command
+	end
+
+	release()
+	clock(run)
+end
+
 --[[
-    Reads an OwnerState, the server's state after the last command it ran.
-    The first starts the body, and each newer one is held against the
-    prediction, releases the commands it acknowledges and holds the clock
-    at its lead. One no newer than the last read changes nothing
+    Reads an acknowledgment, an OwnerState's first bytes sent alone since
+    the server's state agreed with the check of the command it ran: its
+    command, tick and depth go into the server's state, and the rest is
+    what an OwnerState that fits with nothing to shift does, so the body
+    and every prediction stay as they are. One before the body, or no newer
+    than the last read, changes nothing
+--]]
+
+local function acknowledge(run: Run, data: buffer)
+	local serverTick: number = buffer.readu16(data, 2)
+	if not Body or Sequence.difference(serverTick, LastTick) <= 0 then
+		return
+	end
+
+	Server.command = buffer.readu16(data, 0)
+	Server.tick = serverTick
+	Server.depth = buffer.readu8(data, 4)
+	accept(run)
+end
+
+--[[
+    Reads an OwnerState, the server's state after the last command it ran,
+    or an acknowledgment of it. The first OwnerState starts the body, and
+    each newer one is held against the prediction, releases the commands it
+    acknowledges and holds the clock at its lead. One no newer than the
+    last read changes nothing
 --]]
 
 function Predict.receive(data: buffer)
 	local run: Run = started()
 	if typeof(data) ~= "buffer" then
 		error(`Predict.receive takes an OwnerState's buffer, not a {typeof(data)}`, 2)
+	end
+
+	if buffer.len(data) == OWNER_ACK_BYTES then
+		acknowledge(run, data)
+
+		return
 	end
 
 	OwnerState.read(data, 0, buffer.len(data), Server, run.settings.layout, run.limits)
@@ -860,17 +930,10 @@ function Predict.receive(data: buffer)
 		return
 	elseif Sequence.difference(Server.tick, LastTick) <= 0 then
 		return
-	else
-		reconcile(run)
 	end
 
-	LastTick = Server.tick
-	if Sequence.difference(Server.command, Acked) > 0 then
-		Acked = Server.command
-	end
-
-	release()
-	clock(run)
+	reconcile(run)
+	accept(run)
 end
 
 --[[

@@ -78,6 +78,8 @@ end
     so the next encode may reuse them. It errors on more than a Move
     carries, on numbers out of order and on a game field its declaration
     doesn't hold
+
+    @ checks | each command's check by position, every one 0 when left out, as a bot's are
 --]]
 
 function Move.encode(
@@ -88,7 +90,8 @@ function Move.encode(
 	received: number,
 	delay: number,
 	layout: Layout,
-	limits: Limits
+	limits: Limits,
+	checks: { number }?
 )
 	if not (count >= 0 and count <= Constants.MAX_COMMANDS) then
 		error(`A Move carries 0 to {Constants.MAX_COMMANDS} commands, not {count}`)
@@ -114,6 +117,7 @@ function Move.encode(
 		end
 
 		Command.write(command, wire, layout, limits)
+		wire.check = checks and checks[position] or 0
 		move.commands[position] = wire
 	end
 
@@ -133,6 +137,8 @@ end
     fields fail it gives the index of the first field that failed and
     refuses the whole Move: into keeps its last acknowledgments and a count
     of 0, and its commands are scratch
+
+    @ skip | true at each position the receiver already holds, numbered but not read
 --]]
 
 function Move.decode(
@@ -143,7 +149,8 @@ function Move.decode(
 	wires: { Wire },
 	layout: Layout,
 	limits: Limits,
-	into: Incoming
+	into: Incoming,
+	skip: { boolean }?
 ): number?
 	local count: number = #wires
 	if count > Constants.MAX_COMMANDS then
@@ -157,11 +164,13 @@ function Move.decode(
 			into.commands[position] = target
 		end
 
-		local failed: number? = Command.read(wires[position], target, layout, limits)
-		if failed then
-			into.count = 0
+		if not (skip and skip[position]) then
+			local failed: number? = Command.read(wires[position], target, layout, limits)
+			if failed then
+				into.count = 0
 
-			return failed
+				return failed
+			end
 		end
 
 		target.number = (command - (position - 1)) % WRAP
