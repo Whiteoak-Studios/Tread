@@ -1,0 +1,59 @@
+{
+	"name": "tread-arm-a0",
+	"servePort": 34878,
+	"servePlaceIds": [108848112043191],
+	"tree": {
+		"$className": "DataModel",
+		"ReplicatedStorage": {
+			"Arm": {
+				"$path": "dev/Arms/A0/Shared",
+				"Config": { "$path": "dev/Arms/A0/Config.luau" }
+			},
+			"Shared": {
+				"$className": "Folder",
+				"Dev": {
+					"$className": "Folder",
+					"Frames": { "$path": "dev/Shared/Frames.luau" },
+					"FramesConfig": { "$path": "dev/Shared/FramesConfig.luau" }
+				}
+			}
+		},
+		"ServerScriptService": {
+			"Arm": { "$path": "dev/Arms/A0/Server" },
+			"Server": {
+				"$className": "Folder",
+				"Calibration": { "$path": "dev/Server/Calibration.luau" },
+				"Bots": {
+					"$className": "Folder",
+					"Config": { "$path": "dev/Server/Bots/Config.luau" }
+				},
+				"Config": {
+					"$className": "Folder",
+					"Parallel": { "$path": "dev/Server/Config/Parallel.luau" }
+				},
+				"Parallel": { "$path": "dev/Server/Parallel" },
+				"Scenarios": {
+					"$className": "Folder",
+					"ParallelProbe": { "$path": "dev/Server/Scenarios/ParallelProbe.luau" }
+				}
+			}
+		},
+		"StarterPlayer": {
+			"$className": "StarterPlayer",
+			"StarterPlayerScripts": {
+				"$className": "StarterPlayerScripts",
+				"Arm": { "$path": "dev/Arms/A0/Client" }
+			}
+		},
+		"Workspace": {
+			"$properties": {
+				"AuthorityMode": "Automatic",
+				"NextGenerationReplication": "Default",
+				"PlayerScriptsUseInputActionSystem": "Default",
+				"SignalBehavior": "Default",
+				"StreamingEnabled": true,
+				"UseFixedSimulation": "Default"
+			}
+		}
+	}
+}
