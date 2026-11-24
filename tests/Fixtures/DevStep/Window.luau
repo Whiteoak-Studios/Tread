@@ -1,7 +1,7 @@
 --[[
     A bot run's window as its cases take it: four frames, eight Heartbeats
     over two ticks with each place in the tick filled, two reads of stats,
-    counts and two relay clocks, and a run with the bot harness's Run loaded
+    counts, caps and two relay clocks, and a run with the bot harness's Run
 --]]
 
 --!strict
@@ -50,6 +50,18 @@ function Window.taken(): any
 			relaySkipped = { 2, 0 },
 			ownerChecked = { 40, 38 },
 			ownerMismatches = { 1, 2 },
+			antiEspHidden = { 10, 30 },
+			antiEspFailOpens = { 0, 1 },
+			antiEspWorkerTests = { 400, 500 },
+			antiEspWorkerLongest = { 0.002, 0.004 }, -- Seconds
+			antiEspLateBatches = { 0, 2 },
+			crowdRest = { 27, 45 },
+			antiEspCut = { 1, 2 },
+			npcsWaited = { 10, 0 },
+			relayLeft = { 0, 6 },
+			relayOver = { 0, 4 },
+			farHalved = { 2, 0 },
+			relaySend = { 0.0365, 0.02 }, -- Seconds, each read's smoothed level
 			decodeMs = { 0.25, 0.75 },
 			simulateMs = { 1, 2 },
 			npcsMs = { 0, 0 },
@@ -66,6 +78,9 @@ function Window.taken(): any
 			recordsCut = { 0, 2 },
 			bytesOut = { 2000, 2400 },
 			antiEspTests = { 50, 70 },
+			antiEspRays = { 900, 1100 },
+			antiEspWorkerBusy = { 12.5, 16 }, -- Milliseconds a second
+			crowdRest = { 1.5, 2.25 }, -- The samples' 27 and 45 over the reads' 18 and 20 relay runs
 		},
 
 		skipped = 120,

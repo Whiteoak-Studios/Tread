@@ -22,6 +22,10 @@ local BOT_RTT: number = 0.1 -- Seconds every bot's connection reports
 local MOCK_STEPS: number = 3 -- Mock frames that carry a flush across, as manualFlush.luau finds
 local LIFT: number = 0.5 -- Studs above the fixture floor a body is built at, so it lands on its first ticks
 
+-- Seconds of os.clock() anti-ESP's slice may take, more than any case's ticks run, so every pair due is tested in the
+-- tick it is due in however slow the machine; a case that tests the slice's own end sets its own in tweak
+local SLICE: number = 60
+
 -- Studs the step's fixture geometry is moved down, from 1,100 into the record's and the history's height window of
 -- -1,024 to 1,024, so what they hold of a body standing on it is where it stands
 local SHIFT: number = -100
@@ -51,7 +55,7 @@ type Fields = {
 	Server: any, -- The server handle's module
 	server: any, -- The started handle, nil until start
 	shared: any, -- The example's shared table, with the case's changes
-	settings: any, -- The example's server settings, with a bot round trip and the case's changes
+	settings: any, -- The example's server settings, with a bot round trip, anti-ESP's SLICE and the case's changes
 	floor: number, -- The top of the floor the casts see, the fixture's moved down by SHIFT
 	vault: vector, -- The center of the fixture's vault, moved the same, where no spot frees a body
 	mock: any, -- The environment's Volt.mock
@@ -92,10 +96,11 @@ local function crosses(wall: Wall, origin: vector, direction: vector): boolean
 end
 
 --[[
-    A rig with the example's tables, which tweak may change before start,
-    the environment's Engine answering with the fixture casts in place of
-    the engine's and anti-ESP's rays meeting only the walls a case sets,
-    and overrides answering any other require given
+    A rig with the example's tables, anti-ESP's slice set to SLICE, which
+    tweak may change before start, the environment's Engine answering with
+    the fixture casts in place of the engine's and anti-ESP's rays meeting
+    only the walls a case sets, and overrides answering any other require
+    given
 --]]
 
 function Rig.new(tweak: ((shared: any, settings: any) -> ())?, overrides: { [string]: any }?): Self
@@ -109,6 +114,17 @@ function Rig.new(tweak: ((shared: any, settings: any) -> ())?, overrides: { [str
 	local parts: { any } = {}
 	for _, part: any in geometry.parts do
 		table.insert(parts, { name = part.name, center = part.center + down, size = part.size, tilt = part.tilt })
+	end
+
+	-- Lune casts no ray on the engine, so anti-ESP's rays meet the walls the case set
+	local function meets(origin: vector, direction: vector): boolean
+		for _, wall: Wall in sight.walls do
+			if crosses(wall, origin, direction) then
+				return true
+			end
+		end
+
+		return false
 	end
 
 	local answers: { [string]: any } = {
@@ -129,19 +145,17 @@ function Rig.new(tweak: ((shared: any, settings: any) -> ())?, overrides: { [str
 				return casts(parts)
 			end,
 
-			-- Lune casts no ray on the engine, so anti-ESP's occlusion meets the walls the case set
 			occlusion = function (include: { any }): any
 				sight.include = include
 
-				return function (origin: vector, direction: vector): boolean
-					for _, wall: Wall in sight.walls do
-						if crosses(wall, origin, direction) then
-							return true
-						end
-					end
+				return meets
+			end,
 
-					return false
-				end
+			-- A wall is no part, so the occluder says only that a ray met one, and verdict memory keeps no box of it
+			occluder = function (include: { any }): any
+				sight.include = include
+
+				return meets
 			end,
 		},
 	}
@@ -159,6 +173,7 @@ function Rig.new(tweak: ((shared: any, settings: any) -> ())?, overrides: { [str
 	local shared: any = example.shared()
 	local settings: any = example.server()
 	settings.bots = { rtt = BOT_RTT }
+	settings.antiEsp.slice = SLICE
 
 	if tweak then
 		tweak(shared, settings)
@@ -233,7 +248,7 @@ function Rig.wall(self: Self, center: vector, size: vector): () -> ()
 	end
 end
 
--- The include list the server handed anti-ESP's occlusion, nil before start
+-- The include list the server handed anti-ESP's queries, nil before start
 function Rig.occluders(self: Self): { any }?
 	return self.sight.include
 end

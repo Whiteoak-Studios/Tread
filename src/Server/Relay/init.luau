@@ -39,6 +39,9 @@ local ROW_BYTES: number = Wire.ROW_BYTES -- A viewer's row of anti-ESP's answers
 local NO_TEAM: number = 0 / 0 -- A hand's team for a viewer with no slot, which equals no team
 local WORKERS_FOLDER: string = "TreadRelayWorkers" -- The folder under ServerScriptService the workers are cloned into
 local WINDOW_SECONDS: number = 10 -- How far back each clock's runs are kept, the span stats reads its p95 over
+-- relay.budget leaves a viewer at most one run in this many, and in a run at most one in this many of a mode's turn
+-- viewers, rounded down
+local LEFT_EVERY: number = 4
 
 local TURN_CHANGE: number = 0.5 -- Degrees a yaw or pitch moves by before the move alone counts as a change
 local YAW_CHANGE: number = Constants.ANGLE_STEPS * TURN_CHANGE / TURN -- That move in a record's yaw steps
@@ -95,8 +98,11 @@ for index: number, name: string in CLOCKS do
 	CLOCK_AT[name] = (index - 1) * 8
 end
 
+type Band = Config.Band
 type Command = State.Command
 type Copy = Wire.Copy
+type Crowd = Config.Crowd
+type Edge = Config.Edge
 type Hand = Wire.Hand
 type Layout = Fields.Layout
 type Limits = Command.Limits
@@ -107,6 +113,7 @@ type ServerSettings = Config.ServerSettings
 type Shared = Config.Shared
 type State = State.State
 type Steps = Turn.Steps
+type UnderLoad = Config.UnderLoad
 type Values = State.Values
 type View = Turn.View
 type Withheld = Turn.Withheld
@@ -116,23 +123,29 @@ type Bot = { Name: string }
 type Key = Player | Bot
 type Platforms = { [number]: vector } -- Each platform's place at the tick, by its id
 
--- What the server handle starts the relay with: the game's checked tables and its compiled declarations
+-- What the server handle starts the relay with: the game's checked tables, its compiled declarations, and the clock
+-- the frame caps read, os.clock when left out
 export type Settings = {
 	shared: Shared,
 	server: ServerSettings,
 	layout: Layout,
+	clock: (() -> number)?,
 }
 
 -- One viewer as the server handle hands it in each relay tick, a table it keeps and refills
 export type Viewer = {
 	key: Key, -- The player or bot, which the relay keeps its view under and hands send and traffic
 	slot: number?, -- Its own character's slot, nil while it has none
-	position: vector, -- Where its relevancy, tiers and earshot are measured from
+	position: vector, -- Where its relevancy, bands and earshot are measured from
 	acknowledged: number, -- The newest relay sequence its client received, 0 for none
 	received: number, -- The mask of the 16 sequences before that one, bit 0 the one just before
 	target: Key?, -- The viewer it spectates, whose blocks it gets copies of in place of its own; nil for none
 	look: vector?, -- The newest look its client sent, a unit vector on the ground; nil before any
+	zoomed: boolean?, -- Whether its players go at the nearest band's rates wherever they stand; nil as false
 }
+
+-- Anti-ESP's port that takes a viewer the relay's budget left, with the slots its view tracks and their count
+type Passed = (viewer: Viewer, slots: { number }, count: number) -> ()
 
 -- One section of the relay's clocks over its last WINDOW_SECONDS of runs, a run's seconds each, which stats reads
 export type ClockRing = {
@@ -233,16 +246,30 @@ local Steps: Steps = World.steps
 
 local References: buffer = buffer.create(SLOTS * RECORD_BYTES) -- The record each change is measured from
 
--- Each slot's last sample for its footsteps: where it stood, and what its steps since its last step have covered
-local Previous: { vector } = table.create(SLOTS, vector.zero)
-local PreviousMaterials: { Enum.Material } = table.create(SLOTS, Enum.Material.Air) -- The ground it last stood on
-local Sampled: buffer = buffer.create(SLOTS * 4) -- u32: the run it was sampled at, 0 for never
-local PreviousLives: buffer = buffer.create(SLOTS)
-local PreviousEpochs: buffer = buffer.create(SLOTS)
-local PreviousJumps: buffer = buffer.create(SLOTS)
-local PreviousLands: buffer = buffer.create(SLOTS)
-local Stepping: buffer = buffer.create(SLOTS) -- 1 when it stood in a gait that steps
-local Walked: buffer = buffer.create(SLOTS * 8) -- f64: studs since its last step
+-- Each slot's last sample for its footsteps: where it stood, and what its steps since its last step have covered, in
+-- one table since Luau caps a chunk's locals
+local Samples: {
+	positions: { vector },
+	materials: { Enum.Material }, -- The ground it last stood on
+	runs: buffer, -- u32: the run it was sampled at, 0 for never
+	lives: buffer, -- u8
+	epochs: buffer, -- u8
+	jumps: buffer, -- u8
+	lands: buffer, -- u8
+	stepping: buffer, -- u8: 1 when it stood in a gait that steps
+	walked: buffer, -- f64: studs since its last step
+} =
+	{
+		positions = table.create(SLOTS, vector.zero),
+		materials = table.create(SLOTS, Enum.Material.Air),
+		runs = buffer.create(SLOTS * 4),
+		lives = buffer.create(SLOTS),
+		epochs = buffer.create(SLOTS),
+		jumps = buffer.create(SLOTS),
+		lands = buffer.create(SLOTS),
+		stepping = buffer.create(SLOTS),
+		walked = buffer.create(SLOTS * 8),
+	}
 
 local Scratch: Record.Record = Record.new()
 local Footstep: Block.Footstep = { at = vector.zero, kind = "Walk", material = Enum.Material.Air }
@@ -307,13 +334,20 @@ local Dispatch: {
 
 local InProcess: { Viewer } = {} -- This run's viewers the in-process Turn takes, in the run's order
 
--- The shared hand-in's facts beside the world: the looks and Invisible marks set since the last hand-in, the held
--- items this run's walk changed, the keys a sink observes, and anti-ESP's kinds and teams, filled at dispatch
+-- The distance bands and their edges as tiers or Relay.setBands last gave them, and the crowd cap as tiers or
+-- Relay.setCrowd did, nil for none, each copied, and as every turn reads them
+local Bands: { given: { Band }, edges: { Edge }, crowd: Crowd?, tuning: Turn.Tuning } =
+	{ given = {}, edges = {}, crowd = nil, tuning = Wire.tuning() }
+
+-- The shared hand-in's facts beside the world: the run's bands, the looks and Invisible marks set since the last
+-- hand-in, the held items this run's walk changed, the keys a sink observes, and anti-ESP's kinds and teams, filled at
+-- dispatch
 local Header: Wire.Shared = {
 	run = 0,
 	tick = 0,
 	elapsed = 0,
 	wire = 0,
+	tune = Bands.tuning,
 	places = 0,
 	looks = {},
 	lookCount = 0,
@@ -347,8 +381,70 @@ local Frozen: Facts = {
 	generations = buffer.create(0),
 }
 
--- The workers' running totals of the records placed and cut and the bodies gathered, summed from their results
-local Totals: { sent: number, cut: number, visited: number } = { sent = 0, cut = 0, visited = 0 }
+-- The workers' running totals of the records placed and cut, the bodies gathered and the candidates held outside a
+-- crowd cap, summed from their results
+local Totals: { sent: number, cut: number, visited: number, rest: number } =
+	{ sent = 0, cut = 0, visited = 0, rest = 0 }
+
+-- The frame caps the relay keeps, each set by its seam and nil while off, with the clock they read and anti-ESP's
+-- port for a viewer left, the seams' calls so far, and what the run being taken left and measured under the budget it
+-- began with. Each key keeps the run it was last left and whether its next turn follows one it missed, and the run
+-- keeps its watched targets, the turn viewers in the order the budget takes them, where the next run's rest begin, the
+-- worker turns the next run hands in, nil for all, the runs over and under the budget in a row, and the running totals
+local Caps: {
+	clock: () -> number,
+	passed: Passed?,
+	budget: number?,
+	underLoad: UnderLoad?,
+	sets: number, -- The calls of Relay.setBudget and Relay.setUnderLoad since start
+	running: number?, -- The budget the run being taken began under, which its finish reads
+	ranAfter: number, -- And the seams' calls before it, so a finish after another call neither measures nor judges
+	began: number,
+	measured: number, -- Its seconds so far, Relay.run's own and then its finish's
+	left: number, -- Its viewers left
+	handed: number, -- Its worker turns handed in
+	first: number, -- How far past the cursor the first viewer it left stands in its list, math.huge for none
+	lefts: { [Key]: number }, -- So its turn the run after follows one it missed
+	away: { [Key]: boolean }, -- Its worker viewers left
+	guarded: { [Key]: boolean },
+	order: { number }, -- Places from 1 in its list
+	free: { boolean }, -- By place in order: whether the budget may leave that viewer
+	cursor: number,
+	hand: number?,
+	overs: number,
+	unders: number,
+	lowered: boolean,
+	totalLeft: number,
+	totalOver: number,
+	halved: number, -- The runs taken with the farthest band lowered
+} =
+	{
+		clock = os.clock,
+		passed = nil,
+		budget = nil,
+		underLoad = nil,
+		sets = 0,
+		running = nil,
+		ranAfter = 0,
+		began = 0,
+		measured = 0,
+		left = 0,
+		handed = 0,
+		first = math.huge,
+		lefts = {},
+		away = {},
+		guarded = {},
+		order = {},
+		free = {},
+		cursor = 1,
+		hand = nil,
+		overs = 0,
+		unders = 0,
+		lowered = false,
+		totalLeft = 0,
+		totalOver = 0,
+		halved = 0,
+	}
 
 -- With relay.clocks on: the running run's seconds in each section at its offset in CLOCK_AT, each section's ring, the
 -- runs a ring holds, whether the laps hold a run the rings don't yet, when the lap being timed began, when the
@@ -430,6 +526,74 @@ local function trim<T>(list: { T }, count: number)
 end
 
 --[[
+    Keeps distance bands and their edges, each copied, and works them out
+    in place into the bands every turn reads: each band's aim and floor, and
+    each edge's radii squared, the crowd cap's fields left as they are
+--]]
+
+local function tune(bands: { Band }, edges: { Edge })
+	local tuning: Turn.Tuning = Bands.tuning
+	local count: number = #bands
+	tuning.bands = count
+
+	for index: number, band: Band in bands do
+		Bands.given[index] = { aim = band.aim, floor = band.floor }
+		tuning.aims[index] = band.aim
+		tuning.floors[index] = band.floor
+	end
+
+	for index: number, edge: Edge in edges do
+		Bands.edges[index] = { enter = edge.enter, leave = edge.leave }
+		tuning.enters[index] = edge.enter ^ 2
+		tuning.leaves[index] = edge.leave ^ 2
+	end
+
+	trim(Bands.given, count)
+	trim(tuning.aims, count)
+	trim(tuning.floors, count)
+	trim(Bands.edges, #edges)
+	trim(tuning.enters, #edges)
+	trim(tuning.leaves, #edges)
+end
+
+-- Puts the farthest band's aim and floor in the bands every turn reads as given, or times tiers.underLoad.scale while
+-- the far rate under load holds it lowered. With one band there is none farther to lower
+local function lowerFar()
+	local tuning: Turn.Tuning = Bands.tuning
+	local count: number = tuning.bands
+	if count < 2 then
+		return
+	end
+
+	local scale: number = 1
+	local underLoad: UnderLoad? = Caps.underLoad
+	if Caps.lowered and underLoad then
+		scale = underLoad.scale
+	end
+
+	local band: Band = Bands.given[count]
+	tuning.aims[count] = band.aim * scale
+	tuning.floors[count] = band.floor * scale
+end
+
+-- Keeps a crowd cap, copied, or none, and puts it in the bands every turn reads, its size 0 for none
+local function tuneCrowd(crowd: Crowd?)
+	local tuning: Turn.Tuning = Bands.tuning
+
+	if crowd then
+		Bands.crowd = { size = crowd.size, rate = crowd.rate, floor = crowd.floor }
+		tuning.crowdSize = crowd.size
+		tuning.crowdRate = crowd.rate
+		tuning.crowdFloor = crowd.floor
+	else
+		Bands.crowd = nil
+		tuning.crowdSize = 0
+		tuning.crowdRate = 0
+		tuning.crowdFloor = 0
+	end
+end
+
+--[[
     Starts the relay with the game's tables and what it sends through: send
     fires one block to a viewer and the moderators watching it, and
     sendWithheld one withheld block to those moderators, each in one
@@ -437,7 +601,9 @@ end
     Volt's count of the bytes sent to a viewer over the last second,
     isHidden is anti-ESP's answer for a pair, answers anti-ESP's export of
     them, and asked takes a viewer's asks whose quiet bit was set in their
-    place, both of which relay.workers above 0 needs. It runs once
+    place, both of which relay.workers above 0 needs. passed, when given,
+    takes each viewer relay.budget leaves, with the slots its view tracks,
+    so anti-ESP keeps its pairs as an ask would. It runs once
 --]]
 
 function Relay.start(
@@ -447,7 +613,8 @@ function Relay.start(
 	traffic: (key: Key) -> number,
 	isHidden: (viewer: Viewer, slot: number) -> boolean,
 	answers: ((viewers: { Viewer }) -> Answers)?,
-	asked: ((viewer: Viewer, slots: { number }, count: number) -> ())?
+	asked: ((viewer: Viewer, slots: { number }, count: number) -> ())?,
+	passed: Passed?
 )
 	if Started then
 		error("Relay.start runs once, and it has already run", 2)
@@ -458,6 +625,10 @@ function Relay.start(
 		or type(isHidden) ~= "function"
 	then
 		error("Relay.start takes send, sendWithheld, traffic and isHidden as functions", 2)
+	elseif passed ~= nil and type(passed) ~= "function" then
+		error(`Relay.start takes anti-ESP's passed as a function or nil, not a {typeof(passed)}`, 2)
+	elseif settings.clock ~= nil and type(settings.clock) ~= "function" then
+		error(`Relay.start takes its clock as a function or nil, not a {typeof(settings.clock)}`, 2)
 	end
 
 	local shared: Shared = settings.shared
@@ -507,6 +678,9 @@ function Relay.start(
 		Changes = true
 	end
 
+	tune(server.tiers.bands, server.tiers.edges)
+	tuneCrowd(server.tiers.crowd)
+
 	-- Each section's ring holds WINDOW_SECONDS of runs
 	if relay and relay.clocks then
 		Clock.on = true
@@ -524,12 +698,6 @@ function Relay.start(
 		leave = server.relevancy.leave,
 		sleepers = server.sleepers.radius,
 		npcs = server.npcs.range,
-		nearEnterSquared = server.tiers.nearEnter ^ 2,
-		nearLeaveSquared = server.tiers.nearLeave ^ 2,
-		nearAim = server.tiers.nearAim,
-		nearFloor = server.tiers.nearFloor,
-		farAim = server.tiers.farAim,
-		farFloor = server.tiers.farFloor,
 		weightNear = server.weights.near,
 		weightFar = server.weights.far,
 		weightShooter = server.weights.shooter,
@@ -549,6 +717,8 @@ function Relay.start(
 	SendWithheld = sendWithheld
 	Traffic = traffic
 	IsHidden = isHidden
+	Caps.passed = passed
+	Caps.clock = settings.clock or os.clock
 
 	Turn.start(turnSettings, {
 		send = send,
@@ -726,31 +896,14 @@ local function mark(slot: number)
 	end
 end
 
--- Doubles the run's footstep buffers, keeping the steps already in them
-local function grow()
-	local capacity: number = Steps.capacity * 2
-	local slots: buffer = buffer.create(capacity * 2)
-	local kinds: buffer = buffer.create(capacity)
-	local data: buffer = buffer.create(capacity * FOOTSTEP_BYTES)
-
-	buffer.copy(slots, 0, Steps.slots)
-	buffer.copy(kinds, 0, Steps.kinds)
-	buffer.copy(data, 0, Steps.data)
-
-	Steps.capacity = capacity
-	Steps.slots = slots
-	Steps.kinds = kinds
-	Steps.data = data
-end
-
--- Encodes one footstep of a slot's, unless the game gives its kind no range
+-- Encodes one footstep of a slot's, unless the game gives its kind no range, the run's buffers doubled when full
 local function emit(slot: number, kind: number, at: vector, material: Enum.Material)
 	if Earshot[kind] == SILENT then
 		return
 	end
 
 	if Steps.count == Steps.capacity then
-		grow()
+		Turn.room(Steps.count + 1)
 	end
 
 	local index: number = Steps.count
@@ -785,25 +938,34 @@ end
 --]]
 
 local function walk(slot: number, state: State, generation: number)
+	local positions: { vector } = Samples.positions
+	local materials: { Enum.Material } = Samples.materials
+	local runs: buffer = Samples.runs
+	local lives: buffer = Samples.lives
+	local epochs: buffer = Samples.epochs
+	local jumped: buffer = Samples.jumps
+	local landed: buffer = Samples.lands
+	local gaits: buffer = Samples.stepping
+	local walked: buffer = Samples.walked
 	local index: number = slot + 1
 	local position: vector = state.position
-	local previous: vector = Previous[index]
-	local sampled: number = buffer.readu32(Sampled, slot * 4)
+	local previous: vector = positions[index]
+	local sampled: number = buffer.readu32(runs, slot * 4)
 
 	-- Only a sample from the run before, of the same life and epoch, makes a stretch of ground covered
-	local followed: boolean = sampled ~= 0 and sampled == Run - 1 and buffer.readu8(PreviousLives, slot) == generation
-	if followed and buffer.readu8(PreviousEpochs, slot) == state.epoch then
-		local jumps: number = (state.jumps - buffer.readu8(PreviousJumps, slot)) % COUNTERS
+	local followed: boolean = sampled ~= 0 and sampled == Run - 1 and buffer.readu8(lives, slot) == generation
+	if followed and buffer.readu8(epochs, slot) == state.epoch then
+		local jumps: number = (state.jumps - buffer.readu8(jumped, slot)) % COUNTERS
 		for _ = 1, jumps do
-			emit(slot, JUMP, previous, PreviousMaterials[index])
+			emit(slot, JUMP, previous, materials[index])
 		end
 
-		local lands: number = (state.lands - buffer.readu8(PreviousLands, slot)) % COUNTERS
+		local lands: number = (state.lands - buffer.readu8(landed, slot)) % COUNTERS
 		for _ = 1, lands do
 			emit(slot, LAND, position, state.groundMaterial)
 		end
 
-		if stepping(state) and buffer.readu8(Stepping, slot) == 1 then
+		if stepping(state) and buffer.readu8(gaits, slot) == 1 then
 			local stride: number = StrideWalk
 			local kind: number = WALK
 			if state.sprint or state.mode == "Slide" then
@@ -817,7 +979,7 @@ local function walk(slot: number, state: State, generation: number)
 
 			if length > 0 then
 				-- Each step falls where the distance since the last one reaches a stride
-				local along: number = math.max(stride - buffer.readf64(Walked, slot * 8), 0)
+				local along: number = math.max(stride - buffer.readf64(walked, slot * 8), 0)
 
 				while along <= length do
 					local share: number = along / length
@@ -831,26 +993,26 @@ local function walk(slot: number, state: State, generation: number)
 					along += stride
 				end
 
-				buffer.writef64(Walked, slot * 8, length - (along - stride))
+				buffer.writef64(walked, slot * 8, length - (along - stride))
 			end
 		end
 	end
 
-	Previous[index] = position
-	buffer.writeu32(Sampled, slot * 4, Run)
-	buffer.writeu8(PreviousLives, slot, generation)
-	buffer.writeu8(PreviousEpochs, slot, state.epoch)
-	buffer.writeu8(PreviousJumps, slot, state.jumps)
-	buffer.writeu8(PreviousLands, slot, state.lands)
+	positions[index] = position
+	buffer.writeu32(runs, slot * 4, Run)
+	buffer.writeu8(lives, slot, generation)
+	buffer.writeu8(epochs, slot, state.epoch)
+	buffer.writeu8(jumped, slot, state.jumps)
+	buffer.writeu8(landed, slot, state.lands)
 
 	if stepping(state) then
-		buffer.writeu8(Stepping, slot, 1)
+		buffer.writeu8(gaits, slot, 1)
 	else
-		buffer.writeu8(Stepping, slot, 0)
+		buffer.writeu8(gaits, slot, 0)
 	end
 
 	if state.grounded then
-		PreviousMaterials[index] = state.groundMaterial
+		materials[index] = state.groundMaterial
 	end
 end
 
@@ -908,8 +1070,9 @@ end
 --[[
     Hands each viewer to its home's list, the in-process Turn's or its
     worker's, and a watcher of a worker's view to that worker too, where its
-    watch runs, with what the front's loops would work out for it. Gives
-    whether any viewer went to a worker
+    watch runs, with what the front's loops would work out for it. A worker
+    viewer the run's budget leaves goes to no list. Gives whether any viewer
+    went to a worker
 --]]
 
 local function split(viewers: { Viewer }): boolean
@@ -919,6 +1082,7 @@ local function split(viewers: { Viewer }): boolean
 	local ordinals: { number } = Dispatch.ordinals
 	local starting: { boolean } = Dispatch.starting
 	local returning: { boolean } = Dispatch.returning
+	local budgeted: boolean = Caps.running ~= nil
 
 	for _, host: Worker in Hosts do
 		host.count = 0
@@ -945,6 +1109,8 @@ local function split(viewers: { Viewer }): boolean
 		if home == 0 then
 			inProcess += 1
 			InProcess[inProcess] = viewer
+		elseif budgeted and Caps.away[key] then
+			continue
 		else
 			local host: Worker = Hosts[home]
 			host.count += 1
@@ -1034,6 +1200,8 @@ local function handAt(hands: { Hand }, place: number): Hand
 		received = 0,
 		sequence = 0,
 		back = false,
+		zoomed = false,
+		missed = false,
 		traffic = 0,
 		team = 0,
 		row = 0,
@@ -1045,9 +1213,10 @@ end
 
 --[[
     A viewer as its worker's hand-in carries it: what the front's watch
-    loop or turn loop would hand its watch or turn, Volt's traffic for one
-    whose turn runs, the team of its own slot, and its row of anti-ESP's
-    answers by its place in the run's viewers
+    loop or turn loop would hand its watch or turn, Volt's traffic and
+    whether the budget left it the run before for one whose turn runs, the
+    team of its own slot, and its row of anti-ESP's answers by its place in
+    the run's viewers
 --]]
 
 local function fill(hand: Hand, viewer: Viewer, at: number, teams: buffer)
@@ -1064,6 +1233,8 @@ local function fill(hand: Hand, viewer: Viewer, at: number, teams: buffer)
 	hand.row = (at - 1) * ROW_BYTES
 	hand.sequence = 0
 	hand.back = false
+	hand.zoomed = viewer.zoomed == true
+	hand.missed = false
 	hand.traffic = 0
 
 	-- A slot the slot table never has goes as it is, so the worker's turn refuses it as the in-process one does
@@ -1085,6 +1256,8 @@ local function fill(hand: Hand, viewer: Viewer, at: number, teams: buffer)
 	else
 		hand.target = nil
 		hand.traffic = Traffic(key)
+		hand.missed = Caps.lefts[key] == Run - 1
+
 		if Dispatch.returning[at] then
 			hand.back = true
 			hand.sequence = Heard[key] or 0
@@ -1257,6 +1430,192 @@ local function keep()
 end
 
 --[[
+    Puts the places from 1 of the run's turn viewers homed in process, or
+    on the workers, in the order the budget takes them: those it left in
+    one of its last LEFT_EVERY - 1 runs, whose turns it forces, first in the
+    list's order, then the rest from the cursor round, each marked free when
+    the budget may leave it. Gives how many there are and how many are free;
+    a run leaves at most a LEFT_EVERY'th of the first, rounded down
+--]]
+
+local function rank(viewers: { Viewer }, onWorkers: boolean): (number, number)
+	local order: { number } = Caps.order
+	local free: { boolean } = Caps.free
+	local count: number = #viewers
+	local placed: number, total: number, frees: number = 0, 0, 0
+	local forcedFrom: number = Run - LEFT_EVERY -- A viewer left after this run is forced
+
+	for index: number, viewer: Viewer in viewers do
+		local at: number? = Caps.lefts[viewer.key]
+		if viewer.target == nil and (Homes[viewer.key] ~= 0) == onWorkers then
+			total += 1
+			if at ~= nil and at > forcedFrom then
+				placed += 1
+				order[placed] = index
+				free[placed] = false
+			end
+		end
+	end
+
+	for step: number = 0, count - 1 do
+		local index: number = (Caps.cursor - 1 + step) % count + 1
+		local viewer: Viewer = viewers[index]
+		local key: Key = viewer.key
+		local at: number? = Caps.lefts[key]
+		local forced: boolean = at ~= nil and at > forcedFrom
+		if viewer.target == nil and (Homes[key] ~= 0) == onWorkers and not forced then
+			-- None a viewer this run watches, whose watchers need its turn, and none back from a spectate
+			local leavable: boolean = Caps.guarded[key] == nil and Watching[key] == nil
+			placed += 1
+			order[placed] = index
+			free[placed] = leavable
+			if leavable then
+				frees += 1
+			end
+		end
+	end
+
+	trim(order, placed)
+	trim(free, placed)
+
+	return total, frees
+end
+
+-- Leaves a viewer's turn to the next run, where it goes first, marked as following a missed one: its credit counts
+-- every relay tick since its last turn, held to Turn's most, and it can hear this run's footsteps a run late, an
+-- enemy's not marked Invisible in it, as a Parked one is, while still culled from it in the same life and kind, in
+-- earshot of where it then stands, and for a view on a worker only if the worker took this run
+local function leave(viewer: Viewer, index: number, count: number)
+	local key: Key = viewer.key
+	Caps.lefts[key] = Run
+	Caps.left += 1
+	Caps.totalLeft += 1
+	Caps.first = math.min(Caps.first, (index - Caps.cursor) % count)
+end
+
+--[[
+    Picks the run's worker turns its budget hands in, each it forces or may
+    not leave and as many of the rest as the last measure allows, but never
+    fewer than all less a LEFT_EVERY'th of them, rounded down, before any
+    hand-in is written, and leaves the others, the last in its order, whom
+    the finish passes to anti-ESP in the turns' place
+--]]
+
+local function choose(viewers: { Viewer })
+	local total: number, frees: number = rank(viewers, true)
+	local hand: number = Caps.hand or total
+	local allowed: number = math.min(total // LEFT_EVERY, math.max(total - hand, 0), frees)
+	local remaining: number = frees
+	local count: number = #viewers
+
+	table.clear(Caps.away)
+	for place: number, index: number in Caps.order do
+		local viewer: Viewer = viewers[index]
+		if Caps.free[place] then
+			if remaining <= allowed then
+				Caps.away[viewer.key] = true
+				leave(viewer, index, count)
+			end
+
+			remaining -= 1
+		end
+	end
+
+	Caps.handed = total - allowed
+end
+
+-- An in-process viewer's turn, one back from a spectate going on past what its client was sent, and one the run
+-- before left marked as following a missed one
+local function turnAt(viewer: Viewer)
+	local key: Key = viewer.key
+	local back: number? = nil
+	if Watching[key] ~= nil then
+		back = Heard[key] or 0
+		Watching[key] = nil
+	end
+
+	Turn.turn(viewer, back, Caps.lefts[key] == Run - 1)
+end
+
+--[[
+    The in-process turns under a budget: those it forces, then the rest from
+    the cursor, each that may be left first reading whether the run has
+    reached its budget. Once it has, the last of them in that order, up to a
+    LEFT_EVERY'th of the in-process turns, are left, each passed to
+    anti-ESP in its turn's place with the slots its view tracks, so the
+    pairs its last turn asked about stay asked
+--]]
+
+local function budgetedTurns(viewers: { Viewer }, budget: number)
+	local total: number, frees: number = rank(viewers, false)
+	local allowed: number = math.min(total // LEFT_EVERY, frees)
+	local remaining: number = frees
+	local reached: boolean = false
+	local count: number = #viewers
+
+	for place: number, index: number in Caps.order do
+		local viewer: Viewer = viewers[index]
+		local away: boolean = false
+
+		if allowed > 0 and Caps.free[place] then
+			if not reached then
+				reached = Caps.clock() - Caps.began >= budget
+			end
+
+			away = reached and remaining <= allowed
+			remaining -= 1
+		end
+
+		if away then
+			local view: View? = Turn.view(viewer.key)
+			if view == nil then
+				error("A relay viewer in process was left with no view after Turn.ready")
+			end
+
+			leave(viewer, index, count)
+
+			local passed: Passed? = Caps.passed
+			if passed then
+				passed(viewer, view.tracked, #view.tracked)
+			end
+		else
+			turnAt(viewer)
+		end
+	end
+end
+
+--[[
+    Counts a run the budget it began under judged, over when the budget
+    left a viewer in it or its measure passed the budget, into the runs over
+    and under in a row, which lower the farthest band once tiers.underLoad's
+    runs in a row are over and put it back once as many in a row are under
+--]]
+
+local function judge(over: boolean)
+	if over then
+		Caps.totalOver += 1
+		Caps.overs += 1
+		Caps.unders = 0
+	else
+		Caps.unders += 1
+		Caps.overs = 0
+	end
+
+	local underLoad: UnderLoad? = Caps.underLoad
+	if underLoad == nil then
+		return
+	end
+
+	if not Caps.lowered and Caps.overs >= underLoad.runs then
+		Caps.lowered = true
+		lowerFar()
+	elseif Caps.lowered and Caps.unders >= underLoad.runs then
+		Caps.lowered = false
+		lowerFar()
+	end
+end
+
+--[[
     One relay tick: encodes each live body's record and footsteps once, a
     rider's in its platform's space where platforms holds that platform's
     place at the tick, and files the body by where it stands, then gives
@@ -1267,7 +1626,13 @@ end
     it, once every viewer has had its turn, and a tick, unwrapped, no later
     than the last run's is refused. With workers, their turns go out in a
     round Relay.finish brings in, and no run starts while one is out. With
-    relay.clocks on, the run before's clocks go into their rings first
+    relay.clocks on, the run before's clocks go into their rings first.
+    Under relay.budget the viewers it left in its last runs go first, and
+    those it leaves this run, at most a quarter of each mode's, wait for
+    the next, where each can hear this run's footsteps a run late: an
+    enemy's not marked Invisible in it, as a Parked one is, while still
+    culled from it in the same life and kind, in earshot of where it then
+    stands, and for a view on a worker only if the worker took this run
 --]]
 
 function Relay.run(
@@ -1283,6 +1648,22 @@ function Relay.run(
 		error("Relay.run ran while the last run's round was still out, before Relay.finish or Relay.drop", 2)
 	elseif not (tick > RunTick) then
 		error(`Relay.run takes a relay tick after the last run's {RunTick}, not {tick}`, 2)
+	end
+
+	-- The budget the run begins under is the one its finish judges it by, so long as no seam is called meanwhile. A
+	-- run before that left a viewer has its footsteps kept for that viewer's next turn, which is this run's
+	local budget: number? = Caps.budget
+	local carry: boolean = Caps.left > 0
+	Caps.running = budget
+	Caps.ranAfter = Caps.sets
+	Caps.left = 0
+	if budget ~= nil then
+		Caps.began = Caps.clock()
+		Caps.first = math.huge
+	end
+
+	if Caps.lowered and Bands.tuning.bands > 1 then
+		Caps.halved += 1
 	end
 
 	local clocked: boolean = Clock.on
@@ -1301,10 +1682,10 @@ function Relay.run(
 	RunTick = tick
 	TickWire = tick % WRAP
 	Live.tick = TickWire
-	Steps.count = 0
 	Header.heldCount = 0
 	Overfull = nil
-	Turn.begin(Run, RunTick, Elapsed, TickWire)
+	Turn.begin(Run, RunTick, Elapsed, TickWire, Bands.tuning, carry)
+	Steps.count = 0
 
 	-- Each body's facts where every turn reads them, numbered in the order the states are walked, which each turn
 	-- keeps. One in the states with no entry is still marked unless Parked, as a withheld block asks only that
@@ -1360,6 +1741,22 @@ function Relay.run(
 		made(viewer.key)
 	end
 
+	-- Under a budget, the targets watched this run are never left, and the worker turns it leaves go to no worker
+	if budget ~= nil then
+		table.clear(Caps.guarded)
+		for _, viewer: Viewer in viewers do
+			local target: Key? = viewer.target
+			if target ~= nil then
+				Caps.guarded[target] = true
+			end
+		end
+
+		Caps.handed = 0
+		if pool then
+			choose(viewers)
+		end
+	end
+
 	local dispatched: boolean = split(viewers)
 	Turn.ready(InProcess)
 
@@ -1387,18 +1784,19 @@ function Relay.run(
 		end
 	end
 
-	-- Each in-process viewer with no target takes its turn, one back from a spectate going on past what its client
-	-- was sent
-	for index: number, viewer: Viewer in viewers do
-		if viewer.target == nil and Dispatch.homes[index] == 0 then
-			local key: Key = viewer.key
-			local back: number? = nil
-			if Watching[key] ~= nil then
-				back = Heard[key] or 0
-				Watching[key] = nil
+	-- Each in-process viewer with no target takes its turn in the list's order, or under a budget in the budget's,
+	-- and the next run's rest begin at the first it left
+	if budget == nil then
+		for index: number, viewer: Viewer in viewers do
+			if viewer.target == nil and Dispatch.homes[index] == 0 then
+				turnAt(viewer)
 			end
+		end
+	else
+		budgetedTurns(viewers, budget)
 
-			Turn.turn(viewer, back)
+		if Caps.first ~= math.huge then
+			Caps.cursor = (Caps.cursor - 1 + Caps.first) % #viewers + 1
 		end
 	end
 
@@ -1412,8 +1810,12 @@ function Relay.run(
 		lap("inProcess")
 	end
 
+	-- The run's own seconds under a budget, which a round out adds its finish's to before the run is judged
 	if pool and dispatched then
 		dispatch(pool, viewers)
+		if budget ~= nil then
+			Caps.measured = Caps.clock() - Caps.began
+		end
 
 		return
 	end
@@ -1422,6 +1824,10 @@ function Relay.run(
 	if pool then
 		buffer.fill(Marked, 0, 0)
 		Header.lookCount = 0
+	end
+
+	if budget ~= nil then
+		judge(Caps.left > 0 or Caps.clock() - Caps.began > budget)
 	end
 
 	local overfull: Key? = Overfull
@@ -1501,18 +1907,32 @@ end
 --[[
     Replays the round's worker turns in viewer order, each turn's asks,
     blocks and taps, up to one that threw or whose worker's run threw, and
-    gives the first failure's text, nil for none
+    gives the first failure's text, nil for none. A viewer the run's budget
+    left took no turn, so in its place it is passed to anti-ESP, inside the
+    hold, with the slots its copy tracks, so the pairs its last turn asked
+    about stay asked
 --]]
 
 local function replayTurns(viewers: { Viewer }): string?
 	local homes: { number } = Dispatch.homes
 	local places: { number } = Dispatch.places
 	local watched: { Key | false } = Dispatch.watched
+	local budgeted: boolean = Caps.running ~= nil
+	local passed: Passed? = Caps.passed
 
 	local failure: string? = nil
 	for index: number, viewer: Viewer in viewers do
 		local home: number = homes[index]
-		if watched[index] == false and home ~= 0 then
+		if watched[index] ~= false or home == 0 then
+			continue
+		elseif budgeted and Caps.away[viewer.key] then
+			local copy: Copy? = Copies[viewer.key]
+			if copy == nil then
+				error("A relay viewer on a worker was left with no copy of its view")
+			elseif passed then
+				passed(viewer, copy.tracked, #copy.tracked)
+			end
+		else
 			local host: Worker = Hosts[home]
 			failure = host.failure
 			if failure ~= nil then
@@ -1600,6 +2020,7 @@ local function land(viewers: { Viewer }): (string?, unknown)
 			Totals.sent += reader.sent
 			Totals.cut += reader.cut
 			Totals.visited += reader.visited
+			Totals.rest += reader.rest
 		end
 
 		host.round = 0
@@ -1755,6 +2176,7 @@ local function removeNow(key: Key)
 	Stale[key] = nil
 	Heard[key] = nil
 	Watching[key] = nil
+	Caps.lefts[key] = nil
 end
 
 -- Keeps a call made while a round is out, with what it worked out at the call, for the end of the finish or drop
@@ -1837,7 +2259,12 @@ end
     replayed, its marks handed to asked and its blocks sent and tapped, the
     calls made since the run, and last what a port threw, a turn's failure
     or an overfull target. With relay.clocks on it times each of those and
-    takes in each worker's clocks
+    takes in each worker's clocks. Each viewer the run's budget left is
+    passed to anti-ESP in its turn's place. Under the budget the run began
+    with, and no seam called since, the run's seconds and its own judge the
+    run and set the worker turns the next run hands in: at a budget of 0
+    all but the quarter it may leave, and otherwise every one after a run
+    that handed none in
 --]]
 
 function Relay.finish(): boolean
@@ -1859,7 +2286,18 @@ function Relay.finish(): boolean
 		end
 	end
 
-	-- The finish's laps begin where the round's wait ends
+	-- The finish's laps begin where the round's wait ends, and under the run's budget so does its share of the measure,
+	-- unless a seam was called since the run, whose fresh count and hand-in this run's measure never reaches
+	local budget: number? = Caps.running
+	if Caps.ranAfter ~= Caps.sets then
+		budget = nil
+	end
+
+	local finishing: number = 0
+	if budget ~= nil then
+		finishing = Caps.clock()
+	end
+
 	local clocked: boolean = Clock.on
 	local began: number = 0
 	if clocked then
@@ -1907,6 +2345,24 @@ function Relay.finish(): boolean
 		lap("deferred")
 	end
 
+	-- The run's measure, its own seconds and the finish's, sets the worker turns the next run hands in, before the
+	-- share the budget may leave: none at a budget of 0, which every run reaches, else those this run handed in times
+	-- the budget over the measure, and every one after a measure of no time or a run that handed none in, which tells
+	-- the next nothing
+	if budget ~= nil then
+		local measure: number = Caps.measured + Caps.clock() - finishing
+		local handed: number = Caps.handed
+		if budget == 0 then
+			Caps.hand = 0
+		elseif handed > 0 and measure > 0 then
+			Caps.hand = math.floor(handed * budget / measure)
+		else
+			Caps.hand = nil
+		end
+
+		judge(Caps.left > 0 or measure > budget)
+	end
+
 	if thrown ~= nil then
 		error(thrown, 0)
 	elseif failure ~= nil then
@@ -1923,7 +2379,10 @@ end
     sent, asked or tapped, the calls made since the run run, and each
     worker it went to sends each view it runs whole from its next run, so
     the copies start again from the workers' own views. A target the
-    in-process watches found overfull is still raised
+    in-process watches found overfull is still raised. Under the budget
+    the run began with, with no seam called since, a run given up counts
+    over it, its measure never complete, and the worker turns the next run
+    hands in stay as they were
 --]]
 
 function Relay.drop()
@@ -1932,6 +2391,9 @@ function Relay.drop()
 	end
 
 	Out = false
+	if Caps.running ~= nil and Caps.ranAfter == Caps.sets then
+		judge(true)
+	end
 
 	-- A worker whose round is given up may have thrown before it read the run's looks and held items
 	for _, host: Worker in Hosts do
@@ -1996,6 +2458,151 @@ function Relay.homes(): (number, { number }, number)
 end
 
 --[[
+    Sets the distance bands and their edges every turn reads from the next
+    run on, in process and on every worker alike, refused as the server's
+    check refuses tiers.bands and tiers.edges, for a dev run that compares
+    two sets of bands on one server. A pair standing inside an edge's slack
+    when the edges change keeps the side its stored count of edges gives it
+    until it leaves the slack. While the far rate under load holds the
+    farthest band lowered, the new farthest band is lowered in its place
+--]]
+
+function Relay.setBands(bands: { Band }, edges: { Edge })
+	if not Started then
+		error("Relay.setBands ran before Relay.start", 2)
+	end
+
+	Config.bands(bands, edges)
+	tune(bands, edges)
+	lowerFar()
+end
+
+-- The bands and edges every turn reads, as tiers or Relay.setBands last gave them, each in new lists
+function Relay.bands(): ({ Band }, { Edge })
+	local bands: { Band } = {}
+	for index: number, band: Band in Bands.given do
+		bands[index] = { aim = band.aim, floor = band.floor }
+	end
+
+	local edges: { Edge } = {}
+	for index: number, edge: Edge in Bands.edges do
+		edges[index] = { enter = edge.enter, leave = edge.leave }
+	end
+
+	return bands, edges
+end
+
+--[[
+    Sets the crowd cap every turn reads from the next run on, in process
+    and on every worker alike, nil for none, refused as the server's check
+    refuses tiers.crowd, for a dev run that compares a server with the cap
+    and without it
+--]]
+
+function Relay.setCrowd(crowd: Crowd?)
+	if not Started then
+		error("Relay.setCrowd ran before Relay.start", 2)
+	end
+
+	if crowd ~= nil then
+		Config.crowd(crowd)
+	end
+
+	tuneCrowd(crowd)
+end
+
+-- The crowd cap every turn reads, as tiers or Relay.setCrowd last gave it, in a new table, nil for none
+function Relay.crowd(): Crowd?
+	local crowd: Crowd? = Bands.crowd
+	if crowd == nil then
+		return nil
+	end
+
+	return { size = crowd.size, rate = crowd.rate, floor = crowd.floor }
+end
+
+-- Starts the far rate under load's count of runs in a row afresh, with the farthest band as given, and counts the
+-- seam's call, so a round out at the call is neither measured nor judged
+local function recount()
+	Caps.sets += 1
+	Caps.overs = 0
+	Caps.unders = 0
+	Caps.lowered = false
+	lowerFar()
+end
+
+--[[
+    Sets relay.budget from the next run on, the seconds of its own work on
+    the server's thread a run may take before the viewers left wait for
+    the next, or turns it off with nil. Refused unless a finite number of 0
+    or more, and nil refused while the far rate under load is set, as the
+    server's check refuses tiers.underLoad without relay.budget. A round
+    out at the call still leaves the viewers its run left, but is neither
+    measured nor judged. The next run hands every worker turn in, unless
+    the budget is 0, which every run reaches, and the far rate under load
+    counts afresh
+--]]
+
+function Relay.setBudget(seconds: number?)
+	if not Started then
+		error("Relay.setBudget ran before Relay.start", 2)
+	elseif seconds ~= nil and (type(seconds) ~= "number" or not (seconds >= 0 and seconds < math.huge)) then
+		error(`Relay.setBudget takes seconds as a finite number of 0 or more, or nil for none, not {seconds}`, 2)
+	elseif seconds == nil and Caps.underLoad ~= nil then
+		error("Relay.setBudget takes nil only once Relay.setUnderLoad(nil) has turned the far rate under load off", 2)
+	end
+
+	-- Every run reaches a budget of 0, the next one among them
+	Caps.budget = seconds
+	Caps.hand = seconds == 0 and 0 or nil
+	recount()
+end
+
+-- The seconds relay.budget is set to, nil while it is off
+function Relay.budget(): number?
+	return Caps.budget
+end
+
+--[[
+    Sets the far rate under load from the next run on, the relay runs in a
+    row over relay.budget that lower the farthest band and in a row under
+    it that put it back and what its aim and floor are multiplied by, or
+    turns it off with nil, refused as the server's check refuses
+    tiers.underLoad, and with no relay budget set. Its count of runs in a
+    row starts afresh, with the farthest band as given, and a round out at
+    the call is neither measured nor judged
+--]]
+
+function Relay.setUnderLoad(underLoad: UnderLoad?)
+	if not Started then
+		error("Relay.setUnderLoad ran before Relay.start", 2)
+	end
+
+	if underLoad ~= nil then
+		if Caps.budget == nil then
+			error("Relay.setUnderLoad takes the far rate under load only once Relay.setBudget has set a budget", 2)
+		end
+
+		Config.underLoad(underLoad)
+		Caps.underLoad = { runs = underLoad.runs, scale = underLoad.scale }
+	else
+		Caps.underLoad = nil
+	end
+
+	recount()
+end
+
+-- The far rate under load as Relay.setUnderLoad last set it, in a new table, nil while it is off
+function Relay.underLoad(): UnderLoad?
+	local underLoad: UnderLoad? = Caps.underLoad
+	if underLoad == nil then
+		return nil
+	end
+
+	return { runs = underLoad.runs, scale = underLoad.scale }
+end
+
+--[[
     Sets a slot's look, the game's slot-table fields, for its current
     life. Each viewer currently sent it gets the change on its next flush,
     and one not sent it gets it with its next reveal
@@ -2041,6 +2648,11 @@ function Relay.setInvisible(slot: number, on: boolean)
 	checkSlot(slot, "setInvisible")
 	if type(on) ~= "boolean" then
 		error(`Relay.setInvisible takes true or false, not {on}`, 2)
+	end
+
+	-- A run that left a viewer has its footsteps carried by the next, which judges them by that run's own marks
+	if Caps.left > 0 then
+		Turn.hush()
 	end
 
 	if on then
@@ -2322,16 +2934,27 @@ function Relay.remove(key: Key)
 end
 
 --[[
-    The running totals since start of the records the tier ticks placed in
-    a viewer's blocks, of those the viewer's room left out, and of the
-    bodies the viewers' turns gathered to measure, in process and on the
-    workers, as of the last round brought in
+    The running totals since start of the records the band ticks placed in
+    a viewer's blocks, of those the viewer's room left out, of the bodies
+    the viewers' turns gathered to measure, and of the candidates the turns
+    held outside their viewer's crowd cap, in process and on the workers, as
+    of the last round brought in
 --]]
 
-function Relay.counts(): (number, number, number)
-	local sent: number, cut: number, visited: number = Turn.counts()
+function Relay.counts(): (number, number, number, number)
+	local sent: number, cut: number, visited: number, rest: number = Turn.counts()
 
-	return sent + Totals.sent, cut + Totals.cut, visited + Totals.visited
+	return sent + Totals.sent, cut + Totals.cut, visited + Totals.visited, rest + Totals.rest
+end
+
+--[[
+    The frame caps' running totals since start: the viewer turns
+    relay.budget left, the runs judged over it, and the runs taken with the
+    far rate under load holding the farthest band lowered
+--]]
+
+function Relay.caps(): (number, number, number)
+	return Caps.totalLeft, Caps.totalOver, Caps.halved
 end
 
 --[[

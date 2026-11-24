@@ -4,7 +4,8 @@ option runtime = "ReplicatedStorage.Packages.Volt"
 option scope = Dev
 
 -- The dev game's own traffic: the test elevator's button, the telemetry the live gates need from clients, the
--- reports the exploit kit's panel shows, the live runs' trigger and reports, and the bot panel's asks and numbers
+-- reports the exploit kit's panel shows, the live runs' trigger and reports, the bot panel's asks and numbers, the
+-- split's switch, and the ghosts' asks and answers
 event press {
 	from: Client,
 	type: Reliable,
@@ -113,6 +114,14 @@ event botWatch {
 	data: (shown: boolean),
 }
 
+-- A client's ask that the server turn the relay's split by stage on or off
+event botSplit {
+	from: Client,
+	type: Reliable,
+	call: SingleSync,
+	data: (on: boolean),
+}
+
 -- Why the server refused a client's bot panel ask, or what a spawn it took could not build
 event botRefused {
 	from: Server,
@@ -121,11 +130,39 @@ event botRefused {
 	data: (reason: string(1..200)),
 }
 
--- The server's numbers over the last second for a client whose bot panel shows, with the panel's bots on the server.
--- The text stays well under Volt's 8,192 B maxPacket
+-- The server's numbers over the last second for a client whose bot panel shows, with the panel's bots on the server
+-- and whether the relay's split by stage is on. The text stays well under Volt's 8,192 B maxPacket
 event botStats {
 	from: Server,
 	type: Reliable,
 	call: SingleSync,
-	data: (made: u16, text: string(0..1000)),
+	data: (made: u16, text: string(0..1000), split: boolean),
+}
+
+-- One character as a tick left it on the server: its slot, its feet's world position and its velocity, studs a second
+struct Ghost {
+	slot: u16,
+	x: f32,
+	y: f32,
+	z: f32,
+	vx: f32,
+	vy: f32,
+	vz: f32,
+}
+
+-- A client's ask for the ghosts of the characters it draws, by slot, which an empty list ends
+event ghostAsk {
+	from: Client,
+	type: Reliable,
+	call: SingleSync,
+	data: (slots: u16[0..16]),
+}
+
+-- Each tick, to a client that asks: the relay tick the tick ran in, the server's clock at the start of the frame that
+-- ran it, the server's state as a label, and each asked character the client is sent, as the tick left it
+event ghosts {
+	from: Server,
+	type: Unreliable,
+	call: SingleSync,
+	data: (tick: u16, time: f64, label: string(0..32), ghosts: Ghost[0..16]),
 }

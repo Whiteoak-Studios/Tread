@@ -12,6 +12,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Volt = require(ReplicatedStorage.Packages.Volt)
 
+export type Ghost = { slot: number, x: number, y: number, z: number, vx: number, vy: number, vz: number }
+
 type Bot = Volt.Bot
 
 export type ServerEvent<A...> = {
@@ -42,6 +44,10 @@ local runtime: Volt.Runtime
 local beginReliable: (number) -> (number, buffer)
 local trimReliable: (number) -> ()
 local refuseReliable: (string) -> never
+local beginUnreliable: (number) -> (number, buffer)
+local trimUnreliable: (number) -> ()
+local refuseUnreliable: (string) -> never
+local markUnreliable: () -> ()
 
 local RUNREPORT_STATE: { "Refused" | "Running" | "Piece" | "Passed" | "Failed" | "Queue" | "Kept" | "Report" } = { "Refused", "Running", "Piece", "Passed", "Failed", "Queue", "Kept", "Report" }
 
@@ -344,6 +350,17 @@ local function readbotWatch(player: (Player | Bot)?, packet: buffer, cursor: num
 	return runtime:deliver(9, player, cursor, sideCursor, bit32.btest(flags, 1))
 end
 
+local function readbotSplit(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 1 > length then
+		error("botSplit: truncated")
+	end
+
+	local flags: number = buffer.readu8(packet, cursor)
+	cursor += 1
+
+	return runtime:deliver(10, player, cursor, sideCursor, bit32.btest(flags, 1))
+end
+
 local function writebotRefused(reason: string)
 	local offset: number, out: buffer = beginReliable(202)
 	buffer.writeu8(out, offset, 5)
@@ -363,15 +380,16 @@ local function writebotRefused(reason: string)
 	trimReliable(offset)
 end
 
-local function writebotStats(made: number, text: string)
-	local offset: number, out: buffer = beginReliable(1005)
+local function writebotStats(made: number, text: string, split: boolean)
+	local offset: number, out: buffer = beginReliable(1006)
 	buffer.writeu8(out, offset, 6)
+	local flags: number = 0
 
 	if type(made) ~= "number" or bit32.band(made, 65535) ~= made then
 		refuseReliable("botStats.made: expected u16")
 	end
 
-	buffer.writeu16(out, offset + 1, made)
+	buffer.writeu16(out, offset + 2, made)
 
 	if type(text) ~= "string" then
 		refuseReliable("botStats.text: expected string")
@@ -381,16 +399,153 @@ local function writebotStats(made: number, text: string)
 		refuseReliable("botStats.text: length out of range")
 	end
 
-	buffer.writeu16(out, offset + 3, #text)
-	offset += 5
+	buffer.writeu16(out, offset + 4, #text)
+
+	if type(split) ~= "boolean" then
+		refuseReliable("botStats.split: expected boolean")
+	end
+
+	flags += split and 1 or 0
+	buffer.writeu8(out, offset + 1, flags)
+	offset += 6
 	buffer.writestring(out, offset, text)
 	offset += #text
 	trimReliable(offset)
 end
 
+local function readghostAsk(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 1 > length then
+		error("ghostAsk: truncated")
+	end
+
+	local slotsLength: number = buffer.readu8(packet, cursor)
+
+	if slotsLength > 16 then
+		error("ghostAsk.slots: length out of range")
+	end
+
+	cursor += 1
+
+	if cursor + 2 * slotsLength > length then
+		error("ghostAsk.slots: truncated")
+	end
+
+	local slots: { number } = table.create(slotsLength) :: { number }
+
+	for index = 1, slotsLength do
+		local slotsEntry: number = buffer.readu16(packet, cursor)
+		cursor += 2
+		slots[index] = slotsEntry
+	end
+
+	return runtime:deliver(11, player, cursor, sideCursor, slots)
+end
+
+local function writeghosts(tick: number, time: number, label: string, ghosts: { Ghost })
+	local offset: number, out: buffer = beginUnreliable(461)
+	buffer.writeu8(out, offset, 7)
+
+	if type(tick) ~= "number" or bit32.band(tick, 65535) ~= tick then
+		refuseUnreliable("ghosts.tick: expected u16")
+	end
+
+	buffer.writeu16(out, offset + 1, tick)
+
+	if type(time) ~= "number" or time ~= time then
+		refuseUnreliable("ghosts.time: expected f64")
+	end
+
+	buffer.writef64(out, offset + 3, time)
+
+	if type(label) ~= "string" then
+		refuseUnreliable("ghosts.label: expected string")
+	end
+
+	if #label > 32 then
+		refuseUnreliable("ghosts.label: length out of range")
+	end
+
+	buffer.writeu8(out, offset + 11, #label)
+
+	if type(ghosts) ~= "table" then
+		refuseUnreliable("ghosts.ghosts: expected table")
+	end
+
+	if #ghosts > 16 then
+		refuseUnreliable("ghosts.ghosts: length out of range")
+	end
+
+	buffer.writeu8(out, offset + 12, #ghosts)
+	offset += 13
+	buffer.writestring(out, offset, label)
+	offset += #label
+
+	for index = 1, #ghosts do
+		local ghostsEntry = ghosts[index]
+
+		if type(ghostsEntry) ~= "table" then
+			refuseUnreliable("ghosts.ghosts[]: expected table")
+		end
+
+		local slot_2 = ghostsEntry.slot
+
+		if type(slot_2) ~= "number" or bit32.band(slot_2, 65535) ~= slot_2 then
+			refuseUnreliable("ghosts.ghosts[].slot: expected u16")
+		end
+
+		buffer.writeu16(out, offset, slot_2)
+		local x = ghostsEntry.x
+
+		if type(x) ~= "number" or x ~= x then
+			refuseUnreliable("ghosts.ghosts[].x: expected f32")
+		end
+
+		buffer.writef32(out, offset + 2, x)
+		local y = ghostsEntry.y
+
+		if type(y) ~= "number" or y ~= y then
+			refuseUnreliable("ghosts.ghosts[].y: expected f32")
+		end
+
+		buffer.writef32(out, offset + 6, y)
+		local z = ghostsEntry.z
+
+		if type(z) ~= "number" or z ~= z then
+			refuseUnreliable("ghosts.ghosts[].z: expected f32")
+		end
+
+		buffer.writef32(out, offset + 10, z)
+		local vx = ghostsEntry.vx
+
+		if type(vx) ~= "number" or vx ~= vx then
+			refuseUnreliable("ghosts.ghosts[].vx: expected f32")
+		end
+
+		buffer.writef32(out, offset + 14, vx)
+		local vy = ghostsEntry.vy
+
+		if type(vy) ~= "number" or vy ~= vy then
+			refuseUnreliable("ghosts.ghosts[].vy: expected f32")
+		end
+
+		buffer.writef32(out, offset + 18, vy)
+		local vz = ghostsEntry.vz
+
+		if type(vz) ~= "number" or vz ~= vz then
+			refuseUnreliable("ghosts.ghosts[].vz: expected f32")
+		end
+
+		buffer.writef32(out, offset + 22, vz)
+		offset += 26
+	end
+
+	trimUnreliable(offset)
+	markUnreliable()
+end
+
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x0E155838,
+	hash = 0xC6797E7F,
 	scope = "Dev",
 	side = "server",
 	idBytes = 1,
@@ -414,6 +569,8 @@ runtime = Volt.start({
 		[7] = { name = "botSpawn", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readbotSpawn },
 		[8] = { name = "botClear", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readbotClear },
 		[9] = { name = "botWatch", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readbotWatch },
+		[10] = { name = "botSplit", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readbotSplit },
+		[11] = { name = "ghostAsk", kind = "event", mode = "SingleSync", queue = 64, rate = 120, read = readghostAsk },
 	},
 
 	outgoing = {
@@ -422,13 +579,18 @@ runtime = Volt.start({
 		[3] = { name = "clip", kind = "event", reliable = true, minBytes = 6, maxBytes = 4102 },
 		[4] = { name = "runReport", kind = "event", reliable = true, minBytes = 4, maxBytes = 4004 },
 		[5] = { name = "botRefused", kind = "event", reliable = true, minBytes = 3, maxBytes = 202 },
-		[6] = { name = "botStats", kind = "event", reliable = true, minBytes = 5, maxBytes = 1005 },
+		[6] = { name = "botStats", kind = "event", reliable = true, minBytes = 6, maxBytes = 1006 },
+		[7] = { name = "ghosts", kind = "event", reliable = false, minBytes = 13, maxBytes = 461 },
 	},
 })
 
 beginReliable = runtime.reliable.begin
 trimReliable = runtime.reliable.trim
 refuseReliable = runtime.reliable.refuse
+beginUnreliable = runtime.unreliable.begin
+trimUnreliable = runtime.unreliable.trim
+refuseUnreliable = runtime.unreliable.refuse
+markUnreliable = runtime.unreliable.mark
 
 local before: { [number]: Volt.Hook } = runtime.before
 
@@ -619,6 +781,16 @@ local Network = {
 		end,
 	}) :: ServerListener<(boolean)>,
 
+	botSplit = table.freeze({
+		on = function (listener: (player: Player | Bot, on: boolean) -> ()): () -> ()
+			return runtime:on(10, listener)
+		end,
+
+		iter = function (): () -> (number, Player | Bot, boolean)
+			return runtime:iter(10)
+		end,
+	}) :: ServerListener<(boolean)>,
+
 	botRefused = table.freeze({
 		fire = function (player: Player | Bot, reason: string)
 			if (before[5] == nil or before[5](player, reason)) and runtime:target(player) then
@@ -644,28 +816,62 @@ local Network = {
 	}) :: ServerEvent<(string)>,
 
 	botStats = table.freeze({
-		fire = function (player: Player | Bot, made: number, text: string)
-			if (before[6] == nil or before[6](player, made, text)) and runtime:target(player) then
-				writebotStats(made, text)
+		fire = function (player: Player | Bot, made: number, text: string, split: boolean)
+			if (before[6] == nil or before[6](player, made, text, split)) and runtime:target(player) then
+				writebotStats(made, text, split)
 			end
 		end,
 
-		fireAll = function (made: number, text: string)
-			runtime:broadcast(6, nil, nil, writebotStats, made, text)
+		fireAll = function (made: number, text: string, split: boolean)
+			runtime:broadcast(6, nil, nil, writebotStats, made, text, split)
 		end,
 
-		fireList = function (players: { Player | Bot }, made: number, text: string)
-			runtime:broadcast(6, players, nil, writebotStats, made, text)
+		fireList = function (players: { Player | Bot }, made: number, text: string, split: boolean)
+			runtime:broadcast(6, players, nil, writebotStats, made, text, split)
 		end,
 
-		fireExcept = function (player: Player | Bot, made: number, text: string)
-			runtime:broadcast(6, nil, player, writebotStats, made, text)
+		fireExcept = function (player: Player | Bot, made: number, text: string, split: boolean)
+			runtime:broadcast(6, nil, player, writebotStats, made, text, split)
 		end,
 
-		fireSet = function (players: { [Player | Bot]: true }, made: number, text: string)
-			runtime:broadcast(6, players, nil, writebotStats, made, text)
+		fireSet = function (players: { [Player | Bot]: true }, made: number, text: string, split: boolean)
+			runtime:broadcast(6, players, nil, writebotStats, made, text, split)
 		end,
-	}) :: ServerEvent<(number, string)>,
+	}) :: ServerEvent<(number, string, boolean)>,
+
+	ghostAsk = table.freeze({
+		on = function (listener: (player: Player | Bot, slots: { number }) -> ()): () -> ()
+			return runtime:on(11, listener)
+		end,
+
+		iter = function (): () -> (number, Player | Bot, { number })
+			return runtime:iter(11)
+		end,
+	}) :: ServerListener<({ number })>,
+
+	ghosts = table.freeze({
+		fire = function (player: Player | Bot, tick: number, time: number, label: string, ghosts: { Ghost })
+			if (before[7] == nil or before[7](player, tick, time, label, ghosts)) and runtime:target(player) then
+				writeghosts(tick, time, label, ghosts)
+			end
+		end,
+
+		fireAll = function (tick: number, time: number, label: string, ghosts: { Ghost })
+			runtime:broadcast(7, nil, nil, writeghosts, tick, time, label, ghosts)
+		end,
+
+		fireList = function (players: { Player | Bot }, tick: number, time: number, label: string, ghosts: { Ghost })
+			runtime:broadcast(7, players, nil, writeghosts, tick, time, label, ghosts)
+		end,
+
+		fireExcept = function (player: Player | Bot, tick: number, time: number, label: string, ghosts: { Ghost })
+			runtime:broadcast(7, nil, player, writeghosts, tick, time, label, ghosts)
+		end,
+
+		fireSet = function (players: { [Player | Bot]: true }, tick: number, time: number, label: string, ghosts: { Ghost })
+			runtime:broadcast(7, players, nil, writeghosts, tick, time, label, ghosts)
+		end,
+	}) :: ServerEvent<(number, number, string, { Ghost })>,
 
 	version = "0.1.0",
 
@@ -725,8 +931,11 @@ Network.events = table.freeze({
 	["botSpawn"] = Network.botSpawn,
 	["botClear"] = Network.botClear,
 	["botWatch"] = Network.botWatch,
+	["botSplit"] = Network.botSplit,
 	["botRefused"] = Network.botRefused,
 	["botStats"] = Network.botStats,
+	["ghostAsk"] = Network.ghostAsk,
+	["ghosts"] = Network.ghosts,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

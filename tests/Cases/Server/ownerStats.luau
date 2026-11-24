@@ -22,6 +22,11 @@ local DELAY: number = 100 -- Milliseconds of interpolation delay each Move repor
 local WORD: number = 2 ^ 32 -- The values a check holds
 local START_Z: number = 10
 
+-- Seconds anti-ESP's slice may take a Heartbeat, more than the runner gives a whole case, so both runs test every pair
+-- by the tick after its first ask and their relay blocks, which bytesOut counts beside the OwnerStates, come out alike
+-- however fast the machine runs
+local SLICE: number = 60
+
 -- The three keys and where each body is built, clear of the fixture's obstacles
 local NAMES: { string } = { "Agreeing", "Other", "Bot" }
 local PLACES: { [string]: number } = { Agreeing = -28, Other = -20, Bot = -12 }
@@ -49,6 +54,7 @@ local function run(checks: boolean, hashes: { [string]: { [number]: number } }?)
 	local rig: Rig.Rig = Rig.new(function (_: any, settings: any)
 		settings.owner = { checks = checks }
 		settings.bots = { rtt = BOT_RTT, agree = true }
+		settings.antiEsp.slice = SLICE
 	end)
 
 	local server: any = rig:start()

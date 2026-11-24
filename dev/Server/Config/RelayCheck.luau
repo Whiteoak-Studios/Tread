@@ -1,6 +1,6 @@
 --[[
     The relay check's numbers: copy B's workers, deadlines and pool folder,
-    the four seeded layouts, and the events every layout runs, each before
+    the five seeded layouts, and the events every layout runs, each before
     its run or, for a call into the relay, in the window after it
 --]]
 
@@ -54,7 +54,7 @@ return {
 	otherLook = { leg = 3 } :: { [string]: number },
 	held = { item = 12, skin = 3 } :: { [string]: number },
 
-	order = { "idle", "fight", "field", "spectate" },
+	order = { "idle", "fight", "field", "spectate", "crowd" },
 
 	layouts = {
 		idle = {
@@ -114,6 +114,21 @@ return {
 			moderator = vector.create(3000, 0, 3000),
 			watch = 4,
 			unwatch = 20,
+		},
+
+		-- A fight of more players than the dev place's crowd cap of 32, so each viewer is sent enough of them past the
+		-- share hidden that the cap holds the rest out
+		crowd = {
+			seed = 505,
+			runs = 24,
+			viewers = 48,
+			center = vector.create(-600, 0, 600),
+			spread = 120,
+			step = 0.8,
+			turn = 0.3,
+			jump = 0.05,
+			hidden = 0.1,
+			shuffle = 5,
 		},
 	} :: { [string]: Layout },
 

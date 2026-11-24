@@ -116,6 +116,7 @@ type Front = {
 	heard: { [any]: number },
 	watching: { [any]: any },
 	header: { [string]: number },
+	tuning: any, -- The bands the front's last begin handed its Turn, which each shared hand-in carries
 	snapshot: { lookVersions: buffer, lookLives: buffer, invisible: buffer, heldVersions: buffer },
 	readers: { any },
 	round: number,
@@ -437,6 +438,7 @@ local function dispatch(front: Front, viewers: { any })
 		tick = header.tick,
 		elapsed = header.elapsed,
 		wire = header.wire,
+		tune = front.tuning,
 		places = header.places,
 		looks = looks,
 		lookCount = #looks,
@@ -518,6 +520,7 @@ local function dispatch(front: Front, viewers: { any })
 		front.totals[1] += reader.sent
 		front.totals[2] += reader.cut
 		front.totals[3] += reader.visited
+		front.totals[4] += reader.rest
 		front.turned[worker] += reader.turns
 
 		local id: number = Wire.nextView(reader)
@@ -646,8 +649,9 @@ local function frontOf(model: Model): Front
 		front.pool = StandIn.new(WORKERS, "RelayWorkers", nil, settings)
 	end
 
-	function stub.begin(run: number, tick: number, elapsed: number, wire: number)
-		real.begin(run, tick, elapsed, wire)
+	function stub.begin(run: number, tick: number, elapsed: number, wire: number, tuning: any)
+		real.begin(run, tick, elapsed, wire, tuning)
+		front.tuning = tuning
 		front.header.run = run
 		front.header.tick = tick
 		front.header.elapsed = elapsed
@@ -747,8 +751,8 @@ local function frontOf(model: Model): Front
 		return front.copies
 	end
 
-	function stub.counts(): (number, number, number)
-		return front.totals[1], front.totals[2], front.totals[3]
+	function stub.counts(): (number, number, number, number)
+		return front.totals[1], front.totals[2], front.totals[3], front.totals[4]
 	end
 
 	front = {
@@ -772,6 +776,7 @@ local function frontOf(model: Model): Front
 		heard = {},
 		watching = {},
 		header = { run = 0, tick = 0, elapsed = 0, wire = 0, places = 0 },
+		tuning = nil,
 		snapshot = {
 			lookVersions = buffer.create(SLOTS * 2),
 			lookLives = buffer.create(SLOTS),
@@ -780,7 +785,7 @@ local function frontOf(model: Model): Front
 		},
 		readers = {},
 		round = 0,
-		totals = { 0, 0, 0 },
+		totals = { 0, 0, 0, 0 },
 		index = {},
 		expected = {},
 		answerFrom = {},
@@ -1109,7 +1114,7 @@ return function (): (boolean, string | nil)
 		-- The front's queries, answered from the copies the results keep level
 		local serialCounts: { number } = { serial.Relay.counts() }
 		local workerCounts: { number } = { workers.Relay.counts() }
-		for at: number = 1, 3 do
+		for at: number = 1, 4 do
 			if why == nil and serialCounts[at] ~= workerCounts[at] then
 				why = `Run {run}'s count {at} was {serialCounts[at]} serially and {workerCounts[at]} on the workers`
 			end

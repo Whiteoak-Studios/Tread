@@ -14,12 +14,15 @@ local WINDOW_SECONDS: number = 10 -- How far back each stage's times are kept, t
 local HEARTBEATS_KEPT: number = 2400 -- Heartbeats the per-Heartbeat ring holds, so a reader once a second misses none
 local LABEL_PREFIX: string = "Tread" -- Before each stage's name in its profiler label
 local FINISH_LABEL: string = `{LABEL_PREFIX} finish` -- The profiler label of a hold's poll
+local CALM_TICKS: number = 20 -- The calm ticks in a row a tick needs before it may defer its split stage
+local CALM_GAP: number = 3 -- The fewest Heartbeats from a tick that ran alone to the next for it to count as calm
 
 -- What a Heartbeat's entry says the loop did in it, each a bit of its flags
 local TICKED: number = 1 -- A tick began in it
 local HELD: number = 2 -- The tick was held as it ended
 local POLLED: number = 4 -- A hold's poll was tried in it
 local RELEASED: number = 8 -- A hold ended in it
+local DEFERRED: number = 16 -- A deferred tick's rest ran in it
 
 -- Lune's debug has no profiler, so the stages run unlabeled under the suite
 local LABELED: boolean = debug.profilebegin ~= nil
@@ -49,6 +52,7 @@ export type Stage = {
 	run: Run,
 	between: boolean, -- Whether it runs once each Heartbeat, in its first tick or alone when none is due
 	latest: Latest?, -- With one, it runs only on the last of a Heartbeat's or a release's ticks this gives true for
+	early: Run?, -- With one, a tick that defers runs it in the stage's place and the stage's run at the next Heartbeat
 	label: string, -- Its profiler label
 	times: { number }, -- A ring of seconds, a run's time each, made at its full size
 	ticks: { number }, -- The tick each time's run was handed, at the time's own index in a ring of the same size
@@ -61,7 +65,7 @@ export type Stage = {
 -- The loop's whole work each Heartbeat, by os.clock(): its stages, between stages, polls and releases, in a ring
 export type Heartbeats = {
 	times: { number }, -- A ring of seconds, one a Heartbeat, made at its full size
-	flags: { number }, -- What the loop did in each, at the time's own index: the sum of TICKED, HELD, POLLED and RELEASED
+	flags: { number }, -- What the loop did in each, at the time's own index: the sum of its flags, TICKED to DEFERRED
 	held: number, -- The Heartbeats the ring holds, up to its size
 	head: number, -- The ring index the next Heartbeat goes at
 	count: number, -- The Heartbeats since start, the one running's number while it runs
@@ -73,6 +77,7 @@ export type Entry = {
 	run: Run,
 	between: boolean?, -- Run once each Heartbeat: in its first tick, or with no tick due handed the newest tick run
 	latest: Latest?, -- Run at most once a Heartbeat, on the last of its ticks this gives true for
+	early: Run?, -- Run in its place by a tick that defers, its run and every later stage's put off to the next Heartbeat
 }
 
 -- The stages in the order each tick runs them, replaced whole when one is added so a tick running keeps its list
@@ -90,13 +95,20 @@ local Dropped: number = 0 -- The ticks dropped since start, past the catch-up of
 local Current: string = "" -- The stage running, which a failure's warning names, empty while none runs
 local Started: boolean = false
 local Holding: boolean = false -- Whether a stage has held the tick and neither Tick.release nor its poll ended it
-local Parked: { Stage }? = nil -- The stage list of the pass a hold stopped, nil while none waits
+local Deferred: boolean = false -- Whether a deferred tick's rest waits for the next Heartbeat, parked as a hold's is
+local Parked: { Stage }? = nil -- The stage list of the pass a hold or a deferral stopped, nil while none waits
 local ParkedAt: number = 0 -- The index in that list of the first stage still to run
 local ParkedFirst: boolean = false -- Whether that pass runs its between stages
 local Fresh: boolean = false -- Whether a Heartbeat has come since the between stages last ran
 local Polling: Poll? = nil -- The last hold's poll, nil for a hold with none, tried only while the tick is held
 local Holder: string = "" -- The stage that last held the tick, which a poll that throws is reported as
 local Flags: number = 0 -- What the Heartbeat running has done so far, as its entry's flags
+local SplitOn: boolean = false -- Whether a calm tick may defer the stage with an early part, as Tick.useSplit set it
+local Carried: number = 0 -- Seconds the waiting rest's early part took, which its stage's one entry for the tick adds
+local HeldLast: boolean = false -- Whether the stage with an early part still held the tick as its last run returned
+local Calm: number = 0 -- The calm ticks in a row before the newest one
+local LastAlone: boolean = false -- Whether the newest tick ran alone, the one tick of a Heartbeat that ran nothing else
+local LastBeat: number = 0 -- The Heartbeat the newest tick began in
 
 -- Each poll call that ended a hold, its time and the tick held, made at its full size at start
 local Finishes: Ring = { times = {}, ticks = {}, beats = {}, held = 0, head = 0, last = 0 }
@@ -115,6 +127,7 @@ local Tick = {
 	HELD = HELD,
 	POLLED = POLLED,
 	RELEASED = RELEASED,
+	DEFERRED = DEFERRED,
 }
 
 -- Errors from the caller of the member named when a stage's name, its after or its run is not what it takes
@@ -132,12 +145,13 @@ local function checkStage(name: string, run: Run, member: string)
 	end
 end
 
-local function newStage(name: string, run: Run, between: boolean, latest: Latest?): Stage
+local function newStage(name: string, run: Run, between: boolean, latest: Latest?, early: Run?): Stage
 	return {
 		name = name,
 		run = run,
 		between = between,
 		latest = latest,
+		early = early,
 		label = `{LABEL_PREFIX} {name}`,
 		times = table.create(Capacity, 0),
 		ticks = table.create(Capacity, 0),
@@ -153,6 +167,12 @@ local function warnFailure(message: any)
 	warn(`The {Current} stage threw, and its work was dropped for the tick: {debug.traceback(tostring(message), 2)}`)
 end
 
+-- The same for a stage's early part, whose loss is that part's alone, since the stage's run still follows
+local function warnEarly(message: any)
+	local stack: string = debug.traceback(tostring(message), 2)
+	warn(`The {Current} stage's early part threw, losing the rest of that part, and its run still follows: {stack}`)
+end
+
 -- Keeps a run's time, the tick it was handed and its Heartbeat in a ring, over its oldest once the ring is full
 local function record(ring: Ring, tick: number, took: number)
 	-- Whiteoak TODO: a ring holds its stage's last Capacity runs, so a between stage's spans a few seconds of
@@ -166,13 +186,9 @@ local function record(ring: Ring, tick: number, took: number)
 	ring.last = took
 end
 
---[[
-    One stage's run, timed into its ring and under its own xpcall, so one
-    that throws loses the rest of its own work, is reported as stage with
-    its name, and stops nothing after it
---]]
-
-local function runStage(stage: Stage, tick: number)
+-- One part of a stage, its run or its early part, under the stage's label and its own xpcall with the warning given,
+-- giving its time and whether it ran without throwing
+local function runPart(stage: Stage, run: Run, tick: number, warning: (message: any) -> ()): (number, boolean)
 	Current = stage.name
 
 	if LABELED then
@@ -180,12 +196,30 @@ local function runStage(stage: Stage, tick: number)
 	end
 
 	local began: number = os.clock()
-	local ran: boolean = xpcall(stage.run, warnFailure, tick)
+	local ran: boolean = xpcall(run, warning, tick)
 	local took: number = os.clock() - began
 	Current = ""
 
 	if LABELED then
 		debug.profileend()
+	end
+
+	return took, ran
+end
+
+--[[
+    One stage's run, timed into its ring and under its own xpcall, so one
+    that throws loses the rest of its own work, is reported as stage with
+    its name, and stops nothing after it. A deferred tick's rest adds its
+    early part's time, so the tick's one entry holds both
+--]]
+
+local function runStage(stage: Stage, tick: number)
+	local took: number, ran: boolean = runPart(stage, stage.run, tick, warnFailure)
+
+	if stage.early then
+		took += Carried
+		Carried = 0
 	end
 
 	record(stage, tick, took)
@@ -218,15 +252,37 @@ end
     One pass over a stage list from the index from on, each stage handed
     tick, a between one run only when first is true and one with a latest
     only when runsOn finds it the last tick for it. It stops after a stage
-    that holds the tick, keeping where for Tick.release, and says whether
-    it reached the end
+    that holds the tick, keeping where for Tick.release, and, given splits,
+    at a stage with an early part, which runs in its place while the stage
+    and every one after it wait for the next Heartbeat. It says whether it
+    reached the end
 --]]
 
-local function pass(stages: { Stage }, from: number, tick: number, first: boolean): boolean
+local function pass(stages: { Stage }, from: number, tick: number, first: boolean, splits: boolean): boolean
 	for index: number = from, #stages do
 		local stage: Stage = stages[index]
 		if (first or not stage.between) and runsOn(stage, tick) then
+			local early: Run? = stage.early
+			if early and splits then
+				Parked = stages
+				ParkedAt = index
+				Deferred = true
+
+				local took: number, ran: boolean = runPart(stage, early, tick, warnEarly)
+				Carried = took
+
+				if not ran then
+					Reports.fire(nil, "stage", stage.name)
+				end
+
+				return false
+			end
+
 			runStage(stage, tick)
+
+			if early then
+				HeldLast = Holding
+			end
 
 			if Holding then
 				Parked = stages
@@ -245,15 +301,18 @@ end
     Runs the whole ticks owed, at most the catch-up, with any further whole
     ticks dropped and counted, until a stage holds the tick and leaves the
     rest owed. Each between stage runs once a Heartbeat, in the first tick
-    after one, or alone handed the newest tick run when none is owed
+    after one, or alone handed the newest tick run when none is owed. Given
+    alone, from a Heartbeat that has run nothing else, its one tick owed may
+    defer, once the split is on, the ticks before it calm and the stage with
+    an early part still holding the tick as its last run returned
 --]]
 
-local function advance()
+local function advance(alone: boolean)
 	local due: number = math.floor(Pending)
 	if due <= 0 then
 		if Fresh then
 			Fresh = false
-			pass(BetweenStages, 1, Ran, true)
+			pass(BetweenStages, 1, Ran, true, false)
 		end
 
 		return
@@ -263,6 +322,8 @@ local function advance()
 	Dropped += due - running
 	Pending -= due - running
 
+	local lone: boolean = alone and due == 1
+
 	for index: number = 1, running do
 		local first: boolean = Fresh
 		Fresh = false
@@ -270,17 +331,58 @@ local function advance()
 		Ran += 1
 		Ahead = running - index
 
-		if not pass(Stages, 1, Ran, first) then
+		-- The tick before was calm when it ran alone and this one began CALM_GAP Heartbeats or more after it
+		Calm = (LastAlone and Beats.count - LastBeat >= CALM_GAP) and Calm + 1 or 0
+		LastAlone = lone
+		LastBeat = Beats.count
+
+		if not pass(Stages, 1, Ran, first, lone and SplitOn and HeldLast and Calm >= CALM_TICKS) then
 			return
 		end
 	end
 end
 
 --[[
+    Runs a deferred tick's rest at the Heartbeat after its own: the between
+    stages first when no tick is owed, while the rest still waits so none of
+    them may hold, then the deferred stage and every one after it with the
+    ticks owed counted as a release counts them, so its latest skips it for
+    a later tick as a catch-up does, then those ticks owed, the first with
+    the between stages, none of them deferring
+--]]
+
+local function resume()
+	local stages: { Stage } = Parked :: { Stage }
+	local at: number = ParkedAt
+	Parked = nil
+	Flags = bit32.bor(Flags, DEFERRED)
+
+	-- The ticks the advance after it runs, which the deferred stage's latest looks ahead to
+	Ahead = math.min(math.floor(Pending), CatchUp)
+	if Ahead == 0 then
+		Fresh = false
+		pass(BetweenStages, 1, Ran, true, false)
+	end
+
+	Deferred = false
+
+	-- A rest its latest skips keeps its early part's time as the tick's one entry
+	local deferred: Stage = stages[at]
+	if not runsOn(deferred, Ran) then
+		record(deferred, Ran, Carried)
+		Carried = 0
+	end
+
+	if pass(stages, at, Ran, false, false) then
+		advance(false)
+	end
+end
+
+--[[
     Ends the hold: the held tick's remaining stages run, then the ticks owed
     since, or the between stages alone when a Heartbeat has come since they
-    ran and none is owed. Nothing parked means the holding stage is still
-    running, and its pass goes on once it returns
+    ran and none is owed, none of them deferring. Nothing parked means the
+    holding stage is still running, and its pass goes on once it returns
 --]]
 
 local function release()
@@ -297,8 +399,8 @@ local function release()
 	-- The ticks the advance after it runs, which the held tick's stages with a latest look ahead to
 	Ahead = math.min(math.floor(Pending), CatchUp)
 
-	if pass(stages, ParkedAt, Ran, ParkedFirst) then
-		advance()
+	if pass(stages, ParkedAt, Ran, ParkedFirst, false) then
+		advance(false)
 	end
 end
 
@@ -342,8 +444,9 @@ end
     Each Heartbeat adds the ticks its time owes at the rate, the fraction
     of one left over kept for the next, and runs them, unless the tick is
     held, when every stage, the between ones included, waits for the
-    release, and a hold's poll is the Heartbeat's first work. All of it is
-    timed into the per-Heartbeat ring with what it did
+    release, and a hold's poll is the Heartbeat's first work, or a deferred
+    tick's rest waits, which is then its first work. All of it is timed
+    into the per-Heartbeat ring with what it did
 --]]
 
 local function frame(delta: number)
@@ -354,8 +457,10 @@ local function frame(delta: number)
 	Pending += delta * Rate
 	Fresh = true
 
-	if not Holding then
-		advance()
+	if Deferred then
+		resume()
+	elseif not Holding then
+		advance(true)
 	else
 		local polling: Poll? = Polling
 		if polling ~= nil then
@@ -382,10 +487,12 @@ end
 --[[
     Starts the loop at rate ticks a second on Heartbeat with the stages in
     the order given, running at most catchUp ticks a frame, each stage
-    marked between once every Heartbeat, with a tick due or not, and each
+    marked between once every Heartbeat, with a tick due or not, each
     given a latest on the last of a Heartbeat's or a release's ticks it
-    gives true for. The Heartbeat connection lives as long as the server,
-    which never stops its tick
+    gives true for, and at most one stage, never a between one, given an
+    early part that a calm tick runs in its place while the split is on.
+    The Heartbeat connection lives as long as the server, which never stops
+    its tick
 --]]
 
 function Tick.start(rate: number, catchUp: number, stages: { Entry })
@@ -406,6 +513,8 @@ function Tick.start(rate: number, catchUp: number, stages: { Entry })
 	Finishes.ticks = table.create(Capacity, 0)
 	Finishes.beats = table.create(Capacity, 0)
 
+	local split: boolean = false -- Whether a stage before has an early part
+
 	for _, entry: Entry in stages do
 		checkStage(entry.name, entry.run, "Tick.start")
 
@@ -419,7 +528,18 @@ function Tick.start(rate: number, catchUp: number, stages: { Entry })
 			error(`Tick.start takes the stage {entry.name}'s latest as a function or nil, not a {typeof(latest)}`, 2)
 		end
 
-		local stage: Stage = newStage(entry.name, entry.run, between == true, latest)
+		local early: Run? = entry.early
+		if early ~= nil and type(early) ~= "function" then
+			error(`Tick.start takes the stage {entry.name}'s early as a function or nil, not a {typeof(early)}`, 2)
+		elseif early ~= nil and split then
+			error(`Tick.start takes an early part on one stage at most, and {entry.name} is a second`, 2)
+		elseif early ~= nil and between == true then
+			error(`Tick.start takes no early part on a between stage, as {entry.name} is`, 2)
+		end
+
+		split = split or early ~= nil
+
+		local stage: Stage = newStage(entry.name, entry.run, between == true, latest, early)
 		table.insert(Stages, stage)
 
 		if stage.between then
@@ -474,13 +594,17 @@ end
     each Heartbeat still adds the time it owes. Given a poll, each Heartbeat
     while held runs it first and ends the hold once it answers true or
     throws, a throw reported as the holding stage's, so the poll itself
-    never calls Tick.release. A hold outside a stage, a second one before
-    the release, and a poll that is no function are refused
+    never calls Tick.release. A hold outside a stage, one while a deferred
+    tick's rest waits, from an early part or a between stage run before
+    the rest, a second one before the release, and a poll that is no
+    function are refused
 --]]
 
 function Tick.hold(polling: Poll?)
 	if Current == "" then
 		error("Tick.hold runs only inside a running stage", 2)
+	elseif Deferred then
+		error(`Tick.hold came from the {Current} stage while a deferred tick's rest waits, so it may not hold`, 2)
 	elseif Holding then
 		error(`Tick.hold came again from the {Current} stage while the tick is already held`, 2)
 	elseif polling ~= nil and type(polling) ~= "function" then
@@ -547,9 +671,31 @@ function Tick.heartbeats(): Heartbeats
 	return Beats
 end
 
--- Whether a stage has held the tick and nothing has released it yet, so the newest tick's work is not all done
+-- Whether a stage has held the tick and nothing has released it yet, or a deferred tick's rest waits for the next
+-- Heartbeat, so the newest tick's work is not all done
 function Tick.holding(): boolean
-	return Holding
+	return Holding or Deferred
+end
+
+--[[
+    Sets whether a calm tick may defer from the next tick: the stage with an
+    early part runs that part in its place, and its run with every stage
+    after it waits for the next Heartbeat. Off, no early part runs and each
+    tick runs whole, while a rest already waiting still runs at the next
+    Heartbeat. It is off from start
+--]]
+
+function Tick.useSplit(on: boolean)
+	if type(on) ~= "boolean" then
+		error(`Tick.useSplit takes true or false, not {on}`, 2)
+	end
+
+	SplitOn = on
+end
+
+-- Whether a calm tick may defer, as Tick.useSplit last set it
+function Tick.splitOn(): boolean
+	return SplitOn
 end
 
 return Tick

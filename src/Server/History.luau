@@ -118,6 +118,8 @@ local Band: number = 0
 local BandSigmas: number = 0
 local BandMax: number = 0
 
+local SendLag: number = 0 -- Seconds from a tick's take to the flush that sent its blocks, as History.sendLag set it
+
 local History = {}
 
 --[[
@@ -614,8 +616,8 @@ end
 
 --[[
     The seconds a command's expected render time sits behind its tick: the
-    round trip, the queue wait capped at ticks.queueWait and the delay
-    clamped to the rewind's range, the sum rewindFor reaches back by
+    round trip, the queue wait capped at ticks.queueWait, the delay clamped
+    to the rewind's range and the send lag, the sum rewindFor reaches back by
 
     @ rtt | the connection's smoothed round trip, seconds
     @ wait | the simulation ticks the command waited in the queue
@@ -627,19 +629,38 @@ function History.lag(rtt: number, wait: number, delay: number): number
 		error("History.lag ran before History.start", 2)
 	end
 
-	return rtt + math.min(wait, QueueWait) / SimulationRate + math.clamp(delay, DelayMin, DelayMax)
+	return rtt + math.min(wait, QueueWait) / SimulationRate + math.clamp(delay, DelayMin, DelayMax) + SendLag
+end
+
+--[[
+    Sets the seconds from a tick's take to the flush that sent its blocks,
+    which History.lag adds, so a shot's expected render time, its reach and
+    a tap frame's view lag sit that much further back. It is 0 from start
+--]]
+
+function History.sendLag(seconds: number)
+	if not isTerm(seconds) then
+		error(`History.sendLag takes the seconds as a finite number of 0 or more, not {seconds}`, 2)
+	end
+
+	SendLag = seconds
+end
+
+-- The seconds of send lag History.lag adds, as History.sendLag last set them
+function History.sendLagSeconds(): number
+	return SendLag
 end
 
 --[[
     The render time a shot rewinds to in relay ticks, whether its claimed
     render time was inside the band, and the claim's offset from the
     expected time, which a band report carries. The expected time is the
-    command's tick less its lag, the RTT, its capped queue wait and the
-    clamped delay; a claim inside the band is used as claimed, and one outside
-    gives way to the expected time. The result is then held inside the
-    rewind's cap and the history, never later than the command's tick or
-    the newest sample. A simulation tick falls at relay tick tick * relay /
-    simulation
+    command's tick less its lag, the RTT, its capped queue wait, the clamped
+    delay and the send lag; a claim inside the band is used as claimed, and
+    one outside gives way to the expected time. The result is then held
+    inside the rewind's cap and the history, never later than the command's
+    tick or the newest sample. A simulation tick falls at relay tick tick *
+    relay / simulation
 
     @ tick | the simulation tick the shot's command ran on
     @ rtt | the connection's smoothed round trip, seconds

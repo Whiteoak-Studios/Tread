@@ -17,6 +17,7 @@ local Packages = ReplicatedStorage.Packages
 local Tread = require(Packages.Tread)
 local Volt = require(Packages.Volt)
 
+local AntiEsp = require(Packages.Tread.Server.AntiEsp)
 local Command = require(Packages.Tread.Codec.Command)
 local Commands = require(Packages.Tread.Server.Commands)
 local Relay = require(Packages.Tread.Server.Relay)
@@ -31,6 +32,7 @@ local Fleet = require(ServerScriptService.Server.Bots.Fleet)
 local Game = require(ServerScriptService.Server.Game)
 local Programs = require(ServerScriptService.Server.Bots.Programs)
 local Seeded = require(ServerScriptService.Server.Bots.Seeded)
+local Spawns = require(ServerScriptService.Server.Spawns)
 
 local SCENARIOS: { [string]: Config.Scenario } = require(ServerScriptService.Server.Bots.Config).scenarios
 local PERCENTILES: { number } = require(ServerScriptService.Server.Bots.Config).percentiles
@@ -69,6 +71,7 @@ local SEPARATOR: string = "; " -- Between the parts of one line
 local SUM: string = " + " -- Between the summed stages' names
 local FINISH: string = "finish" -- What the lines call the relay's finish, which a held tick's sum takes
 local VIEWS: string = "/" -- Between the workers' view counts
+local STUDS: string = "%.2f" -- A distance as the real player's line prints it
 
 -- Where an area is probed for ground: its center and its corners, as shares of its half width and half depth
 local PROBES: { Vector2 } = { Vector2.zero, Vector2.new(-1, -1), Vector2.new(-1, 1), Vector2.new(1, -1), Vector2.one }
@@ -94,7 +97,15 @@ type Sampled = {
 	heartbeatTimes: { number },
 	physicsTimes: { number },
 	dataSend: { number },
+	tickFrames: { number }?, -- A step half's: the milliseconds of each Heartbeat after one a tick began in
 }
+
+-- Where a step half's real player stood from its load's point as the window opened, and the studs walked read to read
+export type Walked = { from: number, moved: number, last: Vector3 }
+
+-- Verdict memory's running totals as a window last read them: the tests a kept answer settled and the rays a kept box
+-- blocked
+export type Memory = { kept: number, boxRays: number }
 
 -- Tread's work each Heartbeat of a window, oldest first, taken from the tick loop's ring as the window reads
 export type Readout = {
@@ -116,6 +127,7 @@ export type Taken = {
 	samples: Samples,
 	rates: Samples, -- The configured counts over each read's ticks or relay runs
 	skipped: number, -- Commands lazy decode passed over unread
+	walked: Walked?, -- A step half's real player, nil for every other load and with no real player in
 }
 
 -- What watches a run's window beside the stats, started after the warm-up's read and stopped after the window
@@ -150,6 +162,7 @@ type Made = {
 	stopReports: (() -> ())?,
 	stopDriver: (() -> ())?, -- Takes the NPCs' driver off the bots' stage
 	beats: RBXScriptConnection?, -- The window's Heartbeat samples while it runs
+	steps: RBXScriptConnection?, -- A step half's read of the tick loop's count before each Heartbeat, while it runs
 	probing: Probe?, -- The probe while it is started and not yet stopped
 	viewers: { Player }, -- The real players it set a render distance for, put back after
 }
@@ -161,6 +174,19 @@ local function shifted(area: Area, offset: Vector3): Area
 	return { center = area.center + offset, size = area.size }
 end
 
+-- The first real player's character on the server, nil while no real player has one
+local function followed(server: Tread.Server): Tread.Character?
+	for _, target: Tread.Target in server:getAll() do
+		-- An NPC has no player, and a bot's is no Instance
+		local owner: any = (target :: any).player
+		if typeof(owner) == "Instance" then
+			return target :: Tread.Character
+		end
+	end
+
+	return nil
+end
+
 --[[
     How far a scenario's areas move so its viewer point lands on the first
     real player's character, or nowhere when no real player has one
@@ -169,15 +195,26 @@ end
 local function viewerOffset(server: Tread.Server, viewer: Vector3): Vector3
 	-- Whiteoak TODO: set the real players down at the viewer point with character:teleport once step 3 adds it, as
 	-- the A0 arm does, in place of moving the scenario's areas to them
-	for _, target: Tread.Target in server:getAll() do
-		-- An NPC has no player, and a bot's is no Instance
-		local owner: any = (target :: any).player
-		if typeof(owner) == "Instance" then
-			return (target :: Tread.Character):getState().root - viewer
-		end
+	local character: Tread.Character? = followed(server)
+	if not character then
+		return Vector3.zero
 	end
 
-	return Vector3.zero
+	return character:getState().root - viewer
+end
+
+-- Where a character's root stands, nil for none or for one whose state refuses the read, as a destroyed one's does
+local function rootOf(character: Tread.Character?): Vector3?
+	if not character then
+		return nil
+	end
+
+	local read: boolean, state: Tread.State? = pcall(character.getState, character)
+	if not read or not state then
+		return nil
+	end
+
+	return state.root
 end
 
 -- What a cast meets in the dev game's collision, which Tread's own casts take too, colliding parts alone
@@ -492,7 +529,7 @@ local function spawnAll(
 			local bodySpawn: Area = spawn
 			local bodyRoam: Area? = roam
 			if group.cells then
-				bodySpawn = Cells(spawn, group.count, place)
+				bodySpawn = Cells.cell(spawn, group.count, place)
 				if roam then
 					bodyRoam = bodySpawn
 				end
@@ -824,10 +861,13 @@ end
     interval with the real player count and each real player's bytes over
     the last second beside it, each read printed as it comes, the server's
     frames, every finished tick's summed stages and finish, Tread's time
-    each Heartbeat, the counts, the relay's clocks while on and the commands
-    lazy decode skipped, their lines printed after, then the percentiles of
-    every stats figure, every figure's samples and the figures the lines
-    carry. It ends on its own deadline
+    each Heartbeat, the counts, the relay's clocks while on, verdict memory's
+    counts and the commands lazy decode skipped, their lines printed after,
+    then the percentiles of every stats figure, every figure's samples and
+    the figures the lines carry. Given a step half's load point, it also
+    takes the interval of each Heartbeat after one a tick began in, and
+    where the real player's character stood from the point and how far it
+    walked read to read. It ends on its own deadline
 --]]
 
 local function window(
@@ -835,7 +875,8 @@ local function window(
 	scenario: Scenario,
 	timing: Timing,
 	made: Made,
-	asked: boolean?
+	asked: boolean?,
+	point: Vector3?
 ): (string, Samples, Figures)
 	local server: Tread.Server = Game.get()
 	local Network = require(Packages.Tread.Network.Server) -- Tread's own scope, which each viewer's bytes are counted on
@@ -847,6 +888,10 @@ local function window(
 	local dropped: number = 0
 	local counted: number = Run.settled()
 	local readout: Readout = { times = {}, flags = {}, bots = {}, through = Tick.heartbeats().count, lost = 0 }
+	local tickFrames: { number } = {}
+	local before: number? = nil -- The tick loop's count as this frame's simulation began, set only in a step half
+	local character: Tread.Character? = nil
+	local walked: Walked? = nil
 
 	local inProcess: number, views: { number } = Relay.homes()
 	print(Run.modeLine(label, Run.workers(), asked, inProcess, views))
@@ -854,6 +899,8 @@ local function window(
 	local started: number = os.clock()
 	local deadline: number = started + timing.window
 	local skippedBefore: number = Commands.skipped()
+	local keptBefore: number, boxRaysBefore: number = AntiEsp.memory()
+	local memory: Memory = { kept = keptBefore, boxRays = boxRaysBefore }
 	local stalled: boolean = false
 	local second: number = 0
 
@@ -862,9 +909,32 @@ local function window(
 		table.insert(sampled.frames, delta * MILLISECONDS)
 		table.insert(sampled.heartbeatTimes, Stats.HeartbeatTime)
 		table.insert(sampled.physicsTimes, Stats.PhysicsStepTime)
+
+		-- A Heartbeat's interval holds the last frame's work, the loop's Heartbeat counted before this one's began
+		if before then
+			if Run.ticked(Tick.heartbeats(), before) then
+				table.insert(tickFrames, delta * MILLISECONDS)
+			end
+
+			before = nil
+		end
 	end)
 
 	made.beats = beats
+
+	-- Read before each frame's Heartbeat, so the pairing holds whichever runs first, the loop's handler or the sampler
+	if point then
+		sampled.tickFrames = tickFrames
+		made.steps = RunService.PreSimulation:Connect(function ()
+			before = Tick.heartbeats().count
+		end)
+
+		character = followed(server)
+		local root: Vector3? = rootOf(character)
+		if root then
+			walked = { from = (root - point).Magnitude, moved = 0, last = root }
+		end
+	end
 
 	while os.clock() < deadline do
 		task.wait(timing.interval)
@@ -880,6 +950,15 @@ local function window(
 			push(samples, "viewerBytes", sent)
 		end
 
+		-- The character the window opened with, until it refuses the read
+		if walked then
+			local root: Vector3? = rootOf(character)
+			if root then
+				walked.moved += (root - walked.last).Magnitude
+				walked.last = root
+			end
+		end
+
 		for name: string, value: any in stats do
 			if type(value) == "number" then
 				push(samples, name, value)
@@ -893,6 +972,9 @@ local function window(
 
 		Run.counts(stats, rates)
 		Run.clocks(stats, samples)
+
+		local kept: number, boxRays: number = AntiEsp.memory()
+		Run.memory(memory, kept, boxRays, stats.ticks, rates)
 
 		local relayDropped: any = stats.relayDropped
 		if type(relayDropped) == "number" then
@@ -930,6 +1012,12 @@ local function window(
 	beats:Disconnect()
 	made.beats = nil
 
+	local steps: RBXScriptConnection? = made.steps
+	if steps then
+		steps:Disconnect()
+		made.steps = nil
+	end
+
 	local taken: Taken = {
 		sampled = sampled,
 		elapsed = elapsed,
@@ -940,6 +1028,7 @@ local function window(
 		samples = samples,
 		rates = rates,
 		skipped = skipped,
+		walked = walked,
 	}
 
 	for _, line: string in Run.lines(label, taken) do
@@ -1131,7 +1220,9 @@ end
     window with any probe beside it, and then the removal of everything it
     made, checked against what the handle lists, the real players put back
     and the mode off again. A probe that started is stopped whatever happened.
-    It gives the figures its window's lines carry too, nil when none ran
+    A fixed run, a step benchmark half, stands on the plaza's spawn and
+    tracks the real player from it. It gives the figures its window's lines
+    carry too, nil when none ran
 --]]
 
 local function runSeed(
@@ -1141,7 +1232,8 @@ local function runSeed(
 	timing: Timing,
 	probe: Probe?,
 	distance: number?,
-	asked: boolean?
+	asked: boolean?,
+	fixed: boolean
 ): (boolean, string, Figures?)
 	local label: string = `Bots {name} seed {seed}`
 	local server: Tread.Server = Game.get()
@@ -1155,9 +1247,12 @@ local function runSeed(
 	local params: RaycastParams = castParams(testContent)
 	local overlap: OverlapParams = overlapParams(testContent)
 	local seeded: Seeded.Seeded = Seeded.new(seed)
-	local offset: Vector3 = Vector3.zero
-	if scenario.follow then
-		offset = viewerOffset(server, scenario.viewer)
+	local offset: Vector3 = Run.offset(scenario, fixed)
+
+	-- The point a fixed run's real player is measured from, where its viewer point lands
+	local point: Vector3? = nil
+	if fixed then
+		point = scenario.viewer + offset
 	end
 
 	local made: Made = {
@@ -1169,6 +1264,7 @@ local function runSeed(
 		stopReports = nil,
 		stopDriver = nil,
 		beats = nil,
+		steps = nil,
 		probing = nil,
 		viewers = {},
 	}
@@ -1227,7 +1323,7 @@ local function runSeed(
 			setViewers(distance, made)
 		end
 
-		local line: string, samples: Samples, carried: Figures = window(label, scenario, timing, made, asked)
+		local line: string, samples: Samples, carried: Figures = window(label, scenario, timing, made, asked, point)
 		drove(label, scenario, made, problems)
 
 		if probe then
@@ -1260,6 +1356,11 @@ local function runSeed(
 		beats:Disconnect()
 	end
 
+	local steps: RBXScriptConnection? = made.steps
+	if steps then
+		steps:Disconnect()
+	end
+
 	local stopReports: (() -> ())? = made.stopReports
 	if stopReports then
 		stopReports()
@@ -1288,9 +1389,10 @@ end
 --[[
     A scenario's seeds in turn after the server's speed calibration, with
     its probe, render distance, relay mode and any step benchmark half, nil
-    leaving its bots' views in process and its name unmarked, and whether
-    every run drove and cleaned up, with a line for each, and the figures
-    the last seed's lines carry with the calibration's loop beside them
+    leaving its bots' views in process and its name unmarked, and a half
+    standing on the fixed ground, and whether every run drove and cleaned
+    up, with a line for each, and the figures the last seed's lines carry
+    with the calibration's loop beside them
 --]]
 
 local function runAll(
@@ -1323,7 +1425,7 @@ local function runAll(
 
 	for _, seed: number in timing.seeds do
 		local ok: boolean, line: string, carried: Figures? =
-			runSeed(run, scenario, seed, timing, probe, distance, workers)
+			runSeed(run, scenario, seed, timing, probe, distance, workers, half ~= nil)
 		passed = passed and ok
 		table.insert(lines, line)
 
@@ -1355,8 +1457,9 @@ end
     Runs a scenario as Run.run does, with its bots' views on the relay's
     workers when workers is true and the server started some, and in
     process otherwise, its name marked with the step benchmark's half when
-    one is given and with the mode it asked for otherwise. It gives the
-    figures its last seed's lines carry too, nil when no window ran
+    one is given, which stands on the plaza's spawn, and with the mode it
+    asked for otherwise. It gives the figures its last seed's lines carry
+    too, nil when no window ran
 --]]
 
 function Run.runWorkers(
@@ -1409,6 +1512,23 @@ function Run.workers(): number
 	end
 
 	return 0
+end
+
+--[[
+    How far a scenario's areas move: a following scenario's so its viewer
+    point lands on the plaza's first spawn point when fixed, as every step
+    benchmark half's does, and on the first real player's character
+    otherwise, and a scenario that follows no one's nowhere
+--]]
+
+function Run.offset(scenario: Scenario, fixed: boolean): Vector3
+	if not scenario.follow then
+		return Vector3.zero
+	elseif fixed then
+		return Spawns.first() - scenario.viewer
+	end
+
+	return viewerOffset(Game.get(), scenario.viewer)
 end
 
 --[[
@@ -1610,19 +1730,30 @@ function Run.places(flags: { number }): { number }
 	return places
 end
 
+-- Whether the tick loop's Heartbeat of that count began a tick, false for one its ring holds no longer or not yet
+function Run.ticked(beats: Tick.Heartbeats, count: number): boolean
+	if count < 1 or count > beats.count or count <= beats.count - beats.held then
+		return false
+	end
+
+	return bit32.btest(beats.flags[(count - 1) % #beats.flags + 1], Tick.TICKED)
+end
+
 --[[
     The relay's rounds over a window's Heartbeats, one for each Heartbeat a
-    tick began in and was held as it ended: how many the next Heartbeat's
-    poll released, and how many it didn't. The newest, with no Heartbeat
-    after it, counts as neither
+    round went out in, held as it ended: one a tick began in, or one a
+    deferred tick's rest ran in. How many the next Heartbeat's poll
+    released, and how many it didn't. The newest, with no Heartbeat after
+    it, counts as neither
 --]]
 
 function Run.rounds(flags: { number }): (number, number)
-	local dispatched: number = bit32.bor(Tick.TICKED, Tick.HELD)
+	local dispatching: number = bit32.bor(Tick.TICKED, Tick.DEFERRED)
 	local inTime: number, late: number = 0, 0
 
 	for index: number = 1, #flags - 1 do
-		if bit32.band(flags[index], dispatched) == dispatched then
+		local flag: number = flags[index]
+		if bit32.btest(flag, Tick.HELD) and bit32.btest(flag, dispatching) then
 			if bit32.btest(flags[index + 1], Tick.RELEASED) then
 				inTime += 1
 			else
@@ -1635,9 +1766,43 @@ function Run.rounds(flags: { number }): (number, number)
 end
 
 --[[
+    The split by stage over a window's Heartbeats: the ticks deferred, one
+    for each Heartbeat a deferred tick's rest ran in, and the fallbacks, each
+    a tick run whole right after one that deferred. A tick deferred when the
+    Heartbeat after it ran a rest, so the newest, with none after it, is
+    neither deferred nor whole
+--]]
+
+function Run.deferrals(flags: { number }): (number, number)
+	local deferred: number, fallbacks: number = 0, 0
+	local before: boolean = false -- Whether the tick before deferred
+
+	for index: number, flag: number in flags do
+		if bit32.btest(flag, Tick.DEFERRED) then
+			deferred += 1
+		end
+
+		local after: number? = flags[index + 1]
+		if after and bit32.btest(flag, Tick.TICKED) then
+			local defers: boolean = bit32.btest(after, Tick.DEFERRED)
+			if before and not defers then
+				fallbacks += 1
+			end
+
+			before = defers
+		end
+	end
+
+	return deferred, fallbacks
+end
+
+--[[
     A stats read's configured counts pushed onto samples, a relay count
     over the read's relay runs, its ticks less the relay ticks it skipped,
-    and the rest over its ticks. A figure whose divisor is none is left
+    and the rest over its ticks, then the viewer-player pairs past the
+    crowd cap over its relay runs, anti-ESP's rays over its ticks and its
+    workers' busy seconds as milliseconds a second of the read, which only
+    the step benchmark's table reads. A figure whose divisor is none is left
     out, as a read whose ticks all dropped gives, or a short one charged
     with relay ticks skipped before it, since they count at the next run
 --]]
@@ -1659,6 +1824,40 @@ function Run.counts(stats: { [string]: any }, samples: Samples)
 			push(samples, name, count / over)
 		end
 	end
+
+	-- Each viewer's turn adds its candidates past the cap's size, so a relay run's is those pairs over every viewer
+	local rest: any = stats.crowdRest
+	if type(rest) == "number" and ticks - skipped > 0 then
+		push(samples, "crowdRest", rest / (ticks - skipped))
+	end
+
+	local rays: any, busy: any, seconds: any = stats.antiEspRays, stats.antiEspWorkerBusy, stats.seconds
+	if type(rays) == "number" and ticks > 0 then
+		push(samples, "antiEspRays", rays / ticks)
+	end
+
+	-- Only a server that made anti-ESP's workers reads their busy time
+	if type(busy) == "number" and type(seconds) == "number" and seconds > 0 then
+		push(samples, "antiEspWorkerBusy", busy / seconds * MILLISECONDS)
+	end
+end
+
+--[[
+    A read of verdict memory's running totals pushed onto rates as each
+    one's change since the window's last read over the read's ticks, the
+    tests a kept answer settled as antiEspKept and the rays a kept box
+    blocked as antiEspBoxRays, and kept as the last read. A read with no
+    ticks pushes neither, as Run.counts leaves out its rays
+--]]
+
+function Run.memory(last: Memory, kept: number, boxRays: number, ticks: any, rates: Samples)
+	if type(ticks) == "number" and ticks > 0 then
+		push(rates, "antiEspKept", (kept - last.kept) / ticks)
+		push(rates, "antiEspBoxRays", (boxRays - last.boxRays) / ticks)
+	end
+
+	last.kept = kept
+	last.boxRays = boxRays
 end
 
 --[[
@@ -1706,8 +1905,9 @@ end
 
 --[[
     The lines a window prints as it closes, in order: the server's, Tread's
-    time a Heartbeat by its place in the tick, the tick stages', the counts'
-    and, while any read carried them, the relay clocks'
+    time a Heartbeat by its place in the tick, the tick stages', the counts',
+    a step half's real player's while it had one and, while any read carried
+    them, the relay clocks'
 --]]
 
 function Run.lines(label: string, taken: Taken): { string }
@@ -1717,6 +1917,12 @@ function Run.lines(label: string, taken: Taken): { string }
 		tickLine(label, taken.totals, taken.samples, taken.finishes, taken.roundsDropped),
 		countsLine(label, taken.rates),
 	}
+
+	local walked: Walked? = taken.walked
+	if walked then
+		local from: string = `{string.format(STUDS, walked.from)} studs from the load's point as the window opened`
+		table.insert(lines, `{label} real player: {from}, {string.format(STUDS, walked.moved)} walked in it`)
+	end
 
 	local clocks: string? = Run.clocksLine(label, taken.samples)
 	if clocks then
@@ -1749,12 +1955,15 @@ end
 
 --[[
     The figures a window's lines carry, by the names the step benchmark's
-    table reads: the frames, Tread's time on the place in the tick with the
-    largest p95 with the bots' stage there and what the frame's p95 leaves
-    past it, the tick total, each stage, the finish, anti-ESP's p95, the
-    counts, the viewer's bytes, any OwnerState sends and checks, the
-    commands lazy decode skipped and any relay clocks. A figure with no
-    samples is left out
+    table reads: any real player's distance and walk, the frames, Tread's
+    time on the place in the tick with the largest p95 with the bots' stage
+    there and on each of the first three places, the ticks deferred and the
+    split's fallbacks, any frame holding a tick, the tick total, each stage,
+    the finish, the send time, anti-ESP's figures, verdict memory's and any
+    workers', the frame caps' counts, the counts with the crowd cap's rest a
+    relay run, the viewer's bytes, any OwnerState sends and checks, the
+    commands lazy decode skipped and any relay clocks. One with no samples
+    is left out
 --]]
 
 function Run.figures(taken: Taken): Figures
@@ -1769,6 +1978,12 @@ function Run.figures(taken: Taken): Figures
 
 	if taken.elapsed > 0 then
 		figures.heartbeats = #frames / taken.elapsed
+	end
+
+	local walked: Walked? = taken.walked
+	if walked then
+		figures.playerFrom = walked.from
+		figures.playerMoved = walked.moved
 	end
 
 	put(figures, "fps", rates, FPS)
@@ -1787,18 +2002,26 @@ function Run.figures(taken: Taken): Figures
 		end
 	end
 
-	local frame: number? = figures.frameP95
 	if heaviest > 0 then
 		put(figures, "treadP50", tread[heaviest], P50)
 		figures.treadP95 = largest
 		put(figures, "botsP50", bots[heaviest], P50)
 		put(figures, "botsP95", bots[heaviest], P95)
-
-		if frame then
-			figures.gap = frame - largest
-		end
 	end
 
+	-- Tread's time on each place in the tick but the last, which gathers every later one
+	for place: number = 1, #PLACES - 1 do
+		put(figures, `place{place}P50`, tread[place], P50)
+		put(figures, `place{place}P95`, tread[place], P95)
+	end
+
+	local flags: { number } = taken.readout.flags
+	if #flags > 0 then
+		figures.deferred, figures.fallbacks = Run.deferrals(flags)
+	end
+
+	put(figures, "tickFrameP50", taken.sampled.tickFrames, P50)
+	put(figures, "tickFrameP95", taken.sampled.tickFrames, P95)
 	put(figures, "tickP50", taken.totals, P50)
 	put(figures, "tickP95", taken.totals, P95)
 
@@ -1807,11 +2030,41 @@ function Run.figures(taken: Taken): Figures
 	end
 
 	put(figures, FINISH, taken.finishes, P50)
+
+	-- The send time, a smoothed level in seconds at each read, at p50 over the reads in milliseconds
+	local send: { number }? = samples.relaySend
+	if send and #send > 0 then
+		figures.relaySend = percentile(send, P50) * MILLISECONDS
+	end
+
 	put(figures, BESIDE, samples[`{BESIDE}P95Ms`], P50)
+	put(figures, "antiEspTests", taken.rates.antiEspTests, P50)
+	put(figures, "antiEspRays", taken.rates.antiEspRays, P50)
+	put(figures, "antiEspKept", taken.rates.antiEspKept, P50)
+	put(figures, "antiEspBoxRays", taken.rates.antiEspBoxRays, P50)
+	total(figures, "antiEspHidden", samples.antiEspHidden)
+	total(figures, "antiEspFailOpens", samples.antiEspFailOpens)
+	total(figures, "antiEspWorkerTests", samples.antiEspWorkerTests)
+	put(figures, "antiEspWorkerBusy", taken.rates.antiEspWorkerBusy, P50)
+	total(figures, "antiEspLateBatches", samples.antiEspLateBatches)
 	total(figures, "dropped", samples.dropped)
 	total(figures, "relaySkipped", samples.relaySkipped)
+	total(figures, "npcsWaited", samples.npcsWaited)
+	total(figures, "antiEspCut", samples.antiEspCut)
+	total(figures, "relayLeft", samples.relayLeft)
+	total(figures, "relayOver", samples.relayOver)
+	total(figures, "farHalved", samples.farHalved)
 	put(figures, "records", taken.rates.recordsSent, P50)
+	put(figures, "recordsCut", taken.rates.recordsCut, P50)
+	put(figures, "crowdRest", taken.rates.crowdRest, P50)
 	put(figures, "bytes", taken.rates.bytesOut, P50)
+
+	-- The longest batch a read gave, in seconds, at p95 over the reads in milliseconds
+	local longest: { number }? = samples.antiEspWorkerLongest
+	if longest and #longest > 0 then
+		figures.antiEspWorkerLongest = percentile(longest, P95) * MILLISECONDS
+	end
+
 	put(figures, "viewerP50", samples.viewerBytes, P50)
 	put(figures, "viewerP95", samples.viewerBytes, P95)
 	total(figures, "ownerFull", samples.ownerFull)

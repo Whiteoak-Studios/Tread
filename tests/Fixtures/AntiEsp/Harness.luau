@@ -1,7 +1,7 @@
 --[[
     The anti-ESP cases' harness: anti-ESP started on the example's tables
     over a world with no surfaces, bodies in the slot table, bot viewers,
-    and walls a case sets, which log every ray anti-ESP casts
+    and walls a case sets, of parts or not, which log every ray it casts
 --]]
 
 --!strict
@@ -27,6 +27,7 @@ local World = require(Tread.Step.World)
 local SLOTS: number = Constants.SLOTS
 local RTT: number = 0.2 -- Every bot viewer's round trip, inside the example's look-ahead clamp
 local BUDGET: number = 1 -- Seconds a slice may take, more than any case's due tests need
+local LATE: number = 2 * BUDGET -- What a stand-in clock's late read gives, past the deadline of any slice it starts
 local TOLERANCE: number = 1e-6 -- Studs a logged ray's end may sit from a point and still end there
 
 type ServerSettings = Config.ServerSettings
@@ -35,13 +36,20 @@ type Kind = Slots.Kind
 type State = State.State
 type Viewer = Relay.Viewer
 type World = State.World
-type Wall = (origin: vector, direction: vector) -> boolean
+type Wall = (origin: vector, direction: vector) -> any -- An occluder's instance or true, nil or false for none
 
 -- One ray anti-ESP cast, with where it ends
 export type Ray = {
 	origin: vector,
 	direction: vector,
 	to: vector,
+}
+
+-- A stand-in for the clock a slice's deadline is read on, which a case sets by hand
+export type Clock = {
+	read: () -> number, -- What anti-ESP reads: 0, then LATE from the read numbered late on
+	reads: number, -- Its reads since a case last set this to 0
+	late: number, -- The first read that finds the deadline passed, math.huge for none
 }
 
 type Fields = {
@@ -51,6 +59,9 @@ type Fields = {
 	states: { [number]: State },
 	rays: { Ray }, -- Every ray cast since the last slice began
 	wall: Wall, -- What each ray meets, true for an occluder
+	occluded: number, -- The rays among them cast through the occluder query, which asks what a ray met, since start
+	kept: number, -- Verdict memory's kept tests and box rays as remembered last read them
+	boxRays: number,
 }
 
 -- Walls nowhere, and walls everywhere
@@ -63,12 +74,89 @@ function Harness.solid(_: vector, _: vector): boolean
 end
 
 --[[
-    A harness with anti-ESP started on the example's tables, which tweak
-    may change first, every bot's round trip at RTT and no walls. The world
-    has no surfaces, so every eye is the eased eye where it stands
+    A wall of the parts in a folder as the engine's raycast meets them: the
+    part a ray enters first from outside, each part the box of its Size at
+    its CFrame, nil when it enters none, and none for a part it starts in
 --]]
 
-function Harness.new(tweak: ((shared: Shared, server: ServerSettings) -> ())?): Self
+function Harness.parts(folder: any): Wall
+	return function (origin: vector, direction: vector): any
+		local from: any = Vector3.new(origin.x, origin.y, origin.z)
+		local along: any = Vector3.new(direction.x, direction.y, direction.z)
+		local met: any = nil
+		local nearest: number = math.huge
+
+		for _, part: any in folder:GetChildren() do
+			local cframe: any = part.CFrame
+			local start: any = cframe:PointToObjectSpace(from)
+			local move: any = cframe:VectorToObjectSpace(along)
+			local half: any = part.Size / 2
+			local enter: number = 0
+			local leave: number = 1
+			local inside: boolean = true
+
+			for _, axis: string in { "X", "Y", "Z" } do
+				local at: number = start[axis]
+				local step: number = move[axis]
+				local extent: number = half[axis]
+				inside = inside and math.abs(at) < extent
+
+				if step == 0 then
+					if math.abs(at) > extent then
+						leave = -1
+					end
+				else
+					local near: number = (-extent - at) / step
+					local far: number = (extent - at) / step
+					enter = math.max(enter, math.min(near, far))
+					leave = math.min(leave, math.max(near, far))
+				end
+			end
+
+			if not inside and enter <= leave and enter < nearest then
+				met = part
+				nearest = enter
+			end
+		end
+
+		return met
+	end
+end
+
+--[[
+    A stand-in clock reading 0, so no slice started on it runs past its
+    deadline, until the read a case numbers late, from which on it reads
+    past the deadline, as a live clock stays past it, until the case starts
+    the count again
+--]]
+
+function Harness.clock(): Clock
+	local clock: Clock
+
+	clock = {
+		read = function (): number
+			clock.reads += 1
+			if clock.reads >= clock.late then
+				return LATE
+			end
+
+			return 0
+		end,
+		reads = 0,
+		late = math.huge,
+	}
+
+	return clock
+end
+
+--[[
+    A harness with anti-ESP started on the example's tables, which tweak
+    may change first, every bot's round trip at RTT and no walls, on clock
+    when given, os.clock otherwise. The world has no surfaces, so every eye
+    is the eased eye where it stands
+--]]
+
+function Harness.new(tweak: ((shared: Shared, server: ServerSettings) -> ())?, clock: (() -> number)?): Self
 	local shared: Shared = Example.shared()
 	local server: ServerSettings = Example.server()
 	server.bots = { rtt = RTT }
@@ -96,15 +184,25 @@ function Harness.new(tweak: ((shared: Shared, server: ServerSettings) -> ())?): 
 		states = {} :: { [number]: State },
 		rays = {} :: { Ray },
 		wall = Harness.open :: Wall,
+		occluded = 0,
+		kept = 0,
+		boxRays = 0,
 	}, Harness)
 
-	local function blocked(origin: vector, direction: vector): boolean
+	local function blocked(origin: vector, direction: vector): any
 		table.insert(self.rays, { origin = origin, direction = direction, to = origin + direction })
 
 		return self.wall(origin, direction)
 	end
 
-	AntiEsp.start({ shared = shared, server = server }, world, self.states, blocked)
+	-- The same ray logged, and counted apart, as anti-ESP's ask of what a ray met
+	local function occluder(origin: vector, direction: vector): any
+		self.occluded += 1
+
+		return blocked(origin, direction)
+	end
+
+	AntiEsp.start({ shared = shared, server = server }, world, self.states, blocked, occluder, clock)
 
 	return self
 end
@@ -217,6 +315,32 @@ end
 function Harness.slice(self: Self, now: number, budget: number?)
 	table.clear(self.rays)
 	AntiEsp.run(budget or BUDGET, now)
+end
+
+--[[
+    One slice at a schedule time on a stand-in clock started anew, whose
+    read numbered late finds the deadline passed and every read after it,
+    none when late is left out
+--]]
+
+function Harness.sliceOn(self: Self, clock: Clock, now: number, late: number?)
+	clock.reads = 0
+	clock.late = late or math.huge
+	self:slice(now)
+end
+
+--[[
+    Verdict memory's kept tests and box rays since this harness's last call,
+    from AntiEsp.memory's totals, which one read never takes from another
+--]]
+
+function Harness.remembered(self: Self): (number, number)
+	local kept: number, boxRays: number = AntiEsp.memory()
+	local newKept: number, newBoxRays: number = kept - self.kept, boxRays - self.boxRays
+	self.kept = kept
+	self.boxRays = boxRays
+
+	return newKept, newBoxRays
 end
 
 -- How many of the logged rays end at a point

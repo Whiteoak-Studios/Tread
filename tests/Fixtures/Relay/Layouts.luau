@@ -1,12 +1,13 @@
 --[[
-    The relay's four seeded layouts through its harness, idle, a fight, wide
-    sleepers and tap sinks, in process or on stand-in workers, each giving
-    the digest of every block, frame and keyframe and the totals it reached
+    The relay's seeded layouts through its harness, idle, a fight, wide
+    sleepers, tap sinks, three bands and a capped crowd, in process or on
+    stand-in workers, each digesting every block, frame and keyframe it sends
 --]]
 
 --!strict
 local serde = require("@lune/serde")
 
+local Bands = require("./Bands")
 local Environment = require("../../Environment")
 local StandIn = require("./StandIn")
 
@@ -21,6 +22,8 @@ local EXPECTED: { [string]: string } = {
 	fight = "107e38256f5db7fdf1841bcb131a1c7239276e3cb0ec24ea589ff6a392805c3e",
 	field = "ab4a520fa0bc7ceb9a932c774717317b8fabc8600a45915b59f94844a529ff2c",
 	taps = "b0e1d6d53c986c91861d424a959c8c44c6089f003a9fe91843dd7dc6d6a77cd4",
+	bands = "fc7db808a30343c3eecb44922569fa0f307f095f0493dc133056becf3d0608ff",
+	crowd = "5bfda4222940fbc96191c003a541995c98f20688d01475b76f46ef826ef43674",
 }
 local MODULUS: number = 2 ^ 31 - 1 -- Park and Miller's generator, whose products stay exact in a double
 local MULTIPLIER: number = 16807
@@ -87,6 +90,24 @@ local MODERATOR_AT: vector = vector.create(3000, 0, 3000)
 local WATCH_FROM: number = 5
 local WATCH_UNTIL: number = 25
 
+-- The banded crowd: the dev place's three bands over a square wider than the last edge, every third viewer zoomed,
+-- hides reshuffled every few runs, NPCs on the move, and a moderator watching a zoomed viewer for part of the runs
+local BANDS_SEED: number = 505
+local BANDS_VIEWERS: number = 36
+local BANDS_CENTER: vector = vector.create(500, 0, -500)
+local BANDS_SPREAD: number = 1400 -- Studs across the square, so pairs stand in every band and some past relevancy
+local BANDS_RUNS: number = 30
+local BANDS_STEP: number = 6 -- Studs a body may move along each axis a run, 120 a second, so pairs cross edges
+local BANDS_ZOOM_EVERY: number = 3
+local BANDS_NPCS: number = 6
+local BANDS_HIDDEN: number = 0.2
+local BANDS_SHUFFLE: number = 5
+
+-- The capped crowd: the banded crowd's runs under a crowd cap of 8, the rest aiming for 10 Hz, half the first band's
+local CROWD_SIZE: number = 8
+local CROWD_RATE: number = 10
+local CROWD_FLOOR: number = 5
+
 type Generator = () -> number
 
 -- What one layout's runs gave: its digest and the totals that show it reached what it is for
@@ -102,6 +123,8 @@ export type Result = {
 	stale: number, -- And those still drawn out of range once its run was read
 	worked: number, -- The workers that ran a round, 0 in process
 	split: number, -- The most workers one round handed a watcher to, 2 once a watcher's home isn't its target's
+	rest: number, -- The candidates the turns held outside their viewer's crowd cap, the relay's fourth count
+	reads: number, -- The relay's reads of its harness's stand-in clock
 }
 
 -- What one layout keeps while it runs
@@ -201,12 +224,12 @@ function Layouts.harness(pool: any?): (any, { [string]: any })
 end
 
 --[[
-    A layout's harness, in process or with that many workers, with every
-    block and withheld block it sends kept in order with its recipients'
-    names
+    A layout's harness, in process or with that many workers, its tables
+    changed by tweak first when given, with every block and withheld block
+    it sends kept in order with its recipients' names
 --]]
 
-local function begin(workers: number?): Layout
+local function begin(workers: number?, tweak: ((shared: any, server: any) -> ())?): Layout
 	local Harness: any
 	local pool: { [string]: any }? = nil
 	if workers then
@@ -215,7 +238,7 @@ local function begin(workers: number?): Layout
 		Harness = Environment.load(HARNESS)
 	end
 
-	local harness: any = Harness.new(nil, nil, workers)
+	local harness: any = Harness.new(nil, tweak, workers)
 
 	local layout: Layout = {
 		Harness = Harness,
@@ -237,6 +260,8 @@ local function begin(workers: number?): Layout
 			stale = 0,
 			worked = 0,
 			split = 0,
+			rest = 0,
+			reads = 0,
 		},
 	}
 
@@ -314,9 +339,11 @@ end
 
 -- The layout's digest, with the relay's running counts last, and the workers that ran a round
 local function finish(layout: Layout): Result
-	local sent: number, cut: number = layout.Harness.Relay.counts()
+	local sent: number, cut: number, _, rest: number = layout.Harness.Relay.counts()
 	table.insert(layout.parts, `counts {sent} {cut}`)
 	layout.result.digest = serde.hash("sha256", table.concat(layout.parts, "\n"))
+	layout.result.rest = rest
+	layout.result.reads = layout.harness.reads
 
 	local pool: any = layout.harness.pool
 	if pool then
@@ -582,6 +609,81 @@ function Layouts.taps(workers: number?): Result
 	end
 
 	return finish(layout)
+end
+
+-- Gives a server table the three bands and the capped crowd's cap, as a harness's tweak takes it
+local function capped(shared: any, server: any)
+	Bands.three(shared, server)
+	server.tiers.crowd = { size = CROWD_SIZE, rate = CROWD_RATE, floor = CROWD_FLOOR }
+end
+
+--[[
+    The banded crowd's runs on a harness whose tables tweak gives, with
+    the crowd cap Relay.setCrowd takes off before the first run when lifted
+--]]
+
+local function banded(workers: number?, tweak: (shared: any, server: any) -> (), lifted: boolean): Result
+	local layout: Layout = begin(workers, tweak)
+	local harness: any = layout.harness
+	if lifted then
+		layout.Harness.Relay.setCrowd(nil)
+	end
+
+	local random: Generator = generator(BANDS_SEED)
+
+	for index: number = 1, BANDS_VIEWERS do
+		local client: any = join(layout, `Banded{index}`, within(random, BANDS_CENTER, BANDS_SPREAD), true)
+		harness.states[client.viewer.slot].facing = random() * 2 * math.pi
+		client.viewer.zoomed = index % BANDS_ZOOM_EVERY == 0
+	end
+
+	local npcs: { number } = {}
+	for _ = 1, BANDS_NPCS do
+		table.insert(npcs, harness:spawn("Npc", within(random, BANDS_CENTER, BANDS_SPREAD)))
+	end
+
+	-- The first zoomed viewer, so the moderator's copies carry what the zoom changed
+	local target: any = layout.clients[BANDS_ZOOM_EVERY]
+	local moderator: any = join(layout, "Moderator", BANDS_CENTER, false)
+
+	for run: number = 1, BANDS_RUNS do
+		if run % BANDS_SHUFFLE == 1 then
+			shuffle(layout, random, BANDS_HIDDEN)
+		end
+
+		if run == WATCH_FROM then
+			harness:watch(moderator, target)
+		elseif run == WATCH_UNTIL then
+			harness:watch(moderator, nil)
+		end
+
+		for _, slot: number in npcs do
+			local stride: vector =
+				vector.create((random() - 0.5) * 2 * BANDS_STEP, 0, (random() - 0.5) * 2 * BANDS_STEP)
+			harness.states[slot].position += stride
+		end
+
+		scuffle(layout, random, BANDS_STEP, FIGHT_JUMP)
+		follow(layout)
+		step(layout, run)
+	end
+
+	return finish(layout)
+end
+
+-- A crowd over every band of the dev place's three, some viewers zoomed, NPCs moving, and a moderator watching one
+function Layouts.bands(workers: number?): Result
+	return banded(workers, Bands.three, false)
+end
+
+--[[
+    The banded crowd under a crowd cap of 8, so most viewers' rest aim for
+    half the first band's rate, or with that cap lifted by Relay.setCrowd
+    before the first run, which must give the banded crowd's own digest
+--]]
+
+function Layouts.crowd(workers: number?, lifted: boolean?): Result
+	return banded(workers, capped, lifted == true)
 end
 
 return Layouts

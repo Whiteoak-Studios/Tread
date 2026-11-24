@@ -64,6 +64,7 @@ local LiveRuns = {
 		{ name = "ClientCost", minutes = 7.5 },
 		{ name = "ParallelProbe", minutes = 0.2 }, -- The loop timed serially, then 50 batches at each of 5 worker counts
 		{ name = "ParallelReturn", minutes = 0.5 }, -- P1's 600 rounds a Heartbeat apart, P4's values, P5's 28 rows of 30
+		{ name = "ParallelFrames", minutes = 3 }, -- 16 arms of 300 rounds, each round a frame or two at 60 a second
 		{ name = "BenchS5", minutes = 7.5 },
 		{ name = "BenchS6", minutes = 7.5 },
 		{ name = "BenchS7", minutes = 7.5 },
@@ -79,6 +80,11 @@ local LiveRuns = {
 		{ name = "BenchSpread", minutes = 12 }, -- 149 and 299 bots a cell each, serial then on the workers, 30 s and 120 s
 		{ name = "BenchStep", minutes = 7 }, -- S4, Spread150 and Spread300 with the levers off then on, 10 s and 50 s each
 		{ name = "BenchStepNoise", minutes = 7 }, -- The same loads with no lever flipped in either half
+		{ name = "BenchStepMemory", minutes = 2.5 }, -- Rooms150 among walls with verdict memory off then on, 10 s and 50 s
+		{ name = "BenchStepSplit", minutes = 7 }, -- The step loads with the split by stage off and on, 10 s and 50 s each
+		{ name = "BenchStepNpcs", minutes = 2.5 }, -- S4Npcs with the NPCs' budget off then on, 10 s and 50 s
+		{ name = "BenchStepLevers", minutes = 7 }, -- Session 2's levers each alone, S4 twice and Spread300, 10 s and 50 s
+		{ name = "ClientParallel", minutes = 3 }, -- P6 then P8 on every real client, each beside G5, 10 s and 60 s
 	} :: { Run },
 
 	-- What Run all runs one after another on one server, each a listed run needing neither a player's hands nor a server

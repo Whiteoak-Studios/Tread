@@ -51,11 +51,23 @@ export type Timing = {
 	interval: number,
 }
 
--- One load of the step benchmark: its scenario, and each half's levers in the order the halves run, off for before
+-- One load of the step benchmark: its scenario, each half's levers in the order the halves run, off for before, and the
+-- one lever its halves flip by name in a run whose loads each flip their own
 export type StepLoad = {
 	scenario: string,
 	order: { boolean },
+	lever: string?,
 }
+
+-- A distance band's rates in Hz, the one it aims for and its floor, and an edge between two bands in studs
+export type Band = { aim: number, floor: number }
+export type Edge = { enter: number, leave: number }
+
+-- Distance bands nearest first, with the edges between them, one fewer
+export type Bands = { bands: { Band }, edges: { Edge } }
+
+-- The walls a load builds on the lines of its rooms' grid, studs thick and high
+export type Walls = { thickness: number, height: number }
 
 -- The fixed workload a run's calibration times, a sample at a time, against a part it lays for the casts
 export type Calibration = {
@@ -83,6 +95,10 @@ local SPREAD: Area = { center = Vector3.new(0, 0, 0), size = Vector2.new(5400, 5
 local FIELD_SIDE: number = 4000 -- Studs along each of its sides
 local FIELD: Area = { center = Vector3.new(0, 0, 0), size = Vector2.new(FIELD_SIDE, FIELD_SIDE) }
 
+-- The verdict memory run's rooms, 9 by 9 of 30 studs, far from every other load and under the wire's height bound
+local ROOMS_SIDE: number = 270 -- Studs along each of its sides
+local ROOMS: Area = { center = Vector3.new(-4000, 1010, 0), size = Vector2.new(ROOMS_SIDE, ROOMS_SIDE) }
+
 local BOTS: number = 149 -- A 150-slot server's players beside the one real client
 local IN_CITY: number = 60 -- S3's bots on the plaza, the rest spread over the map
 local CHEATERS: number = 8 -- S7's bots of each cheat, the honest rest roaming beside them
@@ -94,6 +110,7 @@ local MODERATORS: number = 4 -- S10's spectating moderators, the map group cut b
 local SCALE: number = 299 -- G10's 300 players beside the one real client
 local IN_CITY_SCALED: number = 120 -- S3x300's bots on the plaza, S3's share of the city at SCALE, the rest on the map
 local TEAM: number = 1 -- G5's one team, which every bot and real player shares
+local STILL: number = 75 -- Rooms150's bots standing still, the rest of its bots walking
 
 local SCENARIOS: { [string]: Scenario } = {
 	S0 = { groups = {}, viewer = MAP.center, follow = false, storm = false },
@@ -281,6 +298,18 @@ local SCENARIOS: { [string]: Scenario } = {
 		follow = true,
 		storm = false,
 	},
+
+	-- The verdict memory run's load: still bots and walkers each a room of the same grid, so a room holds one of each
+	-- at most, a walker's goals inside its room, on no team and following no one
+	Rooms150 = {
+		groups = {
+			{ name = "still", count = STILL, spawn = ROOMS, cells = true },
+			{ name = "walking", count = BOTS - STILL, spawn = ROOMS, roam = ROOMS, cells = true },
+		},
+		viewer = ROOMS.center,
+		follow = false,
+		storm = false,
+	},
 }
 
 return {
@@ -363,7 +392,7 @@ return {
 	-- The step benchmark: the fight and the spread loads, each a half with the session's levers off and one with them
 	-- on, the relay's workers on in both, one short seed each
 	step = {
-		session = 1, -- The performance build's step whose levers the halves flip
+		session = 3, -- The performance build's step whose levers the halves flip
 		loads = {
 			{ scenario = "S4", order = { false, true } },
 			{ scenario = "Spread150", order = { true, false } }, -- After first, so a slowdown lands on either half
@@ -371,6 +400,27 @@ return {
 		} :: { StepLoad },
 		timing = { seeds = { 1 }, warmup = 10, window = 50, interval = 1 } :: Timing,
 		drift = 0.05, -- The share the halves' calibration loops may differ by before the table flags them
+
+		-- The distance bands a before half runs: step 1's near and far tiers as two bands and their one edge
+		before = {
+			bands = { { aim = 20, floor = 15 }, { aim = 15, floor = 10 } }, -- Hz, nearest first
+			edges = { { enter = 200, leave = 220 } }, -- Studs
+		} :: Bands,
+
+		-- The verdict memory run: Rooms150 alone, before then after, with verdict memory flipped alone in its halves
+		memory = { scenario = "Rooms150", order = { false, true } } :: StepLoad,
+		walls = { thickness = 0.4, height = 11 } :: Walls, -- Studs, of each wall on its rooms' lines
+
+		-- The NPC budget's run: S4Npcs alone, before then after, since the step loads wake no NPC
+		npcs = { scenario = "S4Npcs", order = { false, true } } :: StepLoad,
+
+		-- The levers run: each of session 2's levers flipped alone on a load that can show it, the others and the
+		-- session's own held off
+		levers = {
+			{ scenario = "S4", order = { false, true }, lever = "crowdCap" },
+			{ scenario = "S4", order = { true, false }, lever = "antiEspWorkers" }, -- After first, as Spread150's is
+			{ scenario = "Spread300", order = { false, true }, lever = "bands" },
+		} :: { StepLoad },
 	},
 
 	stage = "bots", -- The stage every bot sends from, after the relay

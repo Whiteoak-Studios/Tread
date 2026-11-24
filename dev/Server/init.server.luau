@@ -1,18 +1,26 @@
 --[[
-    The dev place's server bootstrap: starts the dev game, and Tread's
-    server with it, G7's shot telemetry, the clips' played reports, the live
-    panel's runs and the bot panel, then runs each scenario asked for
+    The dev place's server bootstrap: starts the dev game with Tread's
+    server, G7's shot telemetry, the clips' played reports, the live panel,
+    the bot panel, the split's switch, the ghosts, then each scenario asked for
 --]]
 
 --!strict
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+
+local Tread = require(ReplicatedStorage.Packages.Tread)
+
+local Tick = require(ReplicatedStorage.Packages.Tread.Server.Tick)
 
 local BotPanel = require(ServerScriptService.Server.BotPanel)
 local Clips = require(ServerScriptService.Server.Clips)
 local Game = require(ServerScriptService.Server.Game)
+local Ghost = require(ServerScriptService.Server.Ghost)
 local Hits = require(ServerScriptService.Server.Hits)
 local Live = require(ServerScriptService.Server.Live)
+local Run = require(ServerScriptService.Server.Bots.Run)
 local Runner = require(ServerScriptService.Server.Runner)
+local Split = require(ServerScriptService.Server.Split)
 
 local SCENARIO_ATTRIBUTE: string = "Scenario" -- What a check sets on this script to the name of a scenario to run
 
@@ -23,6 +31,14 @@ Hits.start()
 Clips.start()
 Live.start()
 BotPanel.start(Live.running)
+Split.start(Live.running)
+
+-- The ghosts' label is the state a viewer's ghosts are read under, the split's as the tick loop has it and the relay
+-- workers the server started, so a viewer's means start again only on a flip
+local server: Tread.Server = Game.get()
+Ghost.start(server, function (): string
+	return Split.label(Tick.splitOn(), Run.workers())
+end, Live.running)
 
 -- Each call is guarded, since a game script may be refused StudioTestService's calls, a live server may lack the
 -- service, and outside a test GetTestArgs may refuse

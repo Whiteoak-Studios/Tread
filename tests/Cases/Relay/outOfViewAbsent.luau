@@ -22,7 +22,7 @@ local function drive(look: vector?): ({ string }, number, number)
 	local Harness: any = Environment.load(HARNESS)
 	-- No out-of-view rate, and whole records, since the squeeze is counted in 16 B records
 	local harness: any = Harness.new(false, function (_: any, server: any)
-		server.tiers.farFloor = FLOOR
+		server.tiers.bands[2].floor = FLOOR
 		server.tiers.outOfView = nil
 		server.relay.changes = false
 	end)

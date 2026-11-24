@@ -1,7 +1,7 @@
 --[[
-    The relay check's four layouts, run through a serial copy and a copy on
-    two stand-in workers, match on every run, and reach reveals, hides, tap
-    frames, withheld blocks, every call kind and a leave and rejoin
+    The relay check's layouts under the dev place's crowd cap, run through a
+    serial copy and a copy on two stand-in workers, match on every run and
+    reach every part they are for, the cap holding players out in the crowd
 --]]
 
 --!strict
@@ -14,6 +14,10 @@ local POOL: string = "ReplicatedStorage.Packages.Tread.Server.RelayWorkers.Pool"
 local WORKERS: number = 2
 local TIMEOUT: number = 1
 local LEAST_RUNS: number = 20
+
+-- The dev place's crowd cap, which the live check runs every layout under, so a layout of more viewers than its size
+-- plus one is the one where it holds players out
+local CROWD: { size: number, rate: number, floor: number } = { size = 32, rate = 20, floor = 5 }
 
 -- The relay members a layout must call between runs
 local MEMBERS: { string } = { "setLook", "setInvisible", "shotNear", "reveal", "revealAll", "setDistance", "remove" }
@@ -81,9 +85,12 @@ return function (): (boolean, string | nil)
 		local Example: any =
 			serialGlobals.require(serialGlobals.game:GetService("ServerScriptService").Fixtures.Config.Example)
 
+		local tables: any = Example.server()
+		tables.tiers.crowd = CROWD
+
 		local summary: any = RelayCheck.check(plan, serial, workers, {
 			shared = Example.shared(),
-			server = Example.server(),
+			server = tables,
 			workers = WORKERS,
 			timeout = TIMEOUT,
 			started = function () end,
@@ -102,6 +109,8 @@ return function (): (boolean, string | nil)
 			return false, `The {name} layout reached {reached} and {summary.asks} asks`
 		elseif plan.moderator and summary.withheld == 0 then
 			return false, `The {name} layout's moderator was sent no withheld block`
+		elseif (plan.layout.viewers - 1 > CROWD.size) ~= (summary.held > 0) then
+			return false, `The {name} layout of {plan.layout.viewers} viewers held {summary.held} outside the cap`
 		end
 
 		for _, member: string in MEMBERS do

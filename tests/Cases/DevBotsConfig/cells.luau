@@ -113,7 +113,7 @@ return function (): (boolean, string | nil)
 
 			-- Each place's cell is its column and row of the grid, filled a row at a time from the low corner
 			for place: number = 1, layout.count do
-				local cell: any = Cells(area, layout.count, place)
+				local cell: any = Cells.cell(area, layout.count, place)
 				local column: number = (place - 1) % layout.columns
 				local row: number = (place - 1) // layout.columns
 				local offX: number = cell.center.X - cell.size.X / 2 - (lowX + column * width)

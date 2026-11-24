@@ -1,7 +1,7 @@
 --[[
     The dev place's bot panel, shown on its key or a touch screen's button:
-    a spawn of bots by count, behavior and area, a clear of them, and the
-    server's frame and tick-stage numbers each second it shows
+    a spawn of bots by count, behavior and area, a clear of them, the relay's
+    split turned on or off, and the server's numbers each second it shows
 --]]
 
 --!strict
@@ -46,6 +46,7 @@ type Gui = {
 	area: TextButton,
 	spawn: TextButton,
 	clear: TextButton,
+	split: TextButton,
 	numbers: TextLabel,
 }
 
@@ -106,8 +107,8 @@ end
 --[[
     The panel, hidden, at the screen's left edge, clear of the live panel
     in its middle: a line each for the panel's bots and the last refusal,
-    the count, the behavior and the area, Spawn beside Clear, then the
-    server's numbers, its height whatever its lines need
+    the count, the behavior and the area, Spawn beside Clear, the split's
+    switch, then the server's numbers, its height whatever its lines need
 --]]
 
 local function build(playerGui: PlayerGui): Gui
@@ -177,7 +178,9 @@ local function build(playerGui: PlayerGui): Gui
 	local clear: TextButton = button("Clear", 2, half, actions)
 	clear.Position = UDim2.fromScale(0.5, 0)
 
-	local numbers: TextLabel = line("Numbers", 7, frame)
+	local split: TextButton = button("Split", 7, across, frame)
+
+	local numbers: TextLabel = line("Numbers", 8, frame)
 	numbers.Text = ""
 
 	return {
@@ -189,6 +192,7 @@ local function build(playerGui: PlayerGui): Gui
 		area = area,
 		spawn = spawn,
 		clear = clear,
+		split = split,
 		numbers = numbers,
 	}
 end
@@ -227,6 +231,17 @@ local function areaText(place: number): string
 	return "Area: the whole map"
 end
 
+-- What the split's button shows for the state the server last reported, nil before its first report
+local function splitText(on: boolean?): string
+	if on == nil then
+		return "Split: waiting for the server"
+	elseif on then
+		return "Split: on, press to turn it off"
+	end
+
+	return "Split: off, press to turn it on"
+end
+
 --[[
     Builds the panel, hidden, and connects its key, its buttons and the
     server's numbers and refusals, each for the client session, with a
@@ -254,13 +269,17 @@ function BotPanel.start()
 	local gui: Gui = build(playerGui)
 	local behavior: number = 1 -- The behavior's place in BEHAVIORS
 	local area: number = 1 -- The area's place in RADII, one past it the whole map
+	local split: boolean? = nil -- The split's state the server last reported, nil before its first report
 	Screen = gui.screen
 	gui.behavior.Text = `Behavior: {BEHAVIORS[behavior]}`
 	gui.area.Text = areaText(area)
+	gui.split.Text = splitText(split)
 
-	Network.botStats.on(function (made: number, text: string)
+	Network.botStats.on(function (made: number, text: string, on: boolean)
 		gui.status.Text = `Panel bots: {made} on the server`
 		gui.numbers.Text = text
+		split = on
+		gui.split.Text = splitText(on)
 	end)
 
 	Network.botRefused.on(function (reason: string)
@@ -292,6 +311,17 @@ function BotPanel.start()
 
 	gui.clear.Activated:Connect(function ()
 		Network.botClear.fire()
+	end)
+
+	-- Asks for the other state than the server last reported, and nothing before its first report
+	gui.split.Activated:Connect(function ()
+		local reported: boolean? = split
+		if reported == nil then
+			gui.refusal.Text = "Last refusal: the server has not said yet whether the split is on"
+			return
+		end
+
+		Network.botSplit.fire(not reported)
 	end)
 
 	-- Shows the panel or hides it, on its key and on a touch screen's button alike, and tells the server which

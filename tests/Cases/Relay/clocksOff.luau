@@ -24,12 +24,6 @@ local function settings(clocks: boolean): { [string]: any }
 		leave = 1000,
 		sleepers = 500,
 		npcs = 800,
-		nearEnterSquared = 40000,
-		nearLeaveSquared = 48400,
-		nearAim = 20,
-		nearFloor = 15,
-		farAim = 15,
-		farFloor = 10,
 		weightNear = 1,
 		weightFar = 0.5,
 		weightShooter = 2,
@@ -46,13 +40,14 @@ local function settings(clocks: boolean): { [string]: any }
 	}
 end
 
--- A run's two hand-ins for one viewer with no body and no target, over a world with no bodies
+-- A run's two hand-ins for one viewer with no body and no target, over a world with no bodies and no bands
 local function handIns(Wire: any, world: any, run: number): (buffer, buffer)
 	local shared: buffer = Wire.writeShared(world, {
 		run = run,
 		tick = run,
 		elapsed = 1,
 		wire = run,
+		tune = Wire.tuning(),
 		places = 0,
 		looks = {},
 		lookCount = 0,

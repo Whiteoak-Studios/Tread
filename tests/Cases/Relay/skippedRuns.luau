@@ -1,16 +1,16 @@
 --[[
     With every other relay tick skipped, as a catch-up runs them, timings
     in seconds keep their seconds: a still character's record still goes
-    once a second, and a far tier's records at its rate
+    once a second, and a far band's records at its rate
 --]]
 
 --!strict
 local Environment = require("../../Environment")
 
 local HARNESS: string = "tests/Fixtures/Relay/Harness.luau"
-local FAR_RATE: number = 5 -- Hz, the far tier's aim and floor here, under half the example's 20 Hz relay
+local FAR_RATE: number = 5 -- Hz, the far band's aim and floor here, under half the example's 20 Hz relay
 local STILL_TICKS: number = 20 -- A second at the example's 20 Hz relay
-local SECONDS: number = 2 -- The span the far tier's records are counted over
+local SECONDS: number = 2 -- The span the far band's records are counted over
 local SKIP: number = 2 -- Relay ticks each run here moves on by, every other one skipped
 local SETTLE: number = 8 -- Runs before the counts start, past the still character's reveal and rest repeats
 local STRIDE: number = 0.5 -- Studs the far character moves each run, so it always has a change to send
@@ -18,8 +18,7 @@ local STRIDE: number = 0.5 -- Studs the far character moves each run, so it alwa
 return function (): (boolean, string | nil)
 	local Harness: any = Environment.load(HARNESS)
 	local harness: any = Harness.new(false, function (_: any, server: any)
-		server.tiers.farAim = FAR_RATE
-		server.tiers.farFloor = FAR_RATE
+		server.tiers.bands[2] = { aim = FAR_RATE, floor = FAR_RATE }
 	end)
 
 	local client: any = harness:viewer("Viewer")

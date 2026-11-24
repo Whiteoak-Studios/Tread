@@ -33,7 +33,7 @@ return function (): (boolean, string | nil)
 		{ path = "slots.reserve", value = -1 },
 		{ path = "slots.reserve", value = 1.5 },
 		{ path = "relevancy.leave", value = nil },
-		{ path = "tiers.farAim", value = "15" },
+		{ path = "tiers.bands", value = nil },
 		{ path = "weights.cone", value = 0 },
 		{ path = "shotNear.seconds", value = -5 },
 		{ path = "budget.hard", value = nil },

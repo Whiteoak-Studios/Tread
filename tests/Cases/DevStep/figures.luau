@@ -1,7 +1,7 @@
 --[[
     A window's figures are the ones its lines carry, by the names the step
-    benchmark's table reads, Tread's on the place with the largest p95, each
-    a row of the table, none without samples, and the calibration's loop
+    table reads, Tread's on its heaviest place, a step half's tick frames
+    and real player, each a row, none unsampled, and the calibration's loop
 --]]
 
 --!strict
@@ -13,8 +13,12 @@ local NAMES: { string } = { "before", "after" }
 
 -- Each figure worked by hand from the window: by nearest rank, of two values p50 is the first and p95 the second,
 -- and of four p50 is the second and p95 the fourth. The tick's own Heartbeat holds Tread's 3 and 5 ms, the
--- heaviest, with the bots' stage 1 ms in each, and the frame's p95 of 20 ms leaves 15 past it. The ticks dropped,
--- the relay runs skipped and the OwnerState checks compared and missed are each summed over both reads
+-- heaviest, with the bots' stage 1 ms in each, the one after 2 and 3 ms, and the one after that 1 and 0.5 ms. No
+-- Heartbeat ran a deferred tick's rest. The ticks dropped, the relay runs skipped, the OwnerState checks compared and
+-- missed, the NPC steps made to wait, the slices cut, the viewer turns left, the relay runs over the budget and with
+-- the far band halved, and anti-ESP's hidden results, fail-opens, tests on workers and late batches are each summed
+-- over both reads, the crowd cap's rest a relay run is its rate's p50, the send time is 0.02 s, the lower of 0.02 and
+-- 0.0365, in milliseconds, and the longest batch's p95 of 0.002 and 0.004 s is 4 ms
 local EXPECTED: { [string]: number } = {
 	heartbeats = 64,
 	fps = 50,
@@ -24,7 +28,20 @@ local EXPECTED: { [string]: number } = {
 	treadP95 = 5,
 	botsP50 = 1,
 	botsP95 = 1,
-	gap = 15,
+	place1P50 = 3,
+	place1P95 = 5,
+	place2P50 = 2,
+	place2P95 = 3,
+	place3P50 = 0.5,
+	place3P95 = 1,
+	deferred = 0,
+	fallbacks = 0,
+	relaySend = 20,
+	npcsWaited = 10,
+	antiEspCut = 3,
+	relayLeft = 6,
+	relayOver = 4,
+	farHalved = 2,
 	tickP50 = 4,
 	tickP95 = 6,
 	decode = 0.25,
@@ -34,9 +51,19 @@ local EXPECTED: { [string]: number } = {
 	relay = 1.5,
 	finish = 1.5,
 	antiEsp = 0.625,
+	antiEspTests = 50,
+	antiEspRays = 900,
+	antiEspHidden = 40,
+	antiEspFailOpens = 1,
+	antiEspWorkerTests = 900,
+	antiEspWorkerBusy = 12.5,
+	antiEspWorkerLongest = 4,
+	antiEspLateBatches = 2,
 	dropped = 1,
 	relaySkipped = 2,
 	records = 100,
+	recordsCut = 0,
+	crowdRest = 1.5,
 	bytes = 2000,
 	viewerP50 = 1000,
 	viewerP95 = 3000,
@@ -79,10 +106,11 @@ return function (): (boolean, string | nil)
 		return false, `The window's figures: {problem}`
 	end
 
-	-- 2) Each a figure the step benchmark's table has a row for, below its head line
+	-- 2) Each a figure the step benchmark's table has a row for, below its head line, the other half missing so a
+	-- quiet row at 0 still prints
 	for name: string, value: number in figures do
 		local alone: { [string]: number } = { [name] = value }
-		local rows: { string } = string.split(Compare.table("S4", NAMES, alone, alone), "\n")
+		local rows: { string } = string.split(Compare.table("S4", NAMES, alone, nil), "\n")
 		if #rows ~= 2 then
 			return false, `The table has {#rows - 1} rows for the window's figure {name}`
 		end
@@ -97,12 +125,35 @@ return function (): (boolean, string | nil)
 		or math.abs(moved.treadP95 - 9) > TOLERANCE
 		or moved.botsP50 ~= 0
 		or moved.botsP95 ~= 0
-		or math.abs(moved.gap - 11) > TOLERANCE
 	then
 		return false, `With 9 ms after the tick's Heartbeat, Tread read {moved.treadP50}/{moved.treadP95} there`
 	end
 
-	-- 4) A window that took nothing carries only the commands skipped
+	-- 4) A step half's window adds its frames holding a tick, by nearest rank of three, and its real player, each a
+	-- row of the table too
+	local stepped: any = Window.taken()
+	stepped.sampled.tickFrames = { 25, 17, 18 }
+	stepped.walked = { from = 12.5, moved = 40.25 }
+	local half: { [string]: number } = Run.figures(stepped)
+	local added: { [string]: number } = table.clone(EXPECTED)
+	added.tickFrameP50 = 18
+	added.tickFrameP95 = 25
+	added.playerFrom = 12.5
+	added.playerMoved = 40.25
+
+	problem = differs(half, added)
+	if problem then
+		return false, `A step half's figures: {problem}`
+	end
+
+	for _, name: string in { "tickFrameP50", "tickFrameP95", "playerFrom", "playerMoved" } do
+		local alone: { [string]: number } = { [name] = half[name] }
+		if #string.split(Compare.table("S4", NAMES, alone, nil), "\n") ~= 2 then
+			return false, `The table has no row of its own for a step half's {name}`
+		end
+	end
+
+	-- 5) A window that took nothing carries only the commands skipped
 	local empty: any = {
 		sampled = { frames = {}, heartbeatTimes = {}, physicsTimes = {}, dataSend = {} },
 		elapsed = 0,
@@ -120,7 +171,7 @@ return function (): (boolean, string | nil)
 		return false, `An empty window's figures: {problem}`
 	end
 
-	-- 5) The calibration's loop p50 is the first figure its line gives, 13.31 µs of these three, and a refusal has none
+	-- 6) The calibration's loop p50 is the first figure its line gives, 13.31 µs of these three, and a refusal has none
 	local Calibration: any = loaded.require(loaded.game:GetService("ServerScriptService").Server.Calibration)
 	local measured: any = {
 		loop = { 16.091, 13.31, 12.5 },

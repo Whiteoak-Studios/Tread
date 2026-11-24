@@ -532,19 +532,19 @@ end
 
 --[[
     A walking body's tick: a rider's carry with its platform, depenetration,
-    exact at every tenth command and while a platform's box presses into
-    the body, the water where it starts, the rules' cap and permits, posture
-    and a mantle or a ladder to enter, then its mode's move at that mode's
-    stance, the water where the move ends, a slide's cooldown once it has
-    ended, the timers, and the platform it then stands on. A mantle runs its
-    path with no posture or entry. Gives back how far it sank when no spot
-    was clear
+    exact at every tenth command, while a platform's box presses into the
+    body and when the caller asks, the water where it starts, the rules' cap
+    and permits, posture and a mantle or a ladder to enter, then its mode's
+    move at that mode's stance, the water where the move ends, a slide's
+    cooldown once it has ended, the timers, and the platform it then stands
+    on. A mantle runs its path with no posture or entry. Gives back how far
+    it sank when no spot was clear
 --]]
 
-local function walk(state: State, command: Command, world: World): number?
+local function walk(state: State, command: Command, world: World, exact: boolean?): number?
 	local settings: Settings = world.settings
 	local pressing: boolean = Platforms.carry(state, world)
-	local stuck: number? = Collide.depenetrate(state, world, pressing or command.number % EXACT_EVERY == 0)
+	local stuck: number? = Collide.depenetrate(state, world, pressing or exact or command.number % EXACT_EVERY == 0)
 	local sliding: boolean = state.mode == "Slide"
 	began = false
 	airborne = false
@@ -765,15 +765,20 @@ end
     rounded to OwnerState's precisions, then a walking body that moved
     settled out of any part the rounding carried it into. The command's
     head offset is clamped to the game's cone in place, and a move mode
-    other than walking ends a mantle, a slide and a ride.
+    other than walking ends a mantle, a slide and a ride. An optional fourth
+    argument, exact, of true runs depenetration's exact overlap check on a
+    walking step whatever the command's number, once on a step that runs it
+    anyway; left out or false, the step is the one every other caller takes.
+    It is a tail, so pcall and xpcall still take the step with three.
     Gives back the speed the body landed at, 0 for no landing that counted,
     and how far it sank when depenetration found no clear spot, nil when it
     is clear
 --]]
 
-function Step.advance(state: State, command: Command, world: World): (number, number?)
+function Step.advance(state: State, command: Command, world: World, ...: boolean?): (number, number?)
 	check(command)
 
+	local exact: boolean? = ...
 	local settings: Settings = world.settings
 	local moveMode: MoveMode = state.moveMode
 	local stuck: number? = nil
@@ -798,7 +803,7 @@ function Step.advance(state: State, command: Command, world: World): (number, nu
 
 	if moveMode == "Walk" then
 		face(state, command, settings, world.delta)
-		stuck = walk(state, command, world)
+		stuck = walk(state, command, world, exact)
 		ease(state, world)
 		state.waterLevel = Swim.level(state, surface)
 	elseif moveMode == "Noclip" then

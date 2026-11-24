@@ -12,6 +12,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Volt = require(ReplicatedStorage.Packages.Volt)
 
+export type Ghost = { slot: number, x: number, y: number, z: number, vx: number, vy: number, vz: number }
+
 type Bot = Volt.Bot
 
 export type ClientEvent<A...> = { fire: (A...) -> () }
@@ -346,6 +348,19 @@ local function writebotWatch(shown: boolean)
 	buffer.writeu8(out, offset + 1, flags)
 end
 
+local function writebotSplit(on: boolean)
+	local offset: number, out: buffer = beginReliable(2)
+	buffer.writeu8(out, offset, 10)
+	local flags: number = 0
+
+	if type(on) ~= "boolean" then
+		refuseReliable("botSplit.on: expected boolean")
+	end
+
+	flags += on and 1 or 0
+	buffer.writeu8(out, offset + 1, flags)
+end
+
 local function readbotRefused(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
 	if cursor + 1 > length then
 		error("botRefused: truncated")
@@ -370,18 +385,19 @@ local function readbotRefused(player: (Player | Bot)?, packet: buffer, cursor: n
 end
 
 local function readbotStats(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
-	if cursor + 4 > length then
+	if cursor + 5 > length then
 		error("botStats: truncated")
 	end
 
-	local made: number = buffer.readu16(packet, cursor)
-	local textLength: number = buffer.readu16(packet, cursor + 2)
+	local flags: number = buffer.readu8(packet, cursor)
+	local made: number = buffer.readu16(packet, cursor + 1)
+	local textLength: number = buffer.readu16(packet, cursor + 3)
 
 	if textLength > 1000 then
 		error("botStats.text: length out of range")
 	end
 
-	cursor += 4
+	cursor += 5
 
 	if cursor + textLength > length then
 		error("botStats.text: truncated")
@@ -390,12 +406,126 @@ local function readbotStats(player: (Player | Bot)?, packet: buffer, cursor: num
 	local text: string = buffer.readstring(packet, cursor, textLength)
 	cursor += textLength
 
-	return runtime:deliver(6, player, cursor, sideCursor, made, text)
+	return runtime:deliver(6, player, cursor, sideCursor, made, text, bit32.btest(flags, 1))
+end
+
+local function writeghostAsk(slots: { number })
+	local offset: number, out: buffer = beginReliable(34)
+	buffer.writeu8(out, offset, 11)
+
+	if type(slots) ~= "table" then
+		refuseReliable("ghostAsk.slots: expected table")
+	end
+
+	if #slots > 16 then
+		refuseReliable("ghostAsk.slots: length out of range")
+	end
+
+	buffer.writeu8(out, offset + 1, #slots)
+	offset += 2
+
+	for index = 1, #slots do
+		local slotsEntry = slots[index]
+
+		if type(slotsEntry) ~= "number" or bit32.band(slotsEntry, 65535) ~= slotsEntry then
+			refuseReliable("ghostAsk.slots[]: expected u16")
+		end
+
+		buffer.writeu16(out, offset, slotsEntry)
+		offset += 2
+	end
+
+	trimReliable(offset)
+end
+
+local function readghosts(player: (Player | Bot)?, packet: buffer, cursor: number, _: { any }, sideCursor: number, length: number): (number, number)
+	if cursor + 12 > length then
+		error("ghosts: truncated")
+	end
+
+	local tick: number = buffer.readu16(packet, cursor)
+	local time: number = buffer.readf64(packet, cursor + 2)
+
+	if time ~= time then
+		error("ghosts.time: out of range")
+	end
+
+	local labelLength: number = buffer.readu8(packet, cursor + 10)
+
+	if labelLength > 32 then
+		error("ghosts.label: length out of range")
+	end
+
+	local ghostsLength: number = buffer.readu8(packet, cursor + 11)
+
+	if ghostsLength > 16 then
+		error("ghosts.ghosts: length out of range")
+	end
+
+	cursor += 12
+
+	if cursor + labelLength > length then
+		error("ghosts.label: truncated")
+	end
+
+	local label: string = buffer.readstring(packet, cursor, labelLength)
+	cursor += labelLength
+
+	if cursor + 26 * ghostsLength > length then
+		error("ghosts.ghosts: truncated")
+	end
+
+	local ghosts: { Ghost } = table.create(ghostsLength) :: { Ghost }
+
+	for index = 1, ghostsLength do
+		local slot_2: number = buffer.readu16(packet, cursor)
+		local x: number = buffer.readf32(packet, cursor + 2)
+
+		if x ~= x then
+			error("ghosts.ghosts[].x: out of range")
+		end
+
+		local y: number = buffer.readf32(packet, cursor + 6)
+
+		if y ~= y then
+			error("ghosts.ghosts[].y: out of range")
+		end
+
+		local z: number = buffer.readf32(packet, cursor + 10)
+
+		if z ~= z then
+			error("ghosts.ghosts[].z: out of range")
+		end
+
+		local vx: number = buffer.readf32(packet, cursor + 14)
+
+		if vx ~= vx then
+			error("ghosts.ghosts[].vx: out of range")
+		end
+
+		local vy: number = buffer.readf32(packet, cursor + 18)
+
+		if vy ~= vy then
+			error("ghosts.ghosts[].vy: out of range")
+		end
+
+		local vz: number = buffer.readf32(packet, cursor + 22)
+
+		if vz ~= vz then
+			error("ghosts.ghosts[].vz: out of range")
+		end
+
+		cursor += 26
+		local ghostsEntry = { slot = slot_2, x = x, y = y, z = z, vx = vx, vy = vy, vz = vz }
+		ghosts[index] = ghostsEntry
+	end
+
+	return runtime:deliver(7, player, cursor, sideCursor, tick, time, label, ghosts)
 end
 
 runtime = Volt.start({
 	version = "0.1.0",
-	hash = 0x0E155838,
+	hash = 0xC6797E7F,
 	scope = "Dev",
 	side = "client",
 	idBytes = 1,
@@ -416,6 +546,7 @@ runtime = Volt.start({
 		[4] = { name = "runReport", kind = "event", mode = "SingleSync", queue = 64, read = readrunReport },
 		[5] = { name = "botRefused", kind = "event", mode = "SingleSync", queue = 64, read = readbotRefused },
 		[6] = { name = "botStats", kind = "event", mode = "SingleSync", queue = 64, read = readbotStats },
+		[7] = { name = "ghosts", kind = "event", mode = "SingleSync", queue = 64, read = readghosts },
 	},
 
 	outgoing = {
@@ -428,6 +559,8 @@ runtime = Volt.start({
 		[7] = { name = "botSpawn", kind = "event", reliable = true, minBytes = 4, maxBytes = 6 },
 		[8] = { name = "botClear", kind = "event", reliable = true, minBytes = 1, maxBytes = 1 },
 		[9] = { name = "botWatch", kind = "event", reliable = true, minBytes = 2, maxBytes = 2 },
+		[10] = { name = "botSplit", kind = "event", reliable = true, minBytes = 2, maxBytes = 2 },
+		[11] = { name = "ghostAsk", kind = "event", reliable = true, minBytes = 2, maxBytes = 34 },
 	},
 })
 
@@ -550,6 +683,14 @@ local Network = {
 		end,
 	}) :: ClientEvent<(boolean)>,
 
+	botSplit = table.freeze({
+		fire = function (on: boolean)
+			if before[10] == nil or before[10](nil, on) then
+				writebotSplit(on)
+			end
+		end,
+	}) :: ClientEvent<(boolean)>,
+
 	botRefused = table.freeze({
 		on = function (listener: (reason: string) -> ()): () -> ()
 			return runtime:on(5, listener)
@@ -561,14 +702,32 @@ local Network = {
 	}) :: ClientListener<(string)>,
 
 	botStats = table.freeze({
-		on = function (listener: (made: number, text: string) -> ()): () -> ()
+		on = function (listener: (made: number, text: string, split: boolean) -> ()): () -> ()
 			return runtime:on(6, listener)
 		end,
 
-		iter = function (): () -> (number, number, string)
+		iter = function (): () -> (number, number, string, boolean)
 			return runtime:iter(6)
 		end,
-	}) :: ClientListener<(number, string)>,
+	}) :: ClientListener<(number, string, boolean)>,
+
+	ghostAsk = table.freeze({
+		fire = function (slots: { number })
+			if before[11] == nil or before[11](nil, slots) then
+				writeghostAsk(slots)
+			end
+		end,
+	}) :: ClientEvent<({ number })>,
+
+	ghosts = table.freeze({
+		on = function (listener: (tick: number, time: number, label: string, ghosts: { Ghost }) -> ()): () -> ()
+			return runtime:on(7, listener)
+		end,
+
+		iter = function (): () -> (number, number, number, string, { Ghost })
+			return runtime:iter(7)
+		end,
+	}) :: ClientListener<(number, number, string, { Ghost })>,
 
 	version = "0.1.0",
 
@@ -606,8 +765,11 @@ Network.events = table.freeze({
 	["botSpawn"] = Network.botSpawn,
 	["botClear"] = Network.botClear,
 	["botWatch"] = Network.botWatch,
+	["botSplit"] = Network.botSplit,
 	["botRefused"] = Network.botRefused,
 	["botStats"] = Network.botStats,
+	["ghostAsk"] = Network.ghostAsk,
+	["ghosts"] = Network.ghosts,
 }) :: { [string]: any }
 
 Network.functions = table.freeze({}) :: { [string]: any }

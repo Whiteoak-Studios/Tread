@@ -1,13 +1,18 @@
 --[[
     A BenchWorkers half's window prints its server, Heartbeat, tick stage,
-    counts and relay clock lines in that order, each word for word as the
-    window always has, and a window whose reads carried no clocks has none
+    counts and relay clock lines in order, word for word as it always has,
+    one with no clocks has none, and a step half's adds its real player's
 --]]
 
 --!strict
 local Window = require("../../Fixtures/DevStep/Window")
 
 local LABEL: string = "Bots S4/workers seed 1"
+local STEP_LABEL: string = "Bots S4/before seed 1" -- A step benchmark half's, which tracks its real player
+
+-- A step half's real player's line, worked by hand from its walk of 12.5 studs out and 40.25 walked
+local PLAYER: string =
+	`{STEP_LABEL} real player: 12.50 studs from the load's point as the window opened, 40.25 walked in it`
 local BY_PLACE: string = "Tread ms a Heartbeat by its place in the tick, p50/p95, less the bots' stage"
 local SUMMED: string = "decode + simulate + npcs + history + relay + finish"
 local ACROSS: string = "delivery and back across a worker's clock and the main thread's"
@@ -78,6 +83,19 @@ return function (): (boolean, string | nil)
 	local unclocked: { string } = Run.lines(LABEL, plain)
 	if #unclocked ~= #expected - 1 or unclocked[#unclocked] ~= expected[#expected - 1] then
 		return false, `A window with no clocks printed {#unclocked} lines, ending:\n{unclocked[#unclocked]}`
+	end
+
+	-- 3) A step half's window: the same lines with its real player's between the counts' and the clocks'
+	local stepped: any = Window.taken()
+	stepped.walked = { from = 12.5, moved = 40.25 }
+
+	local half: { string } = Run.lines(STEP_LABEL, stepped)
+	if
+		#half ~= #expected + 1
+		or half[5] ~= PLAYER
+		or string.find(half[6], `{STEP_LABEL} relay clocks, `, 1, true) ~= 1
+	then
+		return false, `A step half's window printed {#half} lines, its fifth:\n{half[5]}\nnot:\n{PLAYER}`
 	end
 
 	return true, nil

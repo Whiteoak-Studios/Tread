@@ -11,6 +11,7 @@ local roblox: any = require("@lune/roblox") -- Its typedefs leave out the dataty
 
 local CONFIG: string = "dev/Server/Config/Tread.luau"
 local ATTRIBUTE: string = "TreadRelayClocks"
+local RELAY_BUDGET: number = 0.005 -- Seconds, the dev place's relay budget
 
 -- The folders the settings take from Workspace, each a path below it
 local OCCLUDERS: { { string } } = {
@@ -39,10 +40,10 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- 1) Absent, false or no boolean, the relay table holds records as changes alone
+	-- 1) Absent, false or no boolean, the relay table holds records as changes and the budget alone
 	local absent: { [string]: any } = place.load(CONFIG)
-	if Config.hash(absent.relay) ~= Config.hash({ changes = true }) then
-		return false, `With {ATTRIBUTE} absent, relay holds more or less than changes set true`
+	if Config.hash(absent.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET }) then
+		return false, `With {ATTRIBUTE} absent, relay holds more or less than changes set true and the budget`
 	end
 
 	for _, value: any in OFF do
@@ -58,7 +59,7 @@ return function (): (boolean, string | nil)
 	local restored: { [string]: any } = table.clone(on)
 	restored.relay = absent.relay
 
-	if Config.hash(on.relay) ~= Config.hash({ changes = true, clocks = true }) then
+	if Config.hash(on.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET, clocks = true }) then
 		return false, `With {ATTRIBUTE} true, relay is not records as changes with the clocks on`
 	elseif Config.hash(restored) ~= Config.hash(absent) then
 		return false, `With {ATTRIBUTE} true, a setting besides relay changed`

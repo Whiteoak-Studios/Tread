@@ -1,7 +1,7 @@
 --[[
     One of the parallel probes' workers, run in a clone of its Actor: it runs
-    ParallelProbe's loop and ParallelReturn's rounds, echoes, writes and
-    returns, stamping a round's times into its marks table, the round last
+    ParallelProbe's loop, ParallelReturn's rounds, echoes, writes and returns
+    and ParallelFrames' rounds, stamping a round's times, the round last
 --]]
 
 --!strict
@@ -11,6 +11,13 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Work = require(ServerScriptService.Server.Parallel.Work)
 
 local BYTES: number = require(ServerScriptService.Server.Config.Parallel).bytes
+
+-- The frame events a ParallelFrames arm's callback may run on, by name
+local SIGNALS: { [string]: RBXScriptSignal<number> } = {
+	PreSimulation = RunService.PreSimulation,
+	PostSimulation = RunService.PostSimulation,
+	Heartbeat = RunService.Heartbeat,
+}
 
 -- The template sits in the dev server's Parallel folder with no index, so only a clone the pool parents ever works
 local found: Actor? = script:GetActor()
@@ -39,6 +46,17 @@ local function stored(store: SharedTable, key: string, value: any): string?
 	end
 
 	return `{failure}`
+end
+
+-- A ParallelFrames round: stamped, spun and stamped into the store under this worker's keys, the round last
+local function frameRound(round: number, spin: number, store: SharedTable)
+	local start: number = os.clock()
+	Work.busy(spin)
+	local finish: number = os.clock()
+
+	store[base + Work.START] = start
+	store[base + Work.FINISH] = finish
+	store[base + Work.ROUND] = round
 end
 
 -- The Actor owns every binding below, and the pool destroying it releases them
@@ -135,6 +153,27 @@ actor:BindToMessageParallel(Work.SHARE, function (round: number, bytes: number, 
 	marks[base + Work.START] = wrote
 	marks[base + Work.FINISH] = finish
 	marks[base + Work.ROUND] = round
+end)
+
+-- ParallelFrames: a round handed out by message
+actor:BindToMessageParallel(Work.HAND, frameRound)
+
+-- ParallelFrames: a callback on the frame event named, run desynchronized, taking each round the main thread hands out
+-- once. Its connection ends with this script when the pool destroys the clone, so it lives for one arm
+actor:BindToMessage(Work.WAKE, function (event: string, spin: number, store: SharedTable)
+	local done: number = 0
+
+	SIGNALS[event]:ConnectParallel(function ()
+		local round: number = store[Work.HANDED]
+		if round <= done then
+			return
+		end
+
+		done = round
+		frameRound(round, spin, store)
+	end)
+
+	actor:SetAttribute(Work.ARMED, true)
 end)
 
 actor:SetAttribute(Work.BOUND, true)

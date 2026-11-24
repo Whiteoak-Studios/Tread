@@ -89,6 +89,21 @@ function Spawns.take(player: Player): CFrame?
 end
 
 --[[
+    Where the first point stands on the plaza floor, below its lift: the
+    one the first player to join is built at, a fixed ground for a load to
+    stand on. It errors before Spawns.start
+--]]
+
+function Spawns.first(): Vector3
+	local point: CFrame? = Points[1]
+	if not point then
+		error("Spawns.first ran before Spawns.start", 2)
+	end
+
+	return point.Position - Vector3.new(0, LIFT, 0)
+end
+
+--[[
     Frees the point a player who left held, for the next to join. A player
     who holds none is left as it is
 --]]

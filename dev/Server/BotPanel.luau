@@ -1,7 +1,7 @@
 --[[
-    The bot panel on the dev server: a player's spawns and clears of the
-    panel's own bots, each refused while a run could meet them, and the
-    server's frame and tick-stage numbers once a second to each watcher
+    The bot panel on the dev server: a player's spawns and clears of its own
+    bots, each refused while a run could meet them, their views made on any
+    relay workers, and the server's numbers and the split's once a second
 --]]
 
 --!strict
@@ -18,6 +18,8 @@ local Volt = require(Packages.Volt)
 
 local Network = require(ReplicatedStorage.Shared.Network.Server)
 
+local History = require(Packages.Tread.Server.History)
+local Relay = require(Packages.Tread.Server.Relay)
 local Tick = require(Packages.Tread.Server.Tick)
 
 local Config = require(ServerScriptService.Server.Bots.Config)
@@ -33,6 +35,7 @@ local INTERVAL: number = require(ServerScriptService.Server.Config.BotPanel).int
 local MEDIAN: number = require(ServerScriptService.Server.Config.BotPanel).median
 local HIGH: number = require(ServerScriptService.Server.Config.BotPanel).high
 local REASON_BYTES: number = require(ServerScriptService.Server.Config.BotPanel).reasonBytes
+local HOME_BEATS: number = require(ServerScriptService.Server.Config.BotPanel).homeBeats
 local RATES: { spawn: Rate, clear: Rate, watch: Rate } = require(ServerScriptService.Server.Config.BotPanel).rates
 local BATCH: number = require(ServerScriptService.Server.Bots.Config).spawn.batch
 local LIFT: number = require(ServerScriptService.Server.Bots.Config).spawn.lift
@@ -50,7 +53,10 @@ local MILLISECONDS: number = 1000 -- A second's, which every time shows in
 local PERCENT: number = 100 -- Turns a share into the number a pNN label shows
 local FIGURE: string = "%.3f" -- Each time as the panel shows it
 local RATE: string = "%.1f" -- The Heartbeats a second
+local SHARE: string = "%.1f" -- The share of the ticks deferred, in percent
 local SEPARATOR: string = ", " -- Between the stages of one line
+local VIEWS: string = "/" -- Between the workers' view counts
+local RELAY_STAGE: string = "relay" -- The tick's stage whose run makes each view
 local PARTS: string = "; " -- Between the parts of a refusal
 local NEWLINE: string = "\n"
 local FINISH: string = "finish" -- What the panel calls the relay's finish, which a held tick's total takes
@@ -256,6 +262,42 @@ function BotPanel.describe(read: Read, heartbeatTime: number, real: number, bots
 	return table.concat(lines, NEWLINE)
 end
 
+--[[
+    The split's line under the numbers: whether the tick loop has it on,
+    how many of the read's ticks deferred, one a Heartbeat flagged DEFERRED,
+    the send term the history adds in milliseconds, and the views the relay
+    holds in process and on each worker, the panel's bots' among them
+
+    @ sendLag | History.sendLagSeconds, in seconds
+--]]
+
+function BotPanel.splitLine(
+	on: boolean,
+	flags: { number },
+	ticks: number,
+	sendLag: number,
+	inProcess: number,
+	views: { number }
+): string
+	local deferred: number = 0
+	for _, flag: number in flags do
+		if bit32.btest(flag, Tick.DEFERRED) then
+			deferred += 1
+		end
+	end
+
+	local share: number = ticks > 0 and deferred / ticks * PERCENT or 0
+	local state: string = on and "on" or "off"
+	local ticked: string = `{deferred} of {ticks} ticks deferred, {string.format(SHARE, share)}%`
+
+	local homes: string = `views {inProcess} in process`
+	if #views > 0 then
+		homes = `{homes}, {table.concat(views, VIEWS)} on the workers`
+	end
+
+	return `Split {state}: {ticked}; send term {figure(sendLag * MILLISECONDS)} ms; {homes}`
+end
+
 -- A new window from now: no frames yet, and the ticks done and each ring's head, any finishes' too, as they stand
 local function open()
 	Frames = {}
@@ -307,10 +349,21 @@ local function beat(delta: number)
 	-- Stats.HeartbeatTime is in seconds, and the panel shows milliseconds
 	local heartbeatTime: number = Stats.HeartbeatTime * MILLISECONDS
 	local read: Read = BotPanel.read(frames, elapsed, Tick.stages(), heads, Ticks - opened, finished)
-	local text: string = BotPanel.describe(read, heartbeatTime, #Players:GetPlayers(), #Fleet.entries())
+	local numbers: string = BotPanel.describe(read, heartbeatTime, #Players:GetPlayers(), #Fleet.entries())
+
+	-- The window's Heartbeats from the tick loop's ring, as many as it has frames, the newest last
+	local heartbeats: Tick.Heartbeats = Tick.heartbeats()
+	local readout: Run.Readout = { times = {}, flags = {}, bots = {}, through = heartbeats.count - #frames, lost = 0 }
+	Run.takeBeats(readout, heartbeats, nil)
+
+	local split: boolean = Tick.splitOn()
+	local inProcess: number, views: { number } = Relay.homes()
+	local line: string =
+		BotPanel.splitLine(split, readout.flags, read.ticks, History.sendLagSeconds(), inProcess, views)
+	local text: string = `{numbers}{NEWLINE}{line}`
 
 	for player: Player in Watchers do
-		Network.botStats.fire(player, Made, text)
+		Network.botStats.fire(player, Made, text, split)
 	end
 end
 
@@ -438,11 +491,46 @@ local function build(player: Player, area: Area, count: number, behavior: Behavi
 	end
 end
 
+-- Whether the relay stage has run a tick after the one given, by the tick its ring's newest entry was handed
+local function relayedAfter(through: number): boolean
+	for _, stage: Tick.Stage in Tick.stages() do
+		if stage.name == RELAY_STAGE then
+			return stage.held > 0 and stage.ticks[(stage.head - 1) % #stage.ticks + 1] > through
+		end
+	end
+
+	return false
+end
+
+--[[
+    Waits a Heartbeat at a time, at most HOME_BEATS of them, for the relay
+    to run a tick after the one given, whose run makes a view for every
+    character made before that tick. It reads only between Heartbeats,
+    where the ring's newest entry is always a run, since the entry a
+    deferred tick keeps when a later tick skips its rest is followed in the
+    same Heartbeat by the later tick's own. It gives whether the run came
+--]]
+
+local function awaitRelay(through: number): boolean
+	for _ = 1, HOME_BEATS do
+		if relayedAfter(through) then
+			return true
+		end
+
+		RunService.Heartbeat:Wait()
+	end
+
+	return relayedAfter(through)
+end
+
 --[[
     A player's ask to spawn bots, refused with the reason while a run could
     meet them or past the cap, and otherwise built over the whole map or the
-    square radius studs either way of their character. Nothing else spawns
-    or clears while it builds, whatever the build does
+    square radius studs either way of their character. On a server started
+    with relay workers, the views made from before the build until the
+    relay has run a tick after it go to the workers, so the bots' do and a
+    real player's made later doesn't. Nothing else spawns or clears while
+    it builds or waits for that run, whatever the build does
 --]]
 
 local function spawn(key: Key, count: number, behavior: Behavior, radius: number?)
@@ -476,8 +564,25 @@ local function spawn(key: Key, count: number, behavior: Behavior, radius: number
 		area = { center = standing.root, size = Vector2.new(across, across) }
 	end
 
+	-- A view is made by the first relay run that lists its character, and a view never moves
+	local homing: boolean = Run.workers() > 0
+	if homing then
+		Relay.useWorkers(true)
+	end
+
 	Building = true
 	local built: boolean, failure: any = pcall(build, player, area, count, behavior, testContent)
+
+	if homing then
+		local through: number = Tick.counts()
+		local homed: boolean = awaitRelay(through)
+		Relay.useWorkers(false)
+
+		if not homed then
+			refuse(player, `the relay ran no tick in {HOME_BEATS} Heartbeats, so the bots' views may be in process`)
+		end
+	end
+
 	Building = false
 
 	if not built then

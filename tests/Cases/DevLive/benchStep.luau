@@ -1,7 +1,7 @@
 --[[
     The step benchmark and its noise run are scenarios the panel lists
     outside Run all, saved as single runs while one off the list is not, and
-    a whole report, its halves' long lines dropped, fits the panel's limits
+    a whole report, its halves' long lines dropped, fits the size budget
 --]]
 
 --!strict
@@ -16,7 +16,7 @@ local LIVE: string = "dev/Server/Live.luau"
 local RUNS: { string } = { "BenchStep", "BenchStepNoise" }
 local MINUTES: number = 7 -- About how long each runs
 local STARTED: number = 1763500000 -- The os.time() a stand-in run started at
-local PANEL: number = 16384 -- The characters past which the panel's report is not yet known to copy whole
+local BUDGET: number = 30000 -- Characters a report stays under, so its rows still fit what the server keeps
 local VERDICT: string = "Runner PASS BenchStep: passed"
 
 -- Each key a stand-in DataStore was written under, and each DataStore opened, by its name
@@ -165,8 +165,8 @@ return function (): (boolean, string | nil)
 		return false, `The report kept:\n{LiveRuns.text(mixed)}`
 	end
 
-	-- 4) A whole report of three loads, both halves and their tables, under the panel's limit with no relay clocks,
-	-- and with every section of them still kept whole, its tables and the verdict all there
+	-- 4) A whole report of three loads, both halves and their tables, under the budget with relay clocks or none, with
+	-- its tables and the verdict all there
 	local loadedClocks: Harness.Loaded = Harness.load()
 	local packages: any = loadedClocks.game:GetService("ReplicatedStorage").Packages
 	local clocks: { string } = loadedClocks.require(packages.Tread.Server.Relay).CLOCKS
@@ -184,8 +184,8 @@ return function (): (boolean, string | nil)
 
 		if report.full then
 			return false, `The step benchmark's report {kind} passed its {config.reportBytes} B and was cut`
-		elseif given == nil and characters >= PANEL then
-			return false, `The step benchmark's report {kind} is {characters} characters, past the panel's {PANEL}`
+		elseif characters >= BUDGET then
+			return false, `The step benchmark's report {kind} is {characters} characters, past the budget's {BUDGET}`
 		elseif string.find(text, " summary over ", 1, true) or string.find(text, " relay clocks, ", 1, true) then
 			return false, `The step benchmark's report {kind} kept a half's summary or relay clocks`
 		elseif string.find(text, "seed 1 mode: ", 1, true) then

@@ -248,7 +248,7 @@ local function drive(
 
 	-- A lowered target's share of the front one's records, both held to the relay rate
 	local relay: number = shared.rates.relay
-	local share: number = math.min(outOfView.rate, relay) / math.min(settings.tiers.nearAim, relay)
+	local share: number = math.min(outOfView.rate, relay) / math.min(settings.tiers.bands[1].aim, relay)
 	local lowered: number = front * share
 
 	local counts: string = `front {front}, behind {behind}, side {side} and close {close} in {seen.frames} frames`

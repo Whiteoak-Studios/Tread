@@ -39,6 +39,7 @@ export type CharacterOwn = {
 	setHeld: (self: Character, held: Values?) -> (),
 	setTeam: (self: Character, team: number?) -> (),
 	setInvisible: (self: Character, invisible: boolean) -> (),
+	setZoomed: (self: Character, zoomed: boolean) -> (),
 	sleep: (self: Character) -> Sleeper?,
 	die: (self: Character, push: Vector3?) -> Body,
 	destroy: (self: Character) -> (),

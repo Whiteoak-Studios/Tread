@@ -22,9 +22,14 @@ local Work = {
 	RETURN = "Return", -- P5's event return: its round, its bytes, the event to fire and the marks table
 	SHARE = "Share", -- P5's SharedTable return: its round, its bytes and the marks table it writes the string into
 
+	-- ParallelFrames' messages, a round handled desynchronized and an arm's frame callback connected serially
+	HAND = "Hand", -- A round: its number, the spin in seconds and the store its stamps go into
+	WAKE = "Wake", -- An arm's callback: the frame event it runs on, the spin in seconds and the store
+
 	-- The attributes on a worker's Actor
 	WORKER = "Worker", -- Its index from 1, which only a clone the pool parents carries
 	BOUND = "Bound", -- Set once it has bound every topic
+	ARMED = "Armed", -- Set once a ParallelFrames arm's frame callback is connected
 
 	-- Its fields in the marks table, at (index - 1) * FIELDS plus each, the times by os.clock()
 	START = 1,
@@ -34,6 +39,7 @@ local Work = {
 
 	-- Named keys in a marks table or P4's SharedTable
 	FRAME = "Frame", -- The main thread's PreSimulation count, which the arm reads
+	HANDED = "Handed", -- The round a ParallelFrames arm last handed out, which its frame callbacks read
 	TEXT = "Text", -- A string a worker wrote
 	BUFFER = "Buffer", -- A buffer a worker wrote
 

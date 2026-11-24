@@ -1,7 +1,7 @@
 --[[
     The parallel probes on the dev server: ParallelProbe's worker counts,
-    batches, loop and waits, and ParallelReturn's rounds, values, sizes and
-    waits, each wait a count's or a probe's own
+    batches, loop and waits, ParallelReturn's rounds, values and sizes, and
+    ParallelFrames' arms, each wait a count's, a probe's or an arm's own
 --]]
 
 --!strict
@@ -37,5 +37,16 @@ return {
 		pieces = 250, -- Exact-length buffers each P5 return is copied into
 		repeats = 30, -- P5's rounds at each size and worker count
 		roundWait = 1, -- Seconds a P5 round may be in flight before its row stops short
+	},
+
+	-- ParallelFrames' arms, each on clones of its own: rounds handed out at PreSimulation or PostSimulation, and the
+	-- frame event at which each round's results are first all readable on the main thread
+	frames = {
+		workers = 4, -- Clones each worker arm hands its rounds to
+		rounds = 300, -- Rounds each arm hands out, one at a time
+		spinsMs = { 1, 5 }, -- Milliseconds each worker spins a round, every worker arm run at each
+		armedWait = 5, -- Seconds an arm's clones have to connect their frame callbacks
+		roundWait = 1, -- Seconds a round's results have to be all seen, past which it counts as never in
+		armWait = 60, -- Seconds an arm's rounds may take in all
 	},
 }

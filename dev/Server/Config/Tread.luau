@@ -1,7 +1,7 @@
 --[[
-    Tread's server settings for the dev game, Frontier Zero's values with
-    the fixture's stand-in NPC range, and a round trip for the bots the bot
-    harness builds; the dev game adds its pre-command hook where it starts
+    Tread's server settings for the dev game: Frontier Zero's values but the
+    dev place's own bands and frame caps, the fixture's stand-in NPC range and
+    a round trip for the bots; the dev game adds its pre-command hook at start
 --]]
 
 --!strict
@@ -39,6 +39,7 @@ local LEVERS_OFF: boolean = Workspace:GetAttribute(LEVERS_OFF_ATTRIBUTE) == true
 local WORKERS_ATTRIBUTE: string = "TreadRelayWorkers"
 local WORKERS: any = Workspace:GetAttribute(WORKERS_ATTRIBUTE) or 0
 local RELAY_TIMEOUT: number = 1 -- Seconds a round out on the workers may take before the relay gives it up
+local RELAY_BUDGET: number = 0.005 -- Seconds of the server's own script a relay run may take before the rest wait
 
 if type(WORKERS) ~= "number" or WORKERS < 0 or WORKERS % 1 ~= 0 then
 	error(`Workspace's {WORKERS_ATTRIBUTE} takes a whole number of relay workers from 0, not {WORKERS}`)
@@ -49,9 +50,22 @@ end
 local CLOCKS_ATTRIBUTE: string = "TreadRelayClocks"
 local CLOCKS: boolean = Workspace:GetAttribute(CLOCKS_ATTRIBUTE) == true
 
--- Records as changes, with workers their count and the timeout they need, and the clocks while on, each left out
--- while off
-local RELAY: { changes: boolean, workers: number?, timeout: number?, clocks: boolean? } = { changes = not LEVERS_OFF }
+-- Set true on Workspace before the server starts to boot the relay with its split by stage on. The dev server watches
+-- it after its start too, so a change while it runs reaches the tick loop
+local SPLIT_ATTRIBUTE: string = "TreadRelaySplit"
+local SPLIT: boolean = Workspace:GetAttribute(SPLIT_ATTRIBUTE) == true
+
+-- Records as changes and the relay's budget, with workers their count and the timeout they need, and the clocks and
+-- the split while on, each left out while off
+local RELAY: {
+	changes: boolean,
+	budget: number,
+	workers: number?,
+	timeout: number?,
+	clocks: boolean?,
+	split: boolean?,
+} =
+	{ changes = not LEVERS_OFF, budget = RELAY_BUDGET }
 if WORKERS > 0 then
 	RELAY.workers = WORKERS
 	RELAY.timeout = RELAY_TIMEOUT
@@ -59,6 +73,19 @@ end
 
 if CLOCKS then
 	RELAY.clocks = true
+end
+
+if SPLIT then
+	RELAY.split = true
+end
+
+-- Set on Workspace before the server starts to a whole number to boot anti-ESP with that many Actor workers to cast
+-- its rays on, left out or 0 for none, since anti-ESP makes its workers only at its start
+local ANTI_ESP_ATTRIBUTE: string = "TreadAntiEspWorkers"
+local ANTI_ESP_WORKERS: any = Workspace:GetAttribute(ANTI_ESP_ATTRIBUTE) or 0
+
+if type(ANTI_ESP_WORKERS) ~= "number" or ANTI_ESP_WORKERS < 0 or ANTI_ESP_WORKERS % 1 ~= 0 then
+	error(`Workspace's {ANTI_ESP_ATTRIBUTE} takes a whole number of anti-ESP workers from 0, not {ANTI_ESP_WORKERS}`)
 end
 
 return {
@@ -72,17 +99,16 @@ return {
 	relevancy = { enter = 950, leave = 1000 },
 
 	tiers = {
-		nearEnter = 200,
-		nearLeave = 220,
-		nearFloor = 15, -- Hz
-		nearAim = 20,
-		farFloor = 10,
-		farAim = 15,
+		bands = { { aim = 20, floor = 15 }, { aim = 10, floor = 10 }, { aim = 5, floor = 5 } }, -- Hz, nearest first
+		edges = { { enter = 350, leave = 385 }, { enter = 600, leave = 660 } }, -- Studs
 		-- Hz, degrees either side of the look, and studs, left out with the levers off
 		outOfView = not LEVERS_OFF and { rate = 5, cone = 70, radius = 40 } or nil,
+		crowd = { size = 32, rate = 20, floor = 5 }, -- Players at their band's rates, then the rest's most and least, Hz
+		-- The farthest band's rates halved after 20 relay runs in a row over relay.budget, and back after 20 under it
+		underLoad = { runs = 20, scale = 0.5 },
 	},
 
-	relay = RELAY, -- Each record as its change since what the viewer last acknowledged, any workers and the clocks
+	relay = RELAY, -- Each record as its change since what the viewer last acknowledged, the budget, workers, clocks, split
 	owner = { checks = not LEVERS_OFF }, -- A player whose check agrees gets an acknowledgment for its OwnerState
 	weights = { near = 1, far = 0.5, shooter = 2, cone = 1.5 },
 	shotNear = { rate = 10, seconds = 5 },
@@ -128,6 +154,8 @@ return {
 		failOpen = 0.15,
 		lyingShare = 0.0005, -- Seconds of each slice kept for sleeper and body pairs while any wait
 		include = OCCLUSION,
+		workers = ANTI_ESP_WORKERS > 0 and ANTI_ESP_WORKERS or nil, -- Actor workers its rays are cast on, left out while 0
+		whole = true, -- The slice's timers, walks and queue drains stop at its deadline as its tests do
 	},
 
 	footsteps = {
@@ -143,7 +171,9 @@ return {
 		hold = 2,
 	},
 
-	npcs = { near = 197, farRate = 2, range = 800 }, -- Frontier Zero sets its NPC draw distance with its NPCs
+	-- Studs, Hz and studs, Frontier Zero setting its NPC draw distance with its NPCs, and the seconds a tick's NPC
+	-- steps may take before the rest wait a tick
+	npcs = { near = 197, farRate = 2, range = 800, budget = 0.001 },
 	history = { seconds = 1 },
 
 	rewind = {

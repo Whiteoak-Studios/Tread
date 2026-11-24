@@ -186,6 +186,7 @@ local NpcList: { NpcSelf } = {}
 local SleeperList: { SleeperSelf } = {}
 
 local RelayTick: number = 0 -- The relay tick the relay stage last ran, unwrapped, so the next block rides the one after
+local OwnersTick: number? = nil -- The relay tick the owners' part last ran for, unwrapped, nil before the first
 
 -- Each platform's place at the tick the history or the relay stage last ran, by its id
 local PlatformPlaces: { [number]: vector } = {}
@@ -537,6 +538,7 @@ function Characters.start(context: Context)
 	local layout: Layout = context.layout
 	local collision: Collision = Engine.casts(shared.collision)
 	local blocked: (origin: vector, direction: vector) -> boolean = Engine.occlusion(server.antiEsp.include)
+	local occluder: (origin: vector, direction: vector) -> Instance? = Engine.occluder(server.antiEsp.include)
 
 	local world: World = World.new(shared.step, shared.rates.simulation, collision, shared.water, shared.rules, true)
 	Hulls.createGrid(world)
@@ -574,7 +576,7 @@ function Characters.start(context: Context)
 	Sleepers.start(shared, world)
 	Npcs.start(world, npcLanded)
 	Teleport.start({ shared = shared, server = server }, world)
-	AntiEsp.start({ shared = shared, server = server }, world, States, blocked)
+	AntiEsp.start({ shared = shared, server = server }, world, States, blocked, occluder)
 
 	-- Connected before any game callback can be, and lives as long as the server, so a game's callback finds the
 	-- landed body filed in the hull grid, and a getState read refills from it
@@ -673,8 +675,16 @@ local function enlist(key: Key, player: Player?, slot: number, generation: numbe
 	-- So its first sample, which takes the ping whole, is handed a time above 0
 	buffer.writef64(SampledAt, slot * TICK_BYTES, RelayTick)
 	Links[slot] = connection
-	Viewers[slot] =
-		{ key = key, slot = slot, position = position, acknowledged = 0, received = 0, target = nil, look = nil }
+	Viewers[slot] = {
+		key = key,
+		slot = slot,
+		position = position,
+		acknowledged = 0,
+		received = 0,
+		target = nil,
+		look = nil,
+		zoomed = false,
+	}
 	Invisible[slot] = false
 	Departed[slot] = nil
 
@@ -1588,12 +1598,51 @@ local function focus(relayTick: number, since: number, groups: number)
 end
 
 --[[
-    The relay stage, on a relay tick: each character whose player is still
-    here samples its ping, sends its OwnerState or queues its
-    acknowledgment, and is a viewer, with its acknowledgments, its newest
-    look and the target it spectates, then the relay gives every viewer its
-    blocks, with each platform's place at the tick for its riders, and a
-    share of the focus parts moves
+    The relay stage's owners' part, once a relay tick: each character whose
+    player is still here samples its ping and sends its OwnerState, or
+    queues its acknowledgment, and the moderators watching it and the taps
+    get its whole OwnerState either way. A second call for the same relay
+    tick sends nothing, and an acknowledgment still queued from an earlier
+    tick is fired first
+
+    @ relayTick | the relay tick as the server counts it, unwrapped
+--]]
+
+function Characters.sendOwners(relayTick: number)
+	local setup: Setup = running("Characters.sendOwners")
+	if relayTick == OwnersTick then
+		return
+	end
+
+	-- Taken before any send, so after a send that throws no later call for the tick sends or samples again
+	OwnersTick = relayTick
+
+	-- Each queued acknowledgment's bytes sit at its slot, which this tick's own for the slot would write over
+	if AckCount > 0 then
+		Characters.acks()
+	end
+
+	for _, character: Self in CharacterList do
+		local slot: number = character._slot
+		if character._live and not Departed[slot] then
+			local connection: Connection = Links[slot]
+
+			-- Handed the seconds since its last sample, more than a relay tick's after a run a catch-up skipped
+			local sampled: number = buffer.readf64(SampledAt, slot * TICK_BYTES)
+			buffer.writef64(SampledAt, slot * TICK_BYTES, relayTick)
+			connection:sample((relayTick - sampled) / setup.relayRate)
+			sendOwnerState(character, character.player, connection, setup)
+		end
+	end
+end
+
+--[[
+    The relay stage, on a relay tick: the owners' part unless it already
+    ran for the tick, then each character whose player is still here is a
+    viewer, with its acknowledgments, its newest look and the target it
+    spectates, then the relay gives every viewer its blocks, with each
+    platform's place at the tick for its riders, and a share of the focus
+    parts moves
 
     @ relayTick | the relay tick as the server counts it, unwrapped
     @ tick | the simulation tick that starts it, unwrapped
@@ -1605,11 +1654,11 @@ function Characters.relay(relayTick: number, tick: number)
 	local since: number = RelayTick
 	RelayTick = relayTick
 	placePlatforms(setup.world, tick)
+	Characters.sendOwners(relayTick)
 
 	for _, character: Self in CharacterList do
 		local slot: number = character._slot
 		if character._live and not Departed[slot] then
-			local key: Key = character.player
 			local connection: Connection = Links[slot]
 			local viewer: Viewer = Viewers[slot]
 			local acknowledged: number, received: number = Commands.acknowledged(connection)
@@ -1617,14 +1666,8 @@ function Characters.relay(relayTick: number, tick: number)
 			viewer.position = States[slot].position
 			viewer.acknowledged = acknowledged
 			viewer.received = received
-			viewer.target = Spectate.targetOf(key)
+			viewer.target = Spectate.targetOf(character.player)
 			viewer.look = Commands.look(connection)
-
-			-- Handed the seconds since its last sample, more than a relay tick's after a run a catch-up skipped
-			local sampled: number = buffer.readf64(SampledAt, slot * TICK_BYTES)
-			buffer.writef64(SampledAt, slot * TICK_BYTES, relayTick)
-			connection:sample((relayTick - sampled) / setup.relayRate)
-			sendOwnerState(character, key, connection, setup)
 
 			count += 1
 			ViewerList[count] = viewer
@@ -1640,11 +1683,11 @@ function Characters.relay(relayTick: number, tick: number)
 end
 
 --[[
-    Fires every acknowledgment the relay queued, in order, through the same
-    port as a full OwnerState, and empties the queue before the first fire,
-    so a fire that throws loses the rest and never sends one twice. A
-    character that ended or whose player left since it was queued is passed
-    over, since its queue may wait out a flush that runs game code
+    Fires every acknowledgment the owners' part queued, in order, through
+    the same port as a full OwnerState, and empties the queue before the
+    first fire, so a fire that throws loses the rest and never sends one
+    twice. A character that ended or whose player left since it was queued
+    is passed over, since its queue may wait out a flush that runs game code
 --]]
 
 function Characters.acks()
@@ -1996,6 +2039,25 @@ function Character.setInvisible(self: Self, invisible: boolean)
 	local slot: number = self._slot
 	Invisible[slot] = invisible
 	Relay.setInvisible(slot, invisible or States[slot].moveMode == "Parked")
+end
+
+--- Sends the character's player every other player at the nearest distance
+--- band's rates while on, wherever those players stand, as for a player
+--- zoomed in with a scope, or at each one's own band's rates again. Its
+--- relevancy, anti-ESP, the weights, NPCs' rates and the out-of-view rule stay
+--- as they are, and a moderator spectating it is sent what it is. A new
+--- character starts with it off
+--- @method setZoomed
+--- @within Character
+--- @param zoomed boolean
+
+function Character.setZoomed(self: Self, zoomed: boolean)
+	live(self, "character:setZoomed")
+	if type(zoomed) ~= "boolean" then
+		error(`character:setZoomed takes true or false, not {zoomed}`, 2)
+	end
+
+	Viewers[self._slot].zoomed = zoomed
 end
 
 --- Turns the character into a sleeper in its slot, lying where it stands,

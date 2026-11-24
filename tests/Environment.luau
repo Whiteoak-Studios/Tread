@@ -41,6 +41,18 @@ type State = {
 
 type Connection = { Disconnect: (self: Connection) -> () }
 
+--[[
+    One of an Instance's signals, which Lune's Instances lack: Connect as
+    the engine's, Fire for a case to raise it, and Connected for a case to
+    read how many connections it holds
+--]]
+
+type Signal = {
+	Connect: (self: Signal, callback: (...any) -> ()) -> Connection,
+	Fire: (self: Signal, ...any) -> (),
+	Connected: (self: Signal) -> number,
+}
+
 type Heartbeat = {
 	Connect: (self: Heartbeat, callback: (delta: number) -> ()) -> Connection,
 	Wait: (self: Heartbeat) -> number,
@@ -70,6 +82,9 @@ local OverlapParams: { new: () -> { [string]: any } } = {
 
 local PartsInPart: PartsInPart = { calls = 0, part = nil, params = nil }
 
+-- Each Instance's stand-in signals by the signal's name, held for the run so the getter is handed the instance stored
+local Signals: { [string]: { [any]: Signal } } = { DescendantAdded = {}, DescendantRemoving = {}, AncestryChanged = {} }
+
 local Environment = {}
 
 -- What a case reads to learn that code asked the engine's overlap query, and with what
@@ -95,6 +110,53 @@ roblox.implementMethod("Workspace", "GetPartsInPart", function (_: any, part: an
 
 	return {}
 end)
+
+-- A signal that calls every callback connected to it when a case fires it, each disconnected one left out
+local function signal(): Signal
+	local callbacks: { [{ nil }]: (...any) -> () } = {}
+
+	return {
+		Connect = function (_: Signal, callback: (...any) -> ()): Connection
+			local token: { nil } = {}
+			callbacks[token] = callback
+
+			return {
+				Disconnect = function (_: Connection)
+					callbacks[token] = nil
+				end,
+			}
+		end,
+
+		Fire = function (_: Signal, ...: any)
+			for _, callback: (...any) -> () in table.clone(callbacks) do
+				callback(...)
+			end
+		end,
+
+		Connected = function (_: Signal): number
+			local count: number = 0
+			for _ in callbacks do
+				count += 1
+			end
+
+			return count
+		end,
+	}
+end
+
+-- Lune's Instances have no signals, so each one's DescendantAdded, DescendantRemoving and AncestryChanged answer a
+-- stand-in of its own
+for name: string, held: { [any]: Signal } in Signals do
+	roblox.implementProperty("Instance", name, function (instance: any): Signal
+		local found: Signal? = held[instance]
+		if found == nil then
+			found = signal()
+			held[instance] = found
+		end
+
+		return found :: Signal
+	end)
+end
 
 --[[
     A Heartbeat on Lune's scheduler for Promise's timers: one thread fires

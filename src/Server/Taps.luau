@@ -220,7 +220,7 @@ local function connect(map: { [Key]: Observer }, key: Key, sink: Sink, member: s
 end
 
 --[[
-    Tap 1: calls a sink once every relay tick, after relevancy, the tiers,
+    Tap 1: calls a sink once every relay tick, after relevancy, the bands,
     the allocator and anti-ESP, with each block the relay sent the viewer
     that tick, a moderator's copies of its target's included, each record's
     send reason beside it, and the viewer's OwnerState while it owns a
@@ -424,6 +424,20 @@ function Taps.owner(key: Key, id: number, data: buffer, lag: number?, limits: Li
 	observer.ownerId = id
 	observer.lag = math.clamp(math.round((lag or 0) * MILLISECONDS), 0, MAX_LAG)
 	observer.limits = limits
+end
+
+--[[
+    Forgets the OwnerState every observer keeps for its next frame, for a
+    relay tick whose OwnerStates went out and whose run a later tick
+    skipped, so no frame carries another tick's. The looks stay, for the
+    next frame to carry
+--]]
+
+function Taps.dropOwners()
+	for _, observer: Observer in Observers do
+		observer.ownerLength = 0
+		observer.lag = 0
+	end
 end
 
 --[[

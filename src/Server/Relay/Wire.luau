@@ -29,9 +29,13 @@ local SENT: number = Turn.SENT
 local OWN: number = Turn.OWN
 local WITHHELD: number = Turn.WITHHELD
 
--- The shared hand-in: its header, then the looks and Invisible marks changed between runs, every present body in walk
--- order, the held items this run's walk changed, its footsteps and the ids of the keys a sink observes
+-- The shared hand-in: its header, then the run's bands, the looks and Invisible marks changed between runs, every
+-- present body in walk order, the held items this run's walk changed, its footsteps and the ids of the keys a sink
+-- observes
 local SHARED_BYTES: number = 35
+local TUNING_BYTES: number = 20 -- bands u8, flags u8, crowd size u16, crowd rate f64, crowd floor f64
+local BAND_BYTES: number = 16 -- aim f64, floor f64
+local EDGE_BYTES: number = 16 -- enter squared f64, leave squared f64
 local LOOK_BYTES: number = 7 -- slot u16, look life u8, version u16, Invisible u8, length u8, then the look
 local BODY_BYTES: number = 54 -- slot u16, life u8, kind u8, flags u8, place 3 f32, facing f64, changed u32, record,
 -- then anti-ESP's kind u8 and team f64
@@ -50,10 +54,12 @@ local HAS_SLOT: number = 2 ^ 0
 local HAS_TARGET: number = 2 ^ 1
 local HAS_LOOK: number = 2 ^ 2
 local BACK: number = 2 ^ 3
+local ZOOMED: number = 2 ^ 4
+local MISSED: number = 2 ^ 5
 
 -- A worker's result: its header, each turn's section, the changes to each view it ran, each watcher's answer and the
 -- text of a turn that threw
-local RESULT_BYTES: number = 36
+local RESULT_BYTES: number = 40
 local SECTION_BYTES: number = 7 -- length u32, place u16, recipients u8, before the recipients' ids, its row of asks,
 -- its row of marks and its events
 local VIEW_BYTES: number = 9 -- id u32, own u16, withheld u8, facts u16, before the facts
@@ -108,6 +114,7 @@ for index: number, name: string in CLOCKS do
 end
 
 type Steps = Turn.Steps
+type Tuning = Turn.Tuning
 type View = Turn.View
 type World = Turn.World
 
@@ -117,6 +124,7 @@ export type Shared = {
 	tick: number, -- Unwrapped
 	elapsed: number,
 	wire: number,
+	tune: Tuning, -- The run's bands, the front's own as it writes them, and a reader's lists reused run to run
 	places: number, -- The bodies the front's walk filed this run, the places of world.walk from 1
 	looks: { number }, -- The slots whose look or Invisible changed since the last run, for lookCount
 	lookCount: number,
@@ -146,6 +154,8 @@ export type Hand = {
 	received: number,
 	sequence: number, -- latest for a watcher, the back of a viewer back from a spectate, 0 otherwise
 	back: boolean, -- Whether a viewer with no target is back from a spectate this run, its back in sequence
+	zoomed: boolean, -- Whether its players go at the nearest band's rates wherever they stand
+	missed: boolean, -- Whether the relay's budget left a viewer with no target in the run before
 	traffic: number, -- Volt's count read at dispatch, for a viewer with no target
 	team: number, -- Anti-ESP's team for its own slot, NaN for none
 	row: number, -- Its visible row's offset in the buffer holding it: the export's when written, where its quiet row
@@ -192,9 +202,11 @@ export type Reader = {
 	views: number,
 	answers: number,
 	places: number,
-	sent: number, -- The records the tier ticks placed, those cut and the bodies gathered, this run
+	sent: number, -- The records the band ticks placed, those cut, the bodies gathered and the candidates held outside a
+	-- crowd cap, this run
 	cut: number,
 	visited: number,
+	rest: number,
 	failed: number, -- The place from 1 in the worker's list of the viewer whose turn threw, 0 for none
 	failure: string, -- And its error's text
 	place: number, -- The place from 1 in the worker's list of the viewer whose turn was read last
@@ -242,12 +254,27 @@ local function bounded(count: number, what: string)
 	end
 end
 
+-- Bands with none in them, for the front to work its own out into or a reader to fill
+function Wire.tuning(): Tuning
+	return {
+		bands = 0,
+		flags = 0,
+		crowdSize = 0,
+		crowdRate = 0,
+		crowdFloor = 0,
+		aims = {},
+		floors = {},
+		enters = {},
+		leaves = {},
+	}
+end
+
 --[[
     The shared hand-in for a run, from the world the front's walk of the
-    states filled and what shared gives: the looks and Invisible marks
-    changed since the last run, every present body in walk order with
-    anti-ESP's kind and team for it, the held items the walk changed, the
-    footsteps and the keys a sink observes
+    states filled and what shared gives: the run's bands, the looks and
+    Invisible marks changed since the last run, every present body in walk
+    order with anti-ESP's kind and team for it, the held items the walk
+    changed, the footsteps and the keys a sink observes
 --]]
 
 function Wire.writeShared(world: World, shared: Shared): buffer
@@ -259,10 +286,14 @@ function Wire.writeShared(world: World, shared: Shared): buffer
 	local stepCount: number = steps.count
 	local lookLengths: buffer = world.lookLengths
 	local heldLengths: buffer = world.heldLengths
+	local tune: Tuning = shared.tune
+	local bands: number = tune.bands
+	local edges: number = math.max(bands - 1, 0)
 
 	bounded(math.max(places, lookCount, heldCount, observedCount), "places, marks or observed keys")
 
 	local size: number = SHARED_BYTES + places * BODY_BYTES + stepCount * STEP_BYTES + observedCount * ID_BYTES
+	size += TUNING_BYTES + bands * BAND_BYTES + edges * EDGE_BYTES
 	for index: number = 1, lookCount do
 		size += LOOK_BYTES + buffer.readu8(lookLengths, shared.looks[index])
 	end
@@ -284,7 +315,25 @@ function Wire.writeShared(world: World, shared: Shared): buffer
 	buffer.writeu8(data, 32, shared.observing and 1 or 0)
 	buffer.writeu16(data, 33, observedCount)
 
-	local at: number = SHARED_BYTES
+	buffer.writeu8(data, SHARED_BYTES, bands)
+	buffer.writeu8(data, SHARED_BYTES + 1, tune.flags)
+	buffer.writeu16(data, SHARED_BYTES + 2, tune.crowdSize)
+	buffer.writef64(data, SHARED_BYTES + 4, tune.crowdRate)
+	buffer.writef64(data, SHARED_BYTES + 12, tune.crowdFloor)
+
+	local at: number = SHARED_BYTES + TUNING_BYTES
+	for band: number = 1, bands do
+		buffer.writef64(data, at, tune.aims[band])
+		buffer.writef64(data, at + 8, tune.floors[band])
+		at += BAND_BYTES
+	end
+
+	for edge: number = 1, edges do
+		buffer.writef64(data, at, tune.enters[edge])
+		buffer.writef64(data, at + 8, tune.leaves[edge])
+		at += EDGE_BYTES
+	end
+
 	local looks: buffer = world.looks
 	local lookLives: buffer = world.lookLives
 	local lookVersions: buffer = world.lookVersions
@@ -376,10 +425,18 @@ function Wire.writeShared(world: World, shared: Shared): buffer
 	return data
 end
 
+-- Cuts a list a reader refills back to its first count entries
+local function trim(list: { number }, count: number)
+	for index: number = #list, count + 1, -1 do
+		list[index] = nil
+	end
+end
+
 --[[
-    Reads a shared hand-in's header into into, and the looks and Invisible
-    marks it carries into the world, as setLook and setInvisible left the
-    front's, giving where its bodies start
+    Reads a shared hand-in's header and the run's bands into into, the
+    bands' lists refilled in place, and the looks and Invisible marks it
+    carries into the world, as setLook and setInvisible left the front's,
+    giving where its bodies start
 --]]
 
 function Wire.readLooks(data: buffer, world: World, into: Shared): number
@@ -393,7 +450,33 @@ function Wire.readLooks(data: buffer, world: World, into: Shared): number
 	into.observing = buffer.readu8(data, 32) ~= 0
 	into.observedCount = buffer.readu16(data, 33)
 
-	local at: number = SHARED_BYTES
+	local tune: Tuning = into.tune
+	local bands: number = buffer.readu8(data, SHARED_BYTES)
+	local edges: number = math.max(bands - 1, 0)
+	tune.bands = bands
+	tune.flags = buffer.readu8(data, SHARED_BYTES + 1)
+	tune.crowdSize = buffer.readu16(data, SHARED_BYTES + 2)
+	tune.crowdRate = buffer.readf64(data, SHARED_BYTES + 4)
+	tune.crowdFloor = buffer.readf64(data, SHARED_BYTES + 12)
+
+	local at: number = SHARED_BYTES + TUNING_BYTES
+	for band: number = 1, bands do
+		tune.aims[band] = buffer.readf64(data, at)
+		tune.floors[band] = buffer.readf64(data, at + 8)
+		at += BAND_BYTES
+	end
+
+	for edge: number = 1, edges do
+		tune.enters[edge] = buffer.readf64(data, at)
+		tune.leaves[edge] = buffer.readf64(data, at + 8)
+		at += EDGE_BYTES
+	end
+
+	trim(tune.aims, bands)
+	trim(tune.floors, bands)
+	trim(tune.enters, edges)
+	trim(tune.leaves, edges)
+
 	local looks: buffer = world.looks
 	local lookLengths: buffer = world.lookLengths
 	local lookLives: buffer = world.lookLives
@@ -619,6 +702,14 @@ function Wire.writeOwn(
 			flags += BACK
 		end
 
+		if hand.zoomed then
+			flags += ZOOMED
+		end
+
+		if hand.missed then
+			flags += MISSED
+		end
+
 		buffer.writeu8(data, at + 4, flags)
 		buffer.writeu16(data, at + 35, hand.acknowledged)
 		buffer.writeu16(data, at + 37, hand.received)
@@ -674,6 +765,8 @@ local function handAt(hands: { Hand }, index: number): Hand
 		received = 0,
 		sequence = 0,
 		back = false,
+		zoomed = false,
+		missed = false,
 		traffic = 0,
 		team = 0,
 		row = 0,
@@ -724,6 +817,8 @@ function Wire.readOwn(data: buffer, hands: { Hand }): number
 		end
 
 		hand.back = bit32.btest(flags, BACK)
+		hand.zoomed = bit32.btest(flags, ZOOMED)
+		hand.missed = bit32.btest(flags, MISSED)
 		hand.acknowledged = buffer.readu16(data, at + 35)
 		hand.received = buffer.readu16(data, at + 37)
 		hand.sequence = buffer.readu16(data, at + 39)
@@ -1173,6 +1268,7 @@ function Wire.finish(
 	sent: number,
 	cut: number,
 	visited: number,
+	rest: number,
 	failed: number,
 	failure: string
 ): buffer
@@ -1209,6 +1305,7 @@ function Wire.finish(
 	buffer.writeu32(data, 24, viewsStart)
 	buffer.writeu32(data, 28, answersStart)
 	buffer.writeu32(data, 32, failureStart)
+	buffer.writeu32(data, 36, rest)
 
 	local result: buffer = buffer.create(at)
 	buffer.copy(result, 0, data, 0, at)
@@ -1235,6 +1332,7 @@ function Wire.reader(records: buffer): Reader
 		sent = 0,
 		cut = 0,
 		visited = 0,
+		rest = 0,
 		failed = 0,
 		failure = "",
 		place = 0,
@@ -1270,6 +1368,7 @@ function Wire.open(reader: Reader, data: buffer)
 	reader.sent = buffer.readu32(data, 8)
 	reader.cut = buffer.readu32(data, 12)
 	reader.visited = buffer.readu32(data, 16)
+	reader.rest = buffer.readu32(data, 36)
 	reader.failed = buffer.readu16(data, 20)
 	reader.failure = buffer.readstring(data, buffer.readu32(data, 32), buffer.readu16(data, 22))
 	reader._at = RESULT_BYTES

@@ -1,7 +1,7 @@
 --[[
     The dev client: starts Tread's client as a game does, with the dev game's
-    shared table and Frontier Zero's settings, then its kit, shooter, cost and
-    receive windows, elevator, input, view, keys, prompt, G2, replay and panels
+    shared table and Frontier Zero's settings, then its kit, shooter, run
+    windows, elevator, input, view, keys, prompt, G2, replay, panels and ghosts
 --]]
 
 --!strict
@@ -22,8 +22,10 @@ local Config = require(script.Config)
 local Cost = require(script.Cost)
 local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
 local Exploits = require(script.Exploits)
+local Ghost = require(script.Ghost)
 local Input = require(script.Input)
 local Live = require(script.Live)
+local Probe = require(script.Parallel.Probe)
 local Receive = require(script.Receive)
 local Replay = require(script.Replay)
 local Rig = require(script.Rig)
@@ -224,6 +226,7 @@ Exploits.start({ client = client, shared = Shared }) -- In this frame, so the ES
 Shots.start(client, Shared) -- In this frame too, so it hears every slot drawn
 Cost.start(client) -- In this frame too, so it counts every rig drawn
 Receive.start() -- Its listener lives for the client session, as Cost's does
+Probe.start() -- Its listeners live for the client session too
 local view: View.View = View.new(client, Config.view, cast)
 local mantle: TextLabel? = nil -- The prompt, once the PlayerGui it waits for has come
 local replay: Replay.Replay? = nil -- The clip replay, once the PlayerGui its label waits for has come
@@ -314,10 +317,11 @@ end)
 
 -- Last, since each waits at boot for the PlayerGui, the input on a touch screen alone. The replay is held for the
 -- client session, and its destroy is what would disconnect its listener and keys. The panels' listeners and keys live
--- for the client session
+-- for the client session, as the ghosts' key and button do
 input:start()
 mantle = prompt()
 render = renderLabel(renderDistance)
 replay = Replay.new(client, Shared)
 Live.start()
 BotPanel.start()
+Ghost.start(client)

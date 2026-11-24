@@ -18,6 +18,8 @@ local STRAIGHT_DOWN: number = 90 -- Degrees below level a look points straight d
 local HALF_TURN: number = 180 -- Degrees a view cone's half-angle reaches at most, every direction
 local PLAYER_RAYS: number = Constants.PLAYER_RAYS -- The rays anti-ESP's player pair test has
 local LYING_RAYS: number = Constants.LYING_RAYS -- A sleeper's or body's
+local MAX_BANDS: number = Constants.MAX_BANDS -- The distance bands the relay takes
+local MAX_CROWD: number = Constants.MAX_CROWD -- The largest crowd cap the relay takes
 
 local SHARED_PATH: string = "shared" -- How a refusal names each table's keys
 local SERVER_PATH: string = "server"
@@ -43,6 +45,7 @@ local EXPECTED: { [string]: string } = {
 	positive = "a number above 0",
 	nonNegative = "a number of 0 or more",
 	ratio = "a number from 0 to 1",
+	scale = "a number above 0 and at most 1",
 	whole = "a whole number of 0 or more",
 	count = "a whole number of 1 or more",
 	burst = "a number of 1 or more, since each message takes a whole token",
@@ -51,6 +54,7 @@ local EXPECTED: { [string]: string } = {
 	height = `a height above 0 that rounds to OwnerState's precision at most {EYE_LIMIT} studs, which its u8 holds`,
 	drop = `a number of degrees above 0 and below {STRAIGHT_DOWN}`,
 	cone = `a half-angle in degrees above 0 and at most {HALF_TURN}`,
+	crowd = `a whole number from 1 to {MAX_CROWD}`,
 	lyingRays = `a whole number from 1 to {LYING_RAYS}, the rays a sleeper's or body's test has`,
 	boolean = "true or false",
 	["function"] = "a function",
@@ -67,6 +71,10 @@ local RATE: Specs = { perSecond = "positive", burst = "burst" }
 local SHAPE: Specs = { from = "vector", to = "vector", radius = "positive" }
 local POSTURE: Specs = { body = SHAPE, zones = { [ANY] = SHAPE }, waist = "number" }
 local AIM: Specs = { [ANY] = { up = "number", side = "number", ["lead?"] = "boolean" } } -- A list, as checkAim holds it
+local BANDS: Specs = { [ANY] = { aim = "positive", floor = "positive" } } -- A list, as checkBands holds it
+local EDGES: Specs = { [ANY] = { enter = "positive", leave = "positive" } }
+local CROWD: Specs = { size = "crowd", rate = "positive", floor = "positive" }
+local UNDER_LOAD: Specs = { runs = "count", scale = "scale" }
 
 local SHARED: Specs = {
 	rates = { simulation = "positive", relay = "positive" },
@@ -170,13 +178,11 @@ local SERVER: Specs = {
 	relevancy = { enter = "positive", leave = "positive" },
 
 	tiers = {
-		nearEnter = "positive",
-		nearLeave = "positive",
-		nearFloor = "positive",
-		nearAim = "positive",
-		farFloor = "positive",
-		farAim = "positive",
+		bands = BANDS,
+		edges = EDGES,
 		["outOfView?"] = { rate = "positive", cone = "cone", radius = "nonNegative" },
+		["crowd?"] = CROWD,
+		["underLoad?"] = UNDER_LOAD,
 	},
 
 	["relay?"] = {
@@ -184,6 +190,8 @@ local SERVER: Specs = {
 		["workers?"] = "whole",
 		["timeout?"] = "positive",
 		["clocks?"] = "boolean",
+		["budget?"] = "nonNegative",
+		["split?"] = "boolean",
 	},
 
 	["owner?"] = { ["checks?"] = "boolean" },
@@ -204,6 +212,8 @@ local SERVER: Specs = {
 		failOpen = "positive",
 		lyingShare = "nonNegative",
 		include = { [ANY] = "instance" },
+		["workers?"] = "whole",
+		["whole?"] = "boolean",
 	},
 
 	footsteps = {
@@ -219,7 +229,7 @@ local SERVER: Specs = {
 		hold = "nonNegative",
 	},
 
-	npcs = { near = "nonNegative", farRate = "positive", range = "positive" },
+	npcs = { near = "nonNegative", farRate = "positive", range = "positive", ["budget?"] = "nonNegative" },
 	history = { seconds = "positive" },
 
 	rewind = {
@@ -304,9 +314,6 @@ local SHARED_PAIRS: { Pair } = {
 
 local SERVER_PAIRS: { Pair } = {
 	{ low = "relevancy.enter", high = "relevancy.leave" },
-	{ low = "tiers.nearEnter", high = "tiers.nearLeave" },
-	{ low = "tiers.nearFloor", high = "tiers.nearAim", equal = true },
-	{ low = "tiers.farFloor", high = "tiers.farAim", equal = true },
 	{ low = "budget.soft", high = "budget.hard", equal = true },
 	{ low = "antiEsp.lookAheadMin", high = "antiEsp.lookAheadMax", equal = true },
 	{ low = "npcs.near", high = "npcs.range", equal = true },
@@ -373,6 +380,33 @@ export type AimPoint = {
 -- in its own module fits whichever of its points lead
 export type AimPoints = { read [number]: AimPoint }
 
+-- A distance band's send rates in Hz: the rate it aims for, and the floor a viewer past its soft budget may cut it to
+export type Band = {
+	aim: number,
+	floor: number,
+}
+
+-- The edge between two bands, in studs: a character comes inside it nearer than enter and goes out past leave
+export type Edge = {
+	enter: number,
+	leave: number,
+}
+
+-- The crowd cap: the players a viewer is sent at their band's rates, nearest first, and the most the rest aim for and
+-- the least they are cut to, in Hz
+export type Crowd = {
+	size: number,
+	rate: number,
+	floor: number,
+}
+
+-- The far rate under load: the relay runs in a row over relay.budget that lower the farthest band, and in a row under
+-- it that put it back, and what its aim and floor are multiplied by while lowered, above 0 and at most 1
+export type UnderLoad = {
+	runs: number,
+	scale: number,
+}
+
 -- A ragdoll joint's limits in degrees, its BallSocketConstraint's UpperAngle, TwistLowerAngle and TwistUpperAngle
 type JointLimit = {
 	tilt: number, -- The cone the joint may tilt in
@@ -422,24 +456,36 @@ export type ServerSettings = {
 	relevancy: { enter: number, leave: number }, -- Studs
 
 	tiers: {
-		nearEnter: number, -- Studs
-		nearLeave: number,
-		nearFloor: number, -- Hz
-		nearAim: number,
-		farFloor: number,
-		farAim: number,
+		bands: { Band }, -- Nearest first, 1 to MAX_BANDS of them
+		edges: { Edge }, -- One fewer than the bands, the nearest first, each between the band it follows and the next
 
 		-- The aim and floor a player outside a viewer's view cone is held to, Hz, the cone's half-angle in degrees,
 		-- and the studs inside which no player is held to it; with none, no player is. Tread only reads it, so a
 		-- tiers table a game builds in its own module fits with it or without it
 		read outOfView: { rate: number, cone: number, radius: number }?,
+
+		-- The crowd cap; with none, every player a viewer is sent goes at its band's rates. Read only, as outOfView is
+		read crowd: Crowd?,
+
+		-- The far rate under load, which needs relay.budget; with none, no band's rates change under load. Read only,
+		-- as outOfView is
+		read underLoad: UnderLoad?,
 	},
 
 	-- Whether each record goes as its change since what the viewer last acknowledged, left out or false whole, how
 	-- many Actor workers take the viewers' turns, left out or 0 none, the seconds a round out on them may take before
-	-- it is given up, which workers need, and whether the relay times each part of its runs for stats, left out or
-	-- false not. Read only, as tiers.outOfView is, so a game's own relay table fits
-	read relay: { read changes: boolean?, read workers: number?, read timeout: number?, read clocks: boolean? }?,
+	-- it is given up, which workers need, whether the relay times each part of its runs for stats, left out or false
+	-- not, the seconds of the server's own script a run may take before the viewers left wait for the next, left
+	-- out no limit, and whether a calm tick sends its blocks a Heartbeat later to spread its work over its frames, left
+	-- out or false not. Read only, as tiers.outOfView is, so a game's own relay table fits
+	read relay: {
+		read changes: boolean?,
+		read workers: number?,
+		read timeout: number?,
+		read clocks: boolean?,
+		read budget: number?,
+		read split: boolean?,
+	}?,
 
 	-- Whether a player whose check agrees with the server's state is sent an acknowledgment in place of its OwnerState,
 	-- left out or false not. Read only, as relay is, so a game's own owner table fits
@@ -462,6 +508,12 @@ export type ServerSettings = {
 		failOpen: number,
 		lyingShare: number, -- Seconds of each slice, at most slice, kept for sleeper and body pairs while any wait
 		include: { Instance }, -- What its rays may hit, CanCollide on or off: the occluder folder, and Terrain
+		-- How many Actor workers cast its rays, left out or 0 none. Read only, as relay is, so a game's own antiEsp
+		-- table fits with it or without it
+		read workers: number?,
+		-- Whether the slice's timers, walks and queue drains stop at its deadline as its tests do, left out or false
+		-- not. Read only, as workers is
+		read whole: boolean?,
 	},
 
 	footsteps: {
@@ -472,7 +524,10 @@ export type ServerSettings = {
 	},
 
 	sleepers: { radius: number, rays: number, retest: number, rate: number, hold: number },
-	npcs: { near: number, farRate: number, range: number },
+	-- Studs inside which an NPC is sent every relay tick, Hz beyond, and studs past which none is, and the seconds a
+	-- tick's NPC steps may take before the NPCs left wait a tick, left out no limit. Read only, so a game's own npcs
+	-- table fits with it or without it
+	npcs: { near: number, farRate: number, range: number, read budget: number? },
 	history: { seconds: number },
 
 	rewind: {
@@ -629,6 +684,8 @@ local function accepts(kind: string, value: any): boolean
 		return value >= 0
 	elseif kind == "ratio" then
 		return value >= 0 and value <= 1
+	elseif kind == "scale" then
+		return value > 0 and value <= 1
 	elseif kind == "whole" then
 		return value >= 0 and value % 1 == 0
 	elseif kind == "count" then
@@ -646,6 +703,8 @@ local function accepts(kind: string, value: any): boolean
 		return value > 0 and value < STRAIGHT_DOWN
 	elseif kind == "cone" then
 		return value > 0 and value <= HALF_TURN
+	elseif kind == "crowd" then
+		return value >= 1 and value <= MAX_CROWD and value % 1 == 0
 	elseif kind == "lyingRays" then
 		return value >= 1 and value <= LYING_RAYS and value % 1 == 0
 	end
@@ -877,6 +936,16 @@ local function checkRelay(server: any)
 	refuse(`{path}.timeout`, `{EXPECTED.positive}, since {path}.workers is {relay.workers}`, nil)
 end
 
+-- Refuses the far rate under load with no relay budget, since its runs are counted over and under that budget
+local function checkUnderLoad(server: any)
+	local relay: any = server.relay
+	if server.tiers.underLoad == nil or (relay ~= nil and relay.budget ~= nil) then
+		return
+	end
+
+	refuse(`{SERVER_PATH}.relay.budget`, `{EXPECTED.nonNegative}, since {SERVER_PATH}.tiers.underLoad is given`, nil)
+end
+
 -- Refuses a share of anti-ESP's slice kept for sleepers and bodies that is more than the slice
 local function checkShare(server: any)
 	local path: string = `{SERVER_PATH}.antiEsp`
@@ -885,6 +954,71 @@ local function checkShare(server: any)
 
 	if share > slice then
 		refuse(`{path}.lyingShare`, `a number at most {path}.slice's {slice}`, share)
+	end
+end
+
+-- Refuses a list that isn't numbered from 1 with no gap, naming the first key that breaks it, and gives its length
+local function lengthOf(list: any, path: string): number
+	local keys: { any } = sortedKeys(list)
+	for place: number, key: any in keys do
+		if key ~= place then
+			refuse(join(path, key), "no value, since it is a list from 1 with no gap", list[key])
+		end
+	end
+
+	return #keys
+end
+
+--[[
+    Refuses distance bands that are no list, none or more than MAX_BANDS,
+    or with a floor above its aim, and edges that are no list of one fewer,
+    or with an enter not below its leave or not above the leave of the edge
+    before it, each named by its path under the one given
+--]]
+
+local function checkBands(bands: any, edges: any, path: string)
+	local bandsPath: string = `{path}.bands`
+	local edgesPath: string = `{path}.edges`
+	local count: number = lengthOf(bands, bandsPath)
+	local edgeCount: number = lengthOf(edges, edgesPath)
+
+	if count == 0 then
+		refuse(join(bandsPath, 1), "a band, since the relay sends in at least one", nil)
+	elseif count > MAX_BANDS then
+		local most: string = `no value, since the relay takes at most {MAX_BANDS} bands`
+		refuse(join(bandsPath, MAX_BANDS + 1), most, bands[MAX_BANDS + 1])
+	elseif edgeCount < count - 1 then
+		refuse(join(edgesPath, edgeCount + 1), `an edge, since {count} bands have {count - 1}`, nil)
+	elseif edgeCount > count - 1 then
+		refuse(join(edgesPath, count), `no value, since {count} bands have {count - 1} edges`, edges[count])
+	end
+
+	for place: number = 1, count do
+		local band: any = bands[place]
+		local at: string = join(bandsPath, place)
+
+		if band.floor > band.aim then
+			refuse(`{at}.floor`, `a number at most {at}.aim's {band.aim}`, band.floor)
+		end
+	end
+
+	for place: number = 1, edgeCount do
+		local edge: any = edges[place]
+		local at: string = join(edgesPath, place)
+
+		if edge.leave <= edge.enter then
+			refuse(`{at}.leave`, `a number above {at}.enter's {edge.enter}`, edge.leave)
+		elseif place > 1 and edge.enter <= edges[place - 1].leave then
+			local inner: string = join(edgesPath, place - 1)
+			refuse(`{at}.enter`, `a number above {inner}.leave's {edges[place - 1].leave}`, edge.enter)
+		end
+	end
+end
+
+-- Refuses a crowd cap whose floor is above the rate the rest aim for, named by its path under the one given
+local function checkCrowd(crowd: any, path: string)
+	if crowd ~= nil and crowd.floor > crowd.rate then
+		refuse(`{path}.floor`, `a number at most {path}.rate's {crowd.rate}`, crowd.floor)
 	end
 end
 
@@ -898,9 +1032,46 @@ function Config.server(shared: Shared, server: ServerSettings)
 	checkShared(shared)
 	walk(SERVER, server, SERVER_PATH)
 	checkPairs(SERVER_PAIRS, server, SERVER_PATH)
+	checkBands(server.tiers.bands, server.tiers.edges, `{SERVER_PATH}.tiers`)
+	checkCrowd(server.tiers.crowd, `{SERVER_PATH}.tiers.crowd`)
 	checkAim(server)
 	checkShare(server)
 	checkRelay(server)
+	checkUnderLoad(server)
+end
+
+--[[
+    Checks distance bands and their edges as the server's check does
+    tiers.bands and tiers.edges, erroring on the first wrong, named by its
+    path under server.tiers
+--]]
+
+function Config.bands(bands: { Band }, edges: { Edge })
+	local path: string = `{SERVER_PATH}.tiers`
+	walk(BANDS, bands, `{path}.bands`)
+	walk(EDGES, edges, `{path}.edges`)
+	checkBands(bands, edges, path)
+end
+
+--[[
+    Checks a crowd cap as the server's check does tiers.crowd, erroring on
+    the first wrong, named by its path under server.tiers.crowd
+--]]
+
+function Config.crowd(crowd: Crowd)
+	local path: string = `{SERVER_PATH}.tiers.crowd`
+	walk(CROWD, crowd, path)
+	checkCrowd(crowd, path)
+end
+
+--[[
+    Checks the far rate under load as the server's check does
+    tiers.underLoad, erroring on the first wrong, named by its path under
+    server.tiers.underLoad. Whether relay.budget is given is the caller's
+--]]
+
+function Config.underLoad(underLoad: UnderLoad)
+	walk(UNDER_LOAD, underLoad, `{SERVER_PATH}.tiers.underLoad`)
 end
 
 --[[

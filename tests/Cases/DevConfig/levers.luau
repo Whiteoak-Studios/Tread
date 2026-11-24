@@ -17,6 +17,7 @@ local OCCLUDERS: { { string } } = {
 	{ "TestContent", "Monuments", "Occluders" },
 }
 local OUT_OF_VIEW: { [string]: number } = { rate = 5, cone = 70, radius = 40 } -- Hz, degrees and studs
+local RELAY_BUDGET: number = 0.005 -- Seconds, the dev place's relay budget, which the flag leaves as it is
 
 return function (): (boolean, string | nil)
 	local place: Harness.Game = Harness.new()
@@ -48,15 +49,15 @@ return function (): (boolean, string | nil)
 		return false, `{ATTRIBUTE} false gave other settings than with it absent`
 	elseif absent.tiers.outOfView == nil or Config.hash(absent.tiers.outOfView) ~= Config.hash(OUT_OF_VIEW) then
 		return false, `With {ATTRIBUTE} absent, tiers.outOfView is not the dev place's rate, cone and radius`
-	elseif Config.hash(absent.relay) ~= Config.hash({ changes = true }) then
-		return false, `With {ATTRIBUTE} absent, relay holds more or less than changes set true`
+	elseif Config.hash(absent.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET }) then
+		return false, `With {ATTRIBUTE} absent, relay holds more or less than changes set true and the budget`
 	end
 
 	-- 2) True, both levers are off
 	if off.tiers.outOfView ~= nil then
 		return false, `With {ATTRIBUTE} true, tiers.outOfView is still given`
-	elseif Config.hash(off.relay) ~= Config.hash({ changes = false }) then
-		return false, `With {ATTRIBUTE} true, relay holds more or less than changes set false`
+	elseif Config.hash(off.relay) ~= Config.hash({ changes = false, budget = RELAY_BUDGET }) then
+		return false, `With {ATTRIBUTE} true, relay holds more or less than changes set false and the budget`
 	end
 
 	-- 3) True, nothing else changed: the three levers put back, the settings hash as they do absent

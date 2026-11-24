@@ -11,6 +11,7 @@ Server.__index = Server
 local Workspace = game:GetService("Workspace")
 
 local AntiEsp = require(script.AntiEsp)
+local AntiEspWorkers = require(script.AntiEspWorkers)
 local Characters = require(script.Characters)
 local Commands = require(script.Commands)
 local Config = require(script.Parent.Config)
@@ -19,6 +20,7 @@ local Constants = require(script.Parent.Constants)
 local Fields = require(script.Parent.Codec.Fields)
 local History = require(script.History)
 local Keyframe = require(script.Parent.Codec.Keyframe)
+local Npcs = require(script.Npcs)
 local Relay = require(script.Relay)
 local Reliable = require(script.Parent.Codec.Reliable)
 local Reports = require(script.Reports)
@@ -107,11 +109,22 @@ local RelaySkipped: number = 0 -- The relay ticks the relay didn't run, each cou
 local RelayDropped: number = 0 -- The workers' rounds given up past relay.timeout
 
 local Relayed: number = 0 -- The relay tick the relay last ran, unwrapped, 0 before the first
+local Owned: number = 0 -- The relay tick the relay stage's early part last sent the OwnerStates of, 0 before the first
+
+-- The send's time: when the newest tick's decode began, by os.clock(), and when that of the tick whose blocks are out
+-- did, the seconds from there to the flush that sent them, smoothed, 0 before the first, and the relay tick of the last
+local DecodedAt: number = 0
+local SendFrom: number = 0
+local Send: number = 0
+local SendAt: number = 0
+local SendOut: boolean = false -- Whether that last was at a finish, the blocks of a round out on the workers
+local Smoothing: number = 0 -- The server settings' rewind.rttSmoothing, the seconds the send's time is smoothed over
 
 -- Seconds a round out on the workers may take before it is given up, from relay.timeout, 0 while they are off
 local RelayTimeout: number = 0
 local DispatchedAt: number = 0 -- When the round out was sent, by os.clock()
 local RelayClocks: boolean = false -- Whether relay.clocks is on, so the relay's flushes are timed for its clocks
+local AntiEspPooled: boolean = false -- Whether antiEsp.workers is above 0, so stats gives its workers' figures
 
 -- What each counter read at the last stats read, and when it was
 local ReadAt: number = os.clock()
@@ -121,6 +134,7 @@ local ReadStandIns: number = 0
 local ReadLate: number = 0
 local ReadSent: number = 0
 local ReadCut: number = 0
+local ReadCrowdRest: number = 0
 local ReadBytes: number = 0
 local ReadTests: number = 0
 local ReadHidden: number = 0
@@ -131,6 +145,11 @@ local ReadOwnerFull: number = 0
 local ReadOwnerAcks: number = 0
 local ReadOwnerChecked: number = 0
 local ReadOwnerMismatches: number = 0
+local ReadWaited: number = 0
+local ReadSliceCuts: number = 0
+local ReadLeft: number = 0
+local ReadOver: number = 0
+local ReadHalved: number = 0
 local ReadReports: { [string]: number } = {}
 
 -- What the relay's own work first threw since its stage or its finish began, raised again once the flush has gone
@@ -141,6 +160,26 @@ local function keepFailure(message: any)
 	if RelayFailure == "" then
 		RelayFailure = debug.traceback(tostring(message), 2)
 	end
+end
+
+--[[
+    Takes the seconds from the decode of the tick whose blocks just went
+    out to now into the send's time, smoothed as a connection's round trip
+    is, each measure weighed by the relay ticks since the last, with
+    whether they went at a finish, after a round out on the workers
+--]]
+
+local function measureSend(out: boolean)
+	local seconds: number = os.clock() - SendFrom
+	if SendAt == 0 then
+		Send = seconds
+	else
+		local weight: number = 1 - math.exp(-(Relayed - SendAt) / RelayRate / Smoothing)
+		Send += weight * (seconds - Send)
+	end
+
+	SendAt = Relayed
+	SendOut = out
 end
 
 -- The key of the rate each endpoint the server hears takes in the server settings: its name, its first letter lowered
@@ -278,6 +317,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 	Started = true
 	SimulationRate = shared.rates.simulation
 	RelayRate = shared.rates.relay
+	Smoothing = server.rewind.rttSmoothing
 
 	Slots.start(server.slots.reserve)
 	Connections.start(server.rewind.rttSmoothing, server.bots)
@@ -315,7 +355,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 
 	-- With workers the relay hands each round anti-ESP's answers and its marks, and the stage gives up a round out past
 	-- the timeout
-	local relay: { read workers: number?, read timeout: number?, read clocks: boolean? }? = server.relay
+	local relay: typeof(server.relay) = server.relay
 	local answers: typeof(AntiEsp.answers)? = nil
 	local asked: typeof(AntiEsp.asked)? = nil
 	if relay and relay.workers and relay.workers > 0 and relay.timeout then
@@ -328,7 +368,10 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 		RelayClocks = true
 	end
 
-	-- Each block goes to a viewer and its spectating moderators in one fireList, its bytes counted once a recipient
+	AntiEspPooled = (server.antiEsp.workers or 0) > 0
+
+	-- Each block goes to a viewer and its spectating moderators in one fireList, its bytes counted once a recipient.
+	-- Anti-ESP keeps the pairs of each viewer relay.budget leaves, whether or not a budget is set now
 	Relay.start({ shared = shared, server = server, layout = layout }, function (keys: { Key }, data: buffer)
 		network.Relay.fireList(keys, data)
 		BytesOut += buffer.len(data) * #keys
@@ -339,7 +382,25 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 		local sent: number, pending: number = network.traffic(key)
 
 		return sent + pending
-	end, AntiEsp.isHidden, answers, asked)
+	end, AntiEsp.isHidden, answers, asked, AntiEsp.passed)
+
+	-- The frame caps, each off while its key is left out, set once here, since each relay setter starts the far rate's
+	-- count afresh. Relay.start reads neither of the relay's, and the far rate under load needs a budget set first
+	local npcBudget: number? = server.npcs.budget
+	if npcBudget ~= nil then
+		Npcs.setBudget(npcBudget)
+	end
+
+	AntiEsp.useWhole(server.antiEsp.whole == true)
+
+	if relay and relay.budget ~= nil then
+		Relay.setBudget(relay.budget)
+	end
+
+	local underLoad: Config.UnderLoad? = server.tiers.underLoad
+	if underLoad then
+		Relay.setUnderLoad(underLoad)
+	end
 
 	Taps.start({ layout = layout, reason = AntiEsp.reason, wearing = Relay.wearing })
 
@@ -419,6 +480,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 	local function finishRelay(): boolean
 		RelayFailure = ""
 
+		local dropped: boolean = false
 		local landed: boolean, finished: boolean? = xpcall(Relay.finish, keepFailure)
 		if landed and not finished then
 			if os.clock() - DispatchedAt < RelayTimeout then
@@ -426,6 +488,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 			end
 
 			RelayDropped += 1
+			dropped = true
 			landed = xpcall(Relay.drop, keepFailure)
 		end
 
@@ -435,6 +498,11 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 		-- None wait unless the relay stage threw before firing its acknowledgments, which then leave as they would have
 		local acked: boolean = xpcall(Characters.acks, keepFailure)
 		flush("flushFinish")
+
+		-- A round given up sent none of its workers' blocks, so it gives the send's time nothing
+		if not dropped then
+			measureSend(true)
+		end
 
 		if Taps.observing then
 			Taps.finish(Relayed)
@@ -448,7 +516,17 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 	end
 
 	Tick.start(shared.rates.simulation, server.catchUp, {
-		{ name = "decode", run = Characters.decode },
+		{
+			-- The history's send lag is the send's time while the split is on and the newest blocks went at a finish,
+			-- without which no tick defers, and 0 otherwise, from the first tick that finds it off. It is set after the
+			-- decode, so a refusal costs the tick nothing, and before any later stage reads the history's lag
+			name = "decode",
+			run = function (tick: number)
+				DecodedAt = os.clock()
+				Characters.decode(tick)
+				History.sendLag(Tick.splitOn() and SendOut and Send or 0)
+			end,
+		},
 		{ name = "simulate", run = Characters.simulate },
 		{ name = "npcs", run = Characters.npcs },
 		{
@@ -468,18 +546,45 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 			end,
 		},
 		{
-			-- At most once a Heartbeat, on the last of its ticks that starts a relay tick
+			-- At most once a Heartbeat, on the last of its ticks that starts a relay tick. A tick the split defers runs
+			-- only the early part on its own Heartbeat, and the run on the next
 			name = "relay",
 			latest = startsRelayTick,
+
+			-- Every OwnerState and feed sent with a flush of its own, its acknowledgments left queued for the run to
+			-- fire after the dispatch's flush, and Relayed left alone, so a run a later tick skips still counts
+			early = function (tick: number)
+				local relayTick: number? = relayTickOf(tick)
+				if not relayTick then
+					return
+				end
+
+				Owned = relayTick
+				RelayFailure = ""
+
+				local sent: boolean = xpcall(Characters.sendOwners, keepFailure, relayTick)
+				network.flush()
+
+				if not sent then
+					error(RelayFailure, 0)
+				end
+			end,
+
 			run = function (tick: number)
 				local relayTick: number? = relayTickOf(tick)
 				if not relayTick then
 					return
 				end
 
+				-- The early part sent OwnerStates for a tick whose run this one skipped, which no frame carries
+				if Owned > Relayed and Owned < relayTick and Taps.observing then
+					Taps.dropOwners()
+				end
+
 				RelaySkipped += relayTick - Relayed - 1
 				Relayed = relayTick
 				RelayFailure = ""
+				SendFrom = DecodedAt
 
 				local ran: boolean = xpcall(Characters.relay, keepFailure, relayTick, tick)
 				local landed: boolean, finished: boolean? = xpcall(Relay.finish, keepFailure)
@@ -504,6 +609,7 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 
 				local acked: boolean = xpcall(Characters.acks, keepFailure)
 				flush("flushTick")
+				measureSend(false)
 
 				-- After the flush, so a sink's work never holds back what the relay sent
 				if Taps.observing then
@@ -516,6 +622,9 @@ function Server.start(shared: Shared, server: ServerSettings): Self
 			end,
 		},
 	})
+
+	-- Engages only once the relay stage holds its tick for a round out on the workers, so it does nothing without one
+	Tick.useSplit(relay ~= nil and relay.split == true)
 
 	return setmetatable({ _network = network }, Server)
 end
@@ -767,15 +876,16 @@ function Server.addStage(self: Self, name: string, after: string, run: Run)
 	Tick.addStage(name, after, run)
 end
 
---- Tap 1: calls the sink after each relay run, after relevancy, the tiers,
+--- Tap 1: calls the sink after each relay run, after relevancy, the bands,
 --- the allocator and anti-ESP, with the run's relay tick and a frame of
 --- every block the relay sent the viewer in it, a spectating moderator's
 --- copies of its target's included, each record's 3-bit send reason, and
 --- the viewer's OwnerState while it owns a character, with its view lag
---- and the looks it stepped since the last frame. A relay tick a catch-up
---- Heartbeat runs no relay on gives no frame. Each sink runs under its own
---- xpcall and must not yield, and one whose viewer leaves is called no
---- more. Returns the closure that disconnects the sink
+--- and the looks it stepped since the last frame. A relay tick whose relay
+--- run is skipped, on a catch-up Heartbeat or as a spread tick a later tick
+--- came due over, gives no frame. Each sink runs under its own xpcall and
+--- must not yield, and one whose viewer leaves is called no more. Returns
+--- the closure that disconnects the sink
 --- @method observe
 --- @within Server
 --- @param viewer Player | Bot
@@ -791,8 +901,9 @@ end
 --- the culled players anti-ESP held back from it, never an Invisible or
 --- Parked one, with the look entries those blocks carry and each record's
 --- reason. While no one spectates the viewer each frame holds no block,
---- and a relay tick a catch-up Heartbeat runs no relay on gives no frame.
---- Returns the closure that disconnects the sink
+--- and a relay tick whose relay run is skipped, on a catch-up Heartbeat or
+--- as a spread tick a later tick came due over, gives no frame. Returns the
+--- closure that disconnects the sink
 --- @method observeWithheld
 --- @within Server
 --- @param viewer Player | Bot
@@ -906,17 +1017,28 @@ end
 --- anti-ESP stage's slices between ticks among them, the live characters,
 --- awake NPCs and bodies, the history's bytes, the largest and p95 traffic
 --- to a player over the last second, the sleeper and body pairs due and
---- waiting untested, and, as the change since the last read, the ticks run
---- and dropped, the relay ticks the relay skipped on catch-up Heartbeats,
---- stand-ins, late commands, records sent and cut, Tread's bytes out, the
---- OwnerStates sent in full and as acknowledgments, the compares against a
---- client's check and those that missed, anti-ESP's pair tests, the tests
---- that left a pair hidden, its fail-opens and its sleeper and body pair
---- tests, and the reports by kind. With
---- relay workers it adds the held relay ticks' finishes' last time and p95
+--- waiting untested, the smoothed seconds from a relay tick's decode to the
+--- flush that sent its blocks, and, as the change since the last read, the
+--- ticks run and dropped, the relay ticks the relay skipped on catch-up
+--- Heartbeats and as spread ticks a later tick came due over, stand-ins,
+--- late commands, records sent and cut, the players held outside their
+--- viewer's crowd cap, Tread's bytes out, the OwnerStates sent in full and
+--- as acknowledgments, the compares against a client's check and those
+--- that missed, anti-ESP's pair tests, the tests that left a pair hidden,
+--- its fail-opens, its sleeper and body pair tests and the rays it cast,
+--- the NPC steps npcs.budget made wait, the slices anti-ESP's deadline
+--- cut, those whose deadline had passed when their tests began or before
+--- their first test and, with antiEsp.whole on, also those whose timers,
+--- walks or drains it stopped, the viewer turns relay.budget left, the
+--- relay runs judged over it, those taken with the far rate under load
+--- holding the farthest band lowered, and the reports by kind. With relay
+--- workers it adds the held relay ticks' finishes' last time and p95
 --- and, as the change since the last read, the rounds given up past
 --- relay.timeout, and with relay.clocks on each of the relay's clock
---- sections' last time and p95. It holds no position and no name
+--- sections' last time and p95. With anti-ESP's workers it adds, as the
+--- change since the last read, their pair tests, their batches' busy time
+--- summed and the longest, and the batches that came late, were given up
+--- or failed. It holds no position and no name
 --- @method stats
 --- @within Server
 --- @return { [string]: any }
@@ -924,11 +1046,14 @@ end
 function Server.stats(self: Self): { [string]: any }
 	local now: number = os.clock()
 	local ran: number, dropped: number = Tick.counts()
-	local sent: number, cut: number = Relay.counts()
+	local sent: number, cut: number, _, crowdRest: number = Relay.counts()
 	local players: number, awake: number = Characters.counts()
 	local tests: number, hidden: number, failOpens: number = AntiEsp.counts()
 	local lyingTests: number, lyingWaiting: number = AntiEsp.lying()
 	local full: number, acks: number, checked: number, mismatches: number = Characters.owners()
+	local left: number, over: number, halved: number = Relay.caps()
+	local waited: number = Npcs.waited()
+	local sliceCuts: number = AntiEsp.cuts()
 
 	local stages: { [string]: Times } = {}
 	for _, stage: Tick.Stage in Tick.stages() do
@@ -965,6 +1090,7 @@ function Server.stats(self: Self): { [string]: any }
 		late = Late - ReadLate,
 		recordsSent = sent - ReadSent,
 		recordsCut = cut - ReadCut,
+		crowdRest = crowdRest - ReadCrowdRest,
 		bytesOut = BytesOut - ReadBytes,
 		ownerFull = full - ReadOwnerFull,
 		ownerAcks = acks - ReadOwnerAcks,
@@ -975,9 +1101,16 @@ function Server.stats(self: Self): { [string]: any }
 		antiEspFailOpens = failOpens - ReadFailOpens,
 		antiEspLyingTests = lyingTests,
 		antiEspLyingWaiting = lyingWaiting,
+		antiEspRays = AntiEsp.rays(),
+		antiEspCut = sliceCuts - ReadSliceCuts,
+		npcsWaited = waited - ReadWaited,
+		relayLeft = left - ReadLeft,
+		relayOver = over - ReadOver,
+		farHalved = halved - ReadHalved,
 		trafficLargest = largest,
 		trafficP95 = trafficP95,
 		historyBytes = History.bytes(),
+		relaySend = Send,
 		reports = reports,
 	}
 
@@ -988,6 +1121,15 @@ function Server.stats(self: Self): { [string]: any }
 		read.relayFinish = { last = finishes.last, p95 = percentile(times) }
 		read.relayDropped = RelayDropped - ReadRelayDropped
 		ReadRelayDropped = RelayDropped
+	end
+
+	-- With anti-ESP's workers, their tests, their busy time summed and longest, and the batches that came late
+	if AntiEspPooled then
+		local workerTests: number, busy: number, longest: number, lateBatches: number = AntiEspWorkers.figures()
+		read.antiEspWorkerTests = workerTests
+		read.antiEspWorkerBusy = busy
+		read.antiEspWorkerLongest = longest
+		read.antiEspLateBatches = lateBatches
 	end
 
 	-- With the relay's clocks, each section's newest run and p95 over its ring beside them
@@ -1008,6 +1150,7 @@ function Server.stats(self: Self): { [string]: any }
 	ReadLate = Late
 	ReadSent = sent
 	ReadCut = cut
+	ReadCrowdRest = crowdRest
 	ReadBytes = BytesOut
 	ReadOwnerFull = full
 	ReadOwnerAcks = acks
@@ -1017,6 +1160,11 @@ function Server.stats(self: Self): { [string]: any }
 	ReadHidden = hidden
 	ReadFailOpens = failOpens
 	ReadRelaySkipped = RelaySkipped
+	ReadWaited = waited
+	ReadSliceCuts = sliceCuts
+	ReadLeft = left
+	ReadOver = over
+	ReadHalved = halved
 
 	return read
 end

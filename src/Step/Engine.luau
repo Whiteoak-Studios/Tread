@@ -321,14 +321,8 @@ function Engine.casts(collision: GameCollision): Collision
 	return Engine.collision(include)
 end
 
---[[
-    Anti-ESP's line-of-sight test on the engine: true when a ray meets any
-    part of the include list, CanCollide off or on, or solid terrain in it,
-    never terrain water, so occluder-only parts the step's casts pass
-    through still block it
---]]
-
-function Engine.occlusion(include: { Instance }): (origin: vector, direction: vector) -> boolean
+-- The filter anti-ESP's rays cast with: the include list's parts, CanCollide off or on, and its solid terrain
+local function occlusionParams(include: { Instance }): RaycastParams
 	checkInclude(include, OCCLUSION_INCLUDE)
 
 	local params: RaycastParams = RaycastParams.new()
@@ -337,8 +331,40 @@ function Engine.occlusion(include: { Instance }): (origin: vector, direction: ve
 	params.RespectCanCollide = false
 	params.IgnoreWater = true
 
+	return params
+end
+
+--[[
+    Anti-ESP's line-of-sight test on the engine: true when a ray meets any
+    part of the include list, CanCollide off or on, or solid terrain in it,
+    never terrain water, so occluder-only parts the step's casts pass
+    through still block it
+--]]
+
+function Engine.occlusion(include: { Instance }): (origin: vector, direction: vector) -> boolean
+	local params: RaycastParams = occlusionParams(include)
+
 	return function (origin: vector, direction: vector): boolean
 		return Workspace:Raycast(Engine.toVector3(origin), Engine.toVector3(direction), params) ~= nil
+	end
+end
+
+--[[
+    The same test as occlusion, giving the part or terrain the ray met, or
+    nil when it met nothing, so anti-ESP can keep the box of a Block part
+    that blocked a pair
+--]]
+
+function Engine.occluder(include: { Instance }): (origin: vector, direction: vector) -> Instance?
+	local params: RaycastParams = occlusionParams(include)
+
+	return function (origin: vector, direction: vector): Instance?
+		local found: RaycastResult? = Workspace:Raycast(Engine.toVector3(origin), Engine.toVector3(direction), params)
+		if found then
+			return found.Instance
+		end
+
+		return nil
 	end
 end
 

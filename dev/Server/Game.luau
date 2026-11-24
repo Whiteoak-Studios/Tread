@@ -16,6 +16,7 @@ local Tread = require(Packages.Tread)
 
 local Network = require(ReplicatedStorage.Shared.Network.Server)
 
+local AntiEsp = require(Packages.Tread.Server.AntiEsp)
 local Relay = require(Packages.Tread.Server.Relay)
 
 local Corrections = require(ServerScriptService.Server.Corrections)
@@ -208,6 +209,10 @@ function Game.start()
 	if relay and relay.workers and relay.workers > 0 then
 		Relay.useWorkers(false)
 	end
+
+	-- Before the first slice, so anti-ESP casts in process unless a step benchmark's after half turns its workers on,
+	-- which start on whenever antiEsp.workers makes some
+	AntiEsp.useWorkers(false)
 
 	Shots.start(server, Shared, settings)
 	Requests.start(server)

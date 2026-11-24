@@ -1,7 +1,7 @@
 --[[
-    The relay's Actor workers: clones of the worker template in a folder
-    under ServerScriptService, each sent its setup once it reports bound,
-    then a round at a time, each round's result read back by its event
+    A pool of Actor workers, the relay's or anti-ESP's: clones of the worker
+    template in a folder under ServerScriptService, each sent its Remote's
+    setup once it reports bound, then a round at a time, read back by events
 --]]
 
 --!strict
@@ -151,7 +151,7 @@ function Pool.ready(self: Self): number
 	if not self._warned and self._readyCount < self._count and os.clock() - self._started >= READY_SECONDS then
 		self._warned = true
 
-		local ready: string = `Only {self._readyCount} of the relay's {self._count} workers`
+		local ready: string = `Only {self._readyCount} of the {self._count} workers in {self._folder.Name}`
 		warn(`{ready} were ready after {READY_SECONDS} s, so it goes on with those`)
 	end
 

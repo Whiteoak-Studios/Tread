@@ -17,7 +17,7 @@ local FLOOR: number = 1 -- A far floor low enough that the queue, not the floor,
 return function (): (boolean, string | nil)
 	local Harness: any = Environment.load(HARNESS)
 	local harness: any = Harness.new(false, function (_: any, server: any)
-		server.tiers.farFloor = FLOOR
+		server.tiers.bands[2].floor = FLOOR
 		server.shotNear.rate = FLOOR
 	end)
 

@@ -46,12 +46,13 @@ local Shadows: { [Key]: Copy } = {}
 -- its targets' views hold for it, as the front's own Turn keeps them by key
 local Leaving: { [Key]: boolean } = {}
 
--- The shared hand-in's header and marks, with anti-ESP's kind and team by slot for this run's bodies
+-- The shared hand-in's header, bands and marks, with anti-ESP's kind and team by slot for this run's bodies
 local Header: Shared = {
 	run = 0,
 	tick = 0,
 	elapsed = 0,
 	wire = 0,
+	tune = Wire.tuning(),
 	places = 0,
 	looks = {},
 	lookCount = 0,
@@ -90,6 +91,7 @@ local TurnObserved: boolean = false
 local Sent: number = 0
 local Cut: number = 0
 local Visited: number = 0
+local Rest: number = 0
 
 -- With relay.clocks on, each run's clocks, laid out as Wire.CLOCKS names them and made at setup, and when the part of
 -- the run being timed began
@@ -137,6 +139,7 @@ local function viewerAt(index: number): Viewer
 		received = 0,
 		target = nil,
 		look = nil,
+		zoomed = false,
 	}
 	Pool[index] = made
 
@@ -313,7 +316,7 @@ local function take(index: number)
 		back = hand.sequence
 	end
 
-	Turn.turn(viewer, back)
+	Turn.turn(viewer, back, hand.missed)
 end
 
 --[[
@@ -321,9 +324,11 @@ end
     then the calls queued between runs, both as the front's world stood
     when they were made, then the run's bodies, then the viewers handed in,
     whose watches and turns run as the front's serial run of the same list
-    would. A turn that throws is kept with its place and text and ends the
-    turns after it here. Gives the run's result, and while relay.clocks is
-    on its clocks, a buffer this worker keeps and rewrites every run
+    would, the run before's footsteps kept for a turn the hand-in marks as
+    following a run its viewer was left. A turn that throws is kept with
+    its place and text and ends the turns after it here. Gives the run's
+    result, and while relay.clocks is on its clocks, a buffer this worker
+    keeps and rewrites every run
 --]]
 
 function Remote.run(shared: buffer, own: buffer): (buffer, buffer?)
@@ -337,6 +342,19 @@ function Remote.run(shared: buffer, own: buffer): (buffer, buffer?)
 	-- A front that lost a result starts its copies again empty, so each view this worker runs from now goes whole
 	if Wire.resend(own) then
 		table.clear(Shadows)
+	end
+
+	-- A turn the hand-in marks as following a run its viewer was left hears the run before's footsteps, judged by that
+	-- run's Invisible marks, so they are kept before this run's change them
+	local count: number = Wire.readOwn(own, Hands)
+	local missed: boolean = false
+	for index: number = 1, count do
+		if Hands[index].missed then
+			missed = true
+			Turn.hush()
+
+			break
+		end
 	end
 
 	local header: Shared = Header
@@ -367,7 +385,10 @@ function Remote.run(shared: buffer, own: buffer): (buffer, buffer?)
 		lapped(AT.unpack)
 	end
 
-	Turn.begin(header.run, header.tick, header.elapsed, header.wire)
+	-- The run before's footsteps are kept while one of this run's turns follows a run its viewer was left, so long as
+	-- the world holds them, that run the last Turn filed, which a run that threw before filing never is
+	local carry: boolean = missed and Turn.filed() == header.run - 1
+	Turn.begin(header.run, header.tick, header.elapsed, header.wire, header.tune, carry)
 	Wire.readBodies(shared, at, World, header, Changes)
 
 	local places: number = header.places
@@ -393,7 +414,6 @@ function Remote.run(shared: buffer, own: buffer): (buffer, buffer?)
 
 	Observing = header.observing
 
-	local count: number = Wire.readOwn(own, Hands)
 	for index: number = 1, count do
 		local hand: Hand = Hands[index]
 		local viewer: Viewer = viewerAt(index)
@@ -405,6 +425,7 @@ function Remote.run(shared: buffer, own: buffer): (buffer, buffer?)
 		viewer.acknowledged = hand.acknowledged
 		viewer.received = hand.received
 		viewer.look = hand.look
+		viewer.zoomed = hand.zoomed
 
 		local target: number? = hand.target
 		if target ~= nil then
@@ -479,11 +500,12 @@ function Remote.run(shared: buffer, own: buffer): (buffer, buffer?)
 		lapped(AT.views)
 	end
 
-	local sent: number, cut: number, visited: number = Turn.counts()
-	local result: buffer = Wire.finish(Writer, sent - Sent, cut - Cut, visited - Visited, failed, failure)
+	local sent: number, cut: number, visited: number, rest: number = Turn.counts()
+	local result: buffer = Wire.finish(Writer, sent - Sent, cut - Cut, visited - Visited, rest - Rest, failed, failure)
 	Sent = sent
 	Cut = cut
 	Visited = visited
+	Rest = rest
 
 	if not clocked then
 		return result, nil

@@ -1,7 +1,7 @@
 --[[
     The server's NPCs: bodies with no owning client, each in a slot of its
-    own, stepped through the shared step from the last command the server
-    issued it, in slot order in a tick stage of their own
+    own, stepped from the server's last command in a tick stage of their
+    own, in slot order, or round from a cursor under a time budget
 --]]
 
 --!strict
@@ -20,6 +20,7 @@ local State = require(script.Parent.Parent.Step.State)
 local Step = require(script.Parent.Parent.Step)
 
 local PLAY_BOUND: number = Constants.PLAY_BOUND
+local EXACT_EVERY: number = Constants.EXACT_EVERY
 local LAST_TICK: number = 2 ^ 16 - 1 -- The top of the u16 a tick and a command number ride in, wrapped by the tick loop
 local STAGE: string = "npcs" -- The tick stage the NPCs step in, which a body's failed step is reported under
 
@@ -55,6 +56,8 @@ type Fields = {
 	_command: Command, -- What it steps from, its presses kept until a step applies them
 	_awake: boolean,
 	_live: boolean, -- Until destroy
+	_waited: boolean, -- Its last turn in a budgeted walk was a wait, so its next turn in one steps whatever the time
+	_owesExact: boolean, -- That wait fell on a tick of the step's every-tenth exact check, which its next step runs
 }
 
 local Bodies: { Npc } = {} -- Every live NPC, in slot order
@@ -62,6 +65,11 @@ local Active: World? = nil -- The server's world the NPCs step in, once Npcs.sta
 local OnLanded: Landed? = nil
 local Before: State = State.new() -- A body's state before its step, put back when the step throws
 local Current: number = 0 -- The slot being stepped, which a failed step's warning names
+
+local Clock: () -> number = os.clock -- Seconds, which a budgeted walk is timed on
+local Budget: number? = nil -- Seconds a tick's walk may take before an NPC waits, nil while the cap is off
+local Cursor: number = 0 -- The slot a budgeted walk starts at, that of the first NPC that waited in the last
+local Waited: number = 0 -- The NPC steps a budget has made wait since start
 
 local Npcs = {}
 
@@ -82,21 +90,64 @@ end
 
 --[[
     Starts the NPCs on the server's world, the one World.new built for the
-    players, and the callback each landing that counted is handed to. It
-    runs once, before the first NPC is made
+    players, the callback each landing that counted is handed to, and the
+    clock in seconds a budget is timed on, os.clock by default, so a case
+    can set the time by hand. It runs once, before the first NPC is made
 --]]
 
-function Npcs.start(world: World, landed: Landed)
+function Npcs.start(world: World, landed: Landed, clock: (() -> number)?)
 	if Active then
 		error("Npcs.start runs once, and it has already run", 2)
 	elseif type(world) ~= "table" then
 		error(`Npcs.start takes the server's World, not a {typeof(world)}`, 2)
 	elseif type(landed) ~= "function" then
 		error(`Npcs.start takes the landing callback as a function, not a {typeof(landed)}`, 2)
+	elseif clock ~= nil and type(clock) ~= "function" then
+		error(`Npcs.start takes the clock as a function giving seconds, not a {typeof(clock)}`, 2)
 	end
 
 	Active = world
 	OnLanded = landed
+	Clock = clock or os.clock
+end
+
+--[[
+    Sets the seconds of the clock a tick's walk of the NPCs may take before
+    the rest wait a tick, or turns the cap off with nil, so the walk reads
+    no clock and every awake NPC steps every tick. Turned off, it drops every
+    exact check a wait left owed, which a walk with no cap never runs
+--]]
+
+function Npcs.setBudget(seconds: number?)
+	if seconds ~= nil and (type(seconds) ~= "number" or not finite(seconds) or seconds < 0) then
+		error(`Npcs.setBudget takes nil or a finite number of seconds of 0 or more, not {seconds}`, 2)
+	end
+
+	Budget = seconds
+
+	if seconds == nil then
+		for _, npc: Npc in Bodies do
+			npc._owesExact = false
+		end
+	end
+end
+
+--[[
+    The seconds a tick's walk of the NPCs may take before the rest wait, or
+    nil while the cap is off
+--]]
+
+function Npcs.budget(): number?
+	return Budget
+end
+
+--[[
+    How many NPC steps a budget has made wait since start, a running count
+    the server's stats read as its change since the last read
+--]]
+
+function Npcs.waited(): number
+	return Waited
 end
 
 -- A command with no input, looking along facing, its presses all off
@@ -174,6 +225,8 @@ function Npcs.create(position: vector, facing: number): Npc
 		_command = newCommand(facing),
 		_awake = true,
 		_live = true,
+		_waited = false,
+		_owesExact = false,
 	}, Npc)
 
 	Range.set(slot, state.position)
@@ -305,12 +358,13 @@ end
 
 --[[
     One NPC's step from its command, numbered by the tick, under its own
-    xpcall. A step that throws puts the body back as it was, keeps its
-    presses for the next step and is reported; one that runs clears them,
-    moves the range query, and reports its stuck depth and its landing
+    xpcall, running depenetration's exact check whatever the tick when
+    exact is set. A step that throws puts the body back as it was, keeps
+    its presses for the next step and is reported; one that runs clears
+    them, moves the range query, and reports its stuck depth and its landing
 --]]
 
-local function advance(npc: Npc, world: World, tick: number)
+local function advance(npc: Npc, world: World, tick: number, exact: boolean?)
 	local state: State = npc._state
 	local command: Command = npc._command
 	command.number = tick
@@ -318,7 +372,8 @@ local function advance(npc: Npc, world: World, tick: number)
 	State.copy(state, Before)
 	Current = npc.slot
 
-	local stepped: boolean, landed: number?, stuck: number? = xpcall(Step.advance, warnFailure, state, command, world)
+	local stepped: boolean, landed: number?, stuck: number? =
+		xpcall(Step.advance, warnFailure, state, command, world, exact)
 	if not stepped then
 		State.copy(Before, state)
 		Hulls.moved(world, state)
@@ -348,9 +403,61 @@ local function advance(npc: Npc, world: World, tick: number)
 end
 
 --[[
+    A tick's walk under a budget: in slot order from the cursor, round to
+    it, an NPC whose last turn in a walk was a wait steps whatever the time,
+    and any other waits once the budget's seconds have passed since the walk
+    began, keeping its presses. One that waits on a tick of the step's
+    every-tenth exact check owes it, and its next step runs it and clears
+    the debt, a step that throws included. The first to wait is where the
+    next starts
+--]]
+
+local function walk(bodies: { Npc }, world: World, tick: number, budget: number)
+	local count: number = #bodies
+	local first: number = 1
+	for index: number = 1, count do
+		if bodies[index].slot >= Cursor then
+			first = index
+			break
+		end
+	end
+
+	local began: number = Clock()
+	local spent: boolean = false
+	local cursor: number? = nil
+
+	for offset: number = 0, count - 1 do
+		local npc: Npc = bodies[(first + offset - 1) % count + 1]
+		if npc._live and npc._awake then
+			-- Once spent it stays spent, so the clock is read no more that walk
+			if not npc._waited then
+				spent = spent or Clock() - began >= budget
+			end
+
+			if npc._waited or not spent then
+				local owed: boolean = npc._owesExact
+				npc._waited = false
+				npc._owesExact = false
+				advance(npc, world, tick, owed)
+			else
+				npc._waited = true
+				npc._owesExact = tick % EXACT_EVERY == 0
+				Waited += 1
+				cursor = cursor or npc.slot
+			end
+		end
+	end
+
+	if cursor then
+		Cursor = cursor
+	end
+end
+
+--[[
     The npcs stage of one tick, which runs after every player has stepped:
     each awake NPC in slot order, each under its own xpcall, so one whose
-    game rules throw is left unstepped and the rest still step
+    game rules throw is left unstepped and the rest still step. With a
+    budget set, the walk rotates and the NPCs left wait a tick
 --]]
 
 function Npcs.step(tick: number)
@@ -363,7 +470,15 @@ function Npcs.step(tick: number)
 	Hulls.refresh(world)
 
 	-- A copy, so a callback that makes an NPC mid-stage waits for the next tick and one it destroys is skipped
-	for _, npc: Npc in table.clone(Bodies) do
+	local bodies: { Npc } = table.clone(Bodies)
+	local budget: number? = Budget
+	if budget then
+		walk(bodies, world, tick, budget)
+
+		return
+	end
+
+	for _, npc: Npc in bodies do
 		if npc._live and npc._awake then
 			advance(npc, world, tick)
 		end

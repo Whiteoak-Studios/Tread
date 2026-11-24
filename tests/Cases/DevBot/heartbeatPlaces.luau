@@ -1,7 +1,7 @@
 --[[
     The bot harness takes each Heartbeat the tick loop's ring holds since its
     last read, across the wrap, with the bots' stage's time in it, counts the
-    ones lost, places each in its tick and counts the relay's rounds
+    ones lost, places each in its tick, counts the rounds and finds ticks
 --]]
 
 --!strict
@@ -18,6 +18,11 @@ local FIRST: number = 4 -- The oldest the ring holds
 -- its release; three with none; a serial tick; a round out; still held; its release; two with none
 local FLAGS: { number } = { 0, 3, 12, 0, 0, 0, 1, 3, 6, 12, 0, 0 }
 local PLACES: string = "0,1,2,3,4,4,1,1,2,3,4,4"
+
+-- A ring of 4 holding Heartbeats 3 to 6 by index (b - 1) % 4 + 1: 5 ticked, 6 none, 3 ticked and held, 4 released
+local SMALL: { number } = { 1, 0, 3, 12 }
+local SMALL_COUNT: number = 6
+local TICKED: string = "3,5"
 
 -- The bots' stage's runs, the Heartbeat each came in and its time, in a full ring of 5 whose newest is at index 5: one
 -- before the readout's last read, then one at the first release, one at the serial tick, and two at the second
@@ -96,6 +101,20 @@ return function (): (boolean, string | nil)
 	local inTime: number, late: number = Run.rounds(readout.flags)
 	if inTime ~= 1 or late ~= 1 then
 		return false, `The rounds read {inTime} in by the next Heartbeat and {late} later, not 1 and 1`
+	end
+
+	-- 6) Which Heartbeats by count began a tick, read across a small ring's wrap, whose slots for the counts it no
+	-- longer or not yet holds carry a tick of another count
+	local small: any = { times = table.create(#SMALL, 0), flags = SMALL, held = #SMALL, head = 2, count = SMALL_COUNT }
+	local ticked: { string } = {}
+	for count: number = 0, SMALL_COUNT + 1 do
+		if Run.ticked(small, count) then
+			table.insert(ticked, tostring(count))
+		end
+	end
+
+	if table.concat(ticked, ",") ~= TICKED then
+		return false, `The Heartbeats that began a tick read {table.concat(ticked, ",")}, not {TICKED}`
 	end
 
 	return true, nil

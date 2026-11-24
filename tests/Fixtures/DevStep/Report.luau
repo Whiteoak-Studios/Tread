@@ -1,7 +1,7 @@
 --[[
     A step benchmark half's Output as a live server's Spread150 half on the
-    relay's workers prints it, under the half's own name, with any relay
-    clocks, and figures the size its table rows print at
+    relay's workers prints it, under the half's own name, with its real
+    player and any relay clocks, and figures the size its rows print at
 --]]
 
 --!strict
@@ -58,8 +58,9 @@ local Report = {}
 
 --[[
     One half's lines in the order a run prints them, its calibration, its
-    start, mode, server, Heartbeat, tick, counts and any clocks lines, its
-    group's and its summary, the clocks given by name in the relay's order
+    start, mode, server, Heartbeat, tick, counts, real player and any
+    clocks lines, its group's and its summary, the clocks given by name in
+    the relay's order
 --]]
 
 function Report.half(run: string, clocks: { string }?): { string }
@@ -79,7 +80,7 @@ function Report.half(run: string, clocks: { string }?): { string }
 		"0 NPCs awake",
 		"0 sleepers made of 0",
 		"its areas moved 3835",
-		"0.51953125",
+		"0.5",
 		"-70",
 	}
 
@@ -137,6 +138,7 @@ function Report.half(run: string, clocks: { string }?): { string }
 		table.concat(heartbeats, SEPARATOR),
 		table.concat(ticks, SEPARATOR),
 		table.concat(counts, SEPARATOR),
+		`{label} real player: 12.34 studs from the load's point as the window opened, 456.78 walked in it`,
 	}
 
 	local summary: { string } = table.clone(SUMMARY)
@@ -159,13 +161,17 @@ function Report.half(run: string, clocks: { string }?): { string }
 end
 
 --[[
-    A half's figures at the size the live half's lines give them, with each
-    relay clock named at its p50 and p95 when clocks are given
+    A half's figures at the size the live half's lines give them, with a
+    live step 1 half's OwnerState sends and checks, step 2's and step 3's at
+    the most digits a 150-player half could print, and each relay clock
+    named at its p50 and p95 when clocks are given
 --]]
 
 function Report.figures(clocks: { string }?): { [string]: number }
 	local figures: { [string]: number } = {
 		calibration = 13.31,
+		playerFrom = 12.34,
+		playerMoved = 456.78,
 		heartbeats = 59.97,
 		fps = 53.24,
 		frameP50 = 16.68,
@@ -174,7 +180,14 @@ function Report.figures(clocks: { string }?): { [string]: number }
 		treadP95 = 14.129,
 		botsP50 = 0,
 		botsP95 = 0,
-		gap = 5.311,
+		place1P50 = 12.825, -- As the live half's line by place gives each of its first three places
+		place1P95 = 14.129,
+		place2P50 = 3.881,
+		place2P95 = 4.136,
+		place3P50 = 2.000,
+		place3P95 = 2.019,
+		tickFrameP50 = 16.712,
+		tickFrameP95 = 19.876,
 		tickP50 = 12.687,
 		tickP95 = 14.028,
 		decode = 1.328,
@@ -183,13 +196,35 @@ function Report.figures(clocks: { string }?): { [string]: number }
 		history = 0.346,
 		relay = 4.325,
 		finish = 1.883,
+		relaySend = 116.667, -- Milliseconds, a slow server's frames of about 100 ms each
 		antiEsp = 2.008,
+		antiEspTests = 331.95,
+		antiEspRays = 10441.2,
+		antiEspHidden = 43120,
+		antiEspFailOpens = 0,
+		antiEspWorkerTests = 1740000,
+		antiEspWorkerBusy = 85.125,
+		antiEspWorkerLongest = 6.75,
+		antiEspLateBatches = 25,
 		dropped = 0,
 		relaySkipped = 0,
+		deferred = 1000, -- Every tick of a 50 s window at 20 a second
+		fallbacks = 1000,
+		npcsWaited = 16000, -- Half of 32 awake NPCs every tick of the window, since none waits two ticks running
+		antiEspCut = 3000, -- Every slice of a 50 s window at 60 Heartbeats a second
+		relayLeft = 37000, -- A quarter of 150 viewers, rounded down, every relay run of the window
+		relayOver = 1000,
+		farHalved = 1000,
 		records = 1427.1,
+		recordsCut = 0,
+		crowdRest = 17550, -- Pairs past a 32-player cap: 150 viewers, each with 117 of its 149 candidates past it
 		bytes = 20782.85,
 		viewerP50 = 2674,
 		viewerP95 = 3052,
+		ownerFull = 152400,
+		ownerAcks = 152550,
+		ownerChecked = 1017,
+		ownerMismatches = 380,
 		skipped = 14250,
 	}
 

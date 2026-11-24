@@ -11,7 +11,6 @@ local Rig = require("./Rig")
 local StandIn = require("../Relay/StandIn")
 
 local POOL: string = "ReplicatedStorage.Packages.Tread.Server.RelayWorkers.Pool"
-local SLICE: number = 1 -- Seconds a slice may take, so every pair due is tested in the slice it is due in
 local FAIL_OPEN: number = 1000 -- Seconds a hidden pair may go untested, so none fails open while a case runs
 local WALL_SIZE: vector = vector.create(1, 40, 40) -- Tall and wide enough to block every ray across it
 local WALL_X: number = -3 -- Between the client and the bot named Hidden, and between Hidden and Seen
@@ -54,12 +53,12 @@ export type Side = {
 }
 
 --[[
-    A side on the example's tables with every slice given time for every
-    pair due and no fail-open, relaying in process or, given a relay table,
-    on that many stand-in workers with its timeout, with the relay's clocks
-    on given clocks and any other settings tweak changes, every character
-    built, the moderator watching the client and every viewer's frames
-    observed
+    A side on the example's tables with the rig's slice, which gives every
+    pair due its time, and no fail-open, relaying in process or, given a
+    relay table, on that many stand-in workers with its timeout, with the
+    relay's clocks on given clocks and any other settings tweak changes,
+    every character built, the moderator watching the client and every
+    viewer's frames observed
 --]]
 
 function Lockstep.side(relay: Relay?, clocks: boolean?, tweak: ((settings: any) -> ())?): Side
@@ -78,7 +77,6 @@ function Lockstep.side(relay: Relay?, clocks: boolean?, tweak: ((settings: any) 
 	end
 
 	local rig: Rig.Rig = Rig.new(function (_: any, settings: any)
-		settings.antiEsp.slice = SLICE
 		settings.antiEsp.failOpen = FAIL_OPEN
 
 		if relay then

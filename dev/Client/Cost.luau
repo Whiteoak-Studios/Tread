@@ -573,8 +573,8 @@ local function inputOf(): string
 	return "mouse"
 end
 
--- The remote rigs drawn now
-local function counted(): number
+-- The remote rigs drawn now, which the parallel probes stand in for too
+function Cost.drawn(): number
 	return Count
 end
 
@@ -626,7 +626,7 @@ local function changed()
 	end
 
 	if type(label) == "string" and not Open then
-		Open = Cost.open(label, MODULES, os.clock, counted, gcinfo)
+		Open = Cost.open(label, MODULES, os.clock, Cost.drawn, gcinfo)
 		Ending = task.delay(LONGEST, expire)
 	end
 end

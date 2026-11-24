@@ -90,6 +90,8 @@ local MAX_WATCHERS: number = 31 -- Moderators one target's blocks are copied to:
 local CHANGE_HEADER_BYTES: number = 4 -- A change record's slot and generation, base and mask, before its fields
 local CHANGE_DEPTH: number = 32 -- Relay ticks of records a client keeps a slot, so a change's base is 1 to 31
 local TAP_BLOCK_BYTES: number = 2 ^ 16 - 1 -- A tap frame's block, its every change expanded, up to its u16 length's top
+local MAX_BANDS: number = 8 -- The most distance bands the relay takes, so the edges a pair is inside fit 3 bits
+local MAX_CROWD: number = 2 ^ 16 - 1 -- The largest crowd cap, whose size the u16 the relay hands its workers holds
 
 -- Anti-ESP's tests, whose ray tables are sized to the most rays each kind of pair casts
 local PLAYER_RAYS: number = 6 -- A player pair's: the head's top, either shoulder, the torso's center, either lower leg
@@ -180,6 +182,8 @@ return {
 	CHANGE_HEADER_BYTES = CHANGE_HEADER_BYTES,
 	CHANGE_DEPTH = CHANGE_DEPTH,
 	TAP_BLOCK_BYTES = TAP_BLOCK_BYTES,
+	MAX_BANDS = MAX_BANDS,
+	MAX_CROWD = MAX_CROWD,
 	PLAYER_RAYS = PLAYER_RAYS,
 	LYING_RAYS = LYING_RAYS,
 	MAX_SLOT_ENTRIES = MAX_SLOT_ENTRIES,

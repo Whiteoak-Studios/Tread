@@ -1,7 +1,7 @@
 --[[
     The relay cases' harness: the relay and its taps started on the example's
-    tables, bodies in the slot table, and viewers whose clients read every
-    block and withheld block they are sent, each change against what they kept
+    tables and a stand-in clock, bodies in the slot table, and viewers whose
+    clients read every block and withheld block they are sent
 --]]
 
 --!strict
@@ -101,6 +101,15 @@ type Network = {
 	player: any,
 }
 
+-- One call of anti-ESP's passed port for a viewer the relay's budget left: the viewer table, its key, and its slots
+-- copied as they came
+export type Passed = {
+	viewer: Viewer,
+	key: any,
+	slots: { number },
+	count: number,
+}
+
 type Fields = {
 	layout: Fields.Layout,
 	limits: { lean: number, headCone: number },
@@ -119,6 +128,10 @@ type Fields = {
 	pool: any, -- The stand-in pool the relay's workers run in, nil without workers
 	kinds: buffer, -- Anti-ESP's answers' kinds and teams, the same every run
 	teams: buffer,
+	reads: number, -- The stand-in clock's reads since start, each moving it on by step from now
+	now: number,
+	step: number,
+	passed: { Passed }, -- Each call of the passed port this run, in call order
 }
 
 local function seen(): Seen
@@ -145,10 +158,18 @@ end
     giving whatever reason sets. With network, the first viewer is the
     mock's player and its blocks cross Volt.mock. With workers, the relay
     makes that many in the stand-in pool an override of RelayWorkers.Pool
-    gives, which keeps the pool it made as made, and each run brings them in
+    gives, which keeps the pool it made as made, and each run brings them in.
+    The relay's clock is the harness's, which moves on by step at each read
+    and reads no wall clock, and its passed port keeps each call, unless
+    portless starts the relay with none
 --]]
 
-function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ())?, workers: number?): Self
+function Harness.new(
+	network: boolean?,
+	tweak: ((shared: any, server: any) -> ())?,
+	workers: number?,
+	portless: boolean?
+): Self
 	local shared = Example.shared()
 	local server = Example.server()
 	if tweak then
@@ -189,23 +210,53 @@ function Harness.new(network: boolean?, tweak: ((shared: any, server: any) -> ()
 		pool = nil :: any,
 		kinds = kinds,
 		teams = teams,
+		reads = 0,
+		now = 0,
+		step = 0,
+		passed = {} :: { Passed },
 	}, Harness)
 
-	Relay.start({ shared = shared, server = server, layout = layout }, function (keys: { any }, data: buffer)
-		self:_deliver(keys, data)
-	end, function (keys: { any }, data: buffer)
-		self:_withhold(keys, data)
-	end, function (_: any): number
-		return self.traffic
-	end, function (viewer: Viewer, slot: number): boolean
-		local hidden: { [number]: boolean }? = self.hidden[viewer.key]
+	local function clock(): number
+		self.reads += 1
+		self.now += self.step
 
-		return hidden ~= nil and hidden[slot] == true
-	end, function (viewers: { Viewer }): any
-		return self:_answers(viewers)
-	end, function (_: Viewer, _: { number }, _: number)
-		error("The harness's anti-ESP sets no quiet bit, so the relay hands it no mark")
-	end)
+		return self.now
+	end
+
+	local function passed(viewer: Viewer, slots: { number }, count: number)
+		local copied: { number } = table.move(slots, 1, count, 1, {})
+		table.insert(self.passed, { viewer = viewer, key = viewer.key, slots = copied, count = count })
+	end
+
+	local port: ((viewer: Viewer, slots: { number }, count: number) -> ())? = passed
+	if portless then
+		port = nil
+	end
+
+	Relay.start(
+		{ shared = shared, server = server, layout = layout, clock = clock },
+		function (keys: { any }, data: buffer)
+			self:_deliver(keys, data)
+		end,
+		function (keys: { any }, data: buffer)
+			self:_withhold(keys, data)
+		end,
+		function (_: any): number
+			return self.traffic
+		end,
+		function (viewer: Viewer, slot: number): boolean
+			local hidden: { [number]: boolean }? = self.hidden[viewer.key]
+
+			return hidden ~= nil and hidden[slot] == true
+		end,
+		function (viewers: { Viewer }): any
+			return self:_answers(viewers)
+		end,
+		function (_: Viewer, _: { number }, _: number)
+			error("The harness's anti-ESP sets no quiet bit, so the relay hands it no mark")
+		end,
+		port
+	)
 
 	if workers then
 		local Pool: any = require(Tread.Server.RelayWorkers.Pool)
@@ -382,6 +433,7 @@ function Harness.run(self: Self)
 	self.tick += 1
 	self.sends = {}
 	self.withheldSends = {}
+	self.passed = {}
 
 	for _, client: Client in self.clients do
 		client.seen = seen()
@@ -662,6 +714,7 @@ end
 Harness.Relay = Relay
 Harness.Slots = Slots
 Harness.Taps = Taps
+Harness.Turn = require(Tread.Server.Relay.Turn) -- The relay's own in-process core, whose world a case may read
 
 export type Harness = Self
 type Self = typeof(setmetatable({} :: Fields, Harness))

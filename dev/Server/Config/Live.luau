@@ -33,7 +33,16 @@ return {
 	},
 
 	-- The single runs whose report is saved too, as each of Run all's is, under the run's start time and its name
-	saved = { "BenchStep", "BenchStepNoise" },
+	saved = {
+		"BenchStep",
+		"BenchStepNoise",
+		"BenchStepMemory",
+		"BenchStepSplit",
+		"BenchStepNpcs",
+		"BenchStepLevers",
+		"ClientParallel",
+		"ParallelFrames",
+	},
 
 	-- The Run all queue's reports, each saved to the experience's DataStore under the queue's start time
 	queue = {

@@ -27,10 +27,14 @@ local SEQUENCES: number = WRAP - Constants.FIRST_SEQUENCE -- A viewer's sequence
 local SECTION_LIMIT: number = 2 ^ 8 - 1 -- The most entries a block's u8 counts hold
 local FRAME_BYTES: number = 3 -- Volt's event id and the buffer's u16 length in front of each block it sends
 
--- A target's record goes on each of this many tier ticks after it stops changing, then once every STILL_SECONDS
+-- A target's record goes on each of this many band ticks after it stops changing, then once every STILL_SECONDS
 -- while it stays still, so a lost last update freezes a pose for at most that long
 local REST_REPEATS: number = 3
 local STILL_SECONDS: number = 1
+
+-- The most band ticks a pair's credit holds once a turn that follows a missed one adds every relay tick since: one
+-- owed, as a record cut keeps, and this run's, the most any other turn leaves it with
+local MOST_CREDIT: number = 2
 
 -- What a viewer's acknowledgment can clear: the blocks it can still name and the pending entries and records they
 -- carried, each logged as its slot times ENTRY_PARTS plus its part
@@ -57,9 +61,9 @@ local STEP_START: number = 256 -- The steps one run holds before the front grows
 local LAP: { [string]: number } = { head = 0, gather = 1, measure = 2, settle = 3, schedule = 4, place = 5, send = 6 }
 local LAPS: number = 7 -- The parts LAP numbers
 
--- What a viewer holds for a slot, a bit each
+-- What a viewer holds for a slot, a bit each but the last three, which count the band edges the slot is inside, from
+-- the outermost in, so 0 is the farthest band; an NPC's one edge is npcs.near. Bit 1 is free
 local RELEVANT: number = 2 ^ 0 -- Inside its relevancy for the slot's kind
-local NEAR: number = 2 ^ 1 -- Inside the near tier
 local CULLED: number = 2 ^ 2 -- Relevant and hidden by anti-ESP this run, so its steps may be heard
 local SENT: number = 2 ^ 3 -- Currently sent: from the tick its reveal is first carried until its hide is
 local REVEAL: number = 2 ^ 4 -- A reveal pending
@@ -71,6 +75,9 @@ local HELD: number = 2 ^ 9 -- The held item pending
 local HELD_CARRIED: number = 2 ^ 10
 local OWN: number = 2 ^ 11 -- The viewer's own character, whose looks it is given and which it is never sent
 local OUTSIDE: number = 2 ^ 12 -- Held to the out-of-view rate on its last run, so it is owed a record once it isn't
+local EDGES_AT: number = 13 -- The first of the edge count's bits
+local EDGES_WIDTH: number = 3 -- Its bits, which count up to Constants.MAX_BANDS less 1 edges
+local EDGES: number = (2 ^ EDGES_WIDTH - 1) * 2 ^ EDGES_AT -- All of them, cleared whenever relevancy is
 local LOOKS: number = LOOK + LOOK_CARRIED + HELD + HELD_CARRIED
 local STRETCH: number = SENT + REVEAL + HIDE + VISIBILITY_CARRIED + LOOKS -- All a stretch of being sent holds
 local KEEP: number = RELEVANT + SENT + REVEAL + HIDE + LOOK + HELD + OWN -- Any of these keeps a slot tracked
@@ -99,11 +106,12 @@ type Key = Player | Bot
 export type Viewer = {
 	key: Key, -- The player or bot, a handle a turn keeps its view under and hands the ports, never reading it
 	slot: number?, -- Its own character's slot, nil while it has none
-	position: vector, -- Where its relevancy, tiers and earshot are measured from
+	position: vector, -- Where its relevancy, bands and earshot are measured from
 	acknowledged: number, -- The newest relay sequence its client received, 0 for none
 	received: number, -- The mask of the 16 sequences before that one, bit 0 the one just before
 	target: Key?, -- The viewer it spectates, whose blocks it gets copies of in place of its own; nil for none
 	look: vector?, -- The newest look its client sent, a unit vector on the ground; nil before any
+	zoomed: boolean?, -- Whether its players go at the nearest band's rates wherever they stand; nil as false
 }
 
 -- The out-of-view rate as a turn reads it: the rate, the radius squared, and the cone's half-angle as its cosine
@@ -117,19 +125,13 @@ export type OutOfView = {
 
 -- The game's settings as a turn reads them, worked out by the front once at start: the radii each viewer's own
 -- render distance caps in studs, the rest of each distance squared, each rate in hertz and each budget in bytes a
--- second
+-- second. The bands come with each run, in a Tuning
 export type Settings = {
 	relayRate: number,
 	enter: number, -- relevancy.enter
 	leave: number, -- relevancy.leave
 	sleepers: number, -- sleepers.radius
 	npcs: number, -- npcs.range
-	nearEnterSquared: number,
-	nearLeaveSquared: number,
-	nearAim: number,
-	nearFloor: number,
-	farAim: number,
-	farFloor: number,
 	weightNear: number,
 	weightFar: number,
 	weightShooter: number,
@@ -143,6 +145,21 @@ export type Settings = {
 	outOfView: OutOfView?, -- Nil while the game gives none, so no player is held to it
 	changes: boolean, -- Whether records go as changes
 	clocks: boolean, -- Whether each turn times its parts, as relay.clocks says
+}
+
+-- The distance bands as a run's turns read them, which the front works out from tiers.bands and tiers.edges and hands
+-- in each run: the band count, the crowd cap's flags, size, rate and floor, all 0 while there is none, each band's aim
+-- and floor in hertz, nearest first, and each edge's enter and leave in studs squared, the nearest first
+export type Tuning = {
+	bands: number,
+	flags: number,
+	crowdSize: number,
+	crowdRate: number,
+	crowdFloor: number,
+	aims: { number },
+	floors: { number },
+	enters: { number },
+	leaves: { number },
 }
 
 -- Everything a turn calls outside itself, handed in once at start
@@ -159,9 +176,11 @@ export type Ports = {
 	withheld: (target: Key, block: Block.Block, data: buffer) -> (), -- And of a withheld block
 }
 
--- This run's footsteps: whose each is, its kind, where it fell, and its entry, encoded once for every viewer
+-- This run's footsteps: whose each is, its kind, where it fell, and its entry, encoded once for every viewer. Past the
+-- count, carried more of the run before's, kept for a turn that follows a run its viewer was left
 export type Steps = {
 	count: number,
+	carried: number,
 	capacity: number, -- The steps the buffers hold before they grow
 	slots: buffer, -- u16
 	kinds: buffer, -- u8: its kind's code from 1
@@ -234,7 +253,7 @@ export type Withheld = {
 	heldSent: buffer,
 	lookFrom: buffer, -- u16: the copy the pending look first rode beside since it last changed
 	heldFrom: buffer,
-	aim: buffer, -- f32: the tier ticks it is owed at the target's aim rate
+	aim: buffer, -- f32: the band ticks it is owed at its band's aim rate
 }
 
 -- What the relay keeps for one viewer: the slots it holds anything for, each field a buffer by slot, the blocks
@@ -245,6 +264,7 @@ export type View = {
 	sequence: number, -- The message sequence its next block takes
 	newest: number, -- The sequence of the last block it was sent, 0 before the first
 	turn: number, -- The last run it was handed in with no target, so its own view ran
+	turned: number, -- The relay tick, unwrapped, its own last turn ran on, 0 before the first
 	own: number?, -- Its own character's slot when it last ran
 	tracked: { number },
 	places: buffer, -- u16: each tracked slot's place in tracked, 0 for none
@@ -259,7 +279,7 @@ export type View = {
 	repeats: buffer, -- u8: the rest repeats left
 	lastRecord: buffer, -- u32: the relay tick its last record went in, unwrapped, 0 for none
 	shotUntil: buffer, -- u32: the last relay tick a shot near it raises that shooter's rate
-	aim: buffer, -- f32: the tier ticks it is owed at the target's aim rate
+	aim: buffer, -- f32: the band ticks it is owed at the target's aim rate
 	floor: buffer, -- f32: and at its floor rate
 	baseRuns: buffer, -- u32: the newest run whose record every recipient acknowledged, 0 for none; empty unless changes
 	baseFloor: number, -- The first run whose blocks may give a baseline, so one acknowledged before it is never used
@@ -311,12 +331,7 @@ local Radii: { enter: number, leave: number, sleepers: number, npcs: number, gri
 		visited = 0,
 	},
 }
-local NearEnterSquared: number = 0
-local NearLeaveSquared: number = 0
-local NearAim: number = 0
-local NearFloor: number = 0
-local FarAim: number = 0
-local FarFloor: number = 0
+local Tune: Tuning -- This run's bands, set by each begin
 local WeightNear: number = 0
 local WeightFar: number = 0
 local WeightShooter: number = 0
@@ -339,7 +354,7 @@ local Run: number = 0 -- The relay runs so far, which every timing but those in 
 local RunTick: number = 0 -- The relay tick of this run, or the last, unwrapped, which the timings in seconds count in
 local Elapsed: number = 1 -- The relay ticks since the run before, more than 1 after runs a catch-up skipped
 local TickWire: number = 0 -- The relay tick this run's blocks carry, a u16
-local RecordsSent: number = 0 -- The records the tier ticks' lists placed in a block, since start
+local RecordsSent: number = 0 -- The records the band ticks' lists placed in a block, since start
 local RecordsCut: number = 0 -- And those a viewer's room left out
 
 -- With relay.clocks on, the seconds each part of this run's turns took, summed over the turns, an f64 a part by its
@@ -365,12 +380,43 @@ local Invisible: buffer = buffer.create(SLOTS)
 
 local Steps: Steps = {
 	count = 0,
+	carried = 0,
 	capacity = STEP_START,
 	slots = buffer.create(STEP_START * 2),
 	kinds = buffer.create(STEP_START),
 	places = {},
 	data = buffer.create(STEP_START * FOOTSTEP_BYTES),
 }
+
+-- The run before's footsteps, kept by begin while a turn this run follows a run its viewer was left, for file to put
+-- past this run's: each that fell while its slot's life was not Invisible, with that life and its kind. Beside them,
+-- the Invisible marks as the run hush kept them for had them
+local Carry: {
+	count: number,
+	capacity: number, -- The steps the buffers hold before they grow
+	slots: buffer, -- u16
+	kinds: buffer, -- u8: its kind's code from 1
+	lives: buffer, -- u8: its slot's generation in the run it fell in
+	bodies: buffer, -- u8: and its slot's kind code then
+	places: { vector },
+	data: buffer,
+	marks: buffer, -- u8 by slot
+	hushed: number, -- The run whose marks those are, 0 for none
+	filed: number, -- The run file last filed, whose footsteps the world's buffers hold, 0 for none
+} =
+	{
+		count = 0,
+		capacity = 0,
+		slots = buffer.create(0),
+		kinds = buffer.create(0),
+		lives = buffer.create(0),
+		bodies = buffer.create(0),
+		places = {},
+		data = buffer.create(0),
+		marks = buffer.create(SLOTS),
+		hushed = 0,
+		filed = 0,
+	}
 
 local World: World = {
 	present = Present,
@@ -448,13 +494,36 @@ local WithheldLooks: { number } = {}
 
 local Watched: { View } = {} -- Every view with a watcher
 
--- The viewer's turn's lists, kept across turns
-local Hides: { number } = {}
-local Reveals: { number } = {}
-local Restyles: { number } = {}
-local Floors: { number } = {}
-local Fills: { number } = {}
-local Priorities: buffer = buffer.create(SLOTS * 8) -- f64: each listed record's place in the queue, highest first
+-- The viewer's turn's lists, kept across turns, and each listed record's place in the queue, highest first, which
+-- share one table since Luau caps a chunk's locals
+local Lists: {
+	hides: { number },
+	reveals: { number },
+	restyles: { number },
+	floors: { number },
+	fills: { number },
+	rest: { number }, -- The fills of the players outside the viewer's crowd cap, placed after every other
+	priorities: buffer, -- f64 by slot
+} =
+	{
+		hides = {},
+		reveals = {},
+		restyles = {},
+		floors = {},
+		fills = {},
+		rest = {},
+		priorities = buffer.create(SLOTS * 8),
+	}
+
+-- The crowd cap's selection, kept across turns: a heap of the nearest candidates so far, its farthest at place 0, the
+-- capping turn each slot was last a member on, and since start the turns that capped and the candidates they held out
+local Crowd: { keys: buffer, slots: buffer, members: buffer, turns: number, rest: number } = {
+	keys = buffer.create(SLOTS * 8), -- f64 by heap place: the candidate's key
+	slots = buffer.create(SLOTS * 2), -- u16 by heap place: its slot
+	members = buffer.create(SLOTS * 8), -- f64 by slot
+	turns = 0,
+	rest = 0,
+}
 
 local Views: { [Key]: View } = {}
 
@@ -528,12 +597,6 @@ function Turn.start(settings: Settings, ports: Ports)
 		npcs = settings.npcs,
 		grid = grid,
 	}
-	NearEnterSquared = settings.nearEnterSquared
-	NearLeaveSquared = settings.nearLeaveSquared
-	NearAim = settings.nearAim
-	NearFloor = settings.nearFloor
-	FarAim = settings.farAim
-	FarFloor = settings.farFloor
 	OutOfViewRate = settings.outOfView
 	WeightNear = settings.weightNear
 	WeightFar = settings.weightFar
@@ -558,20 +621,104 @@ function Turn.start(settings: Settings, ports: Ports)
 end
 
 --[[
-    Begins a run: its count, its relay tick unwrapped, the relay ticks since
-    the run before and the tick its blocks carry, its turns' clocks from 0
-    while they are on, and while records go as changes, the history's plane
-    its records go in
+    Makes the run's footstep buffers hold at least count steps, keeping the
+    steps they hold, at least doubling them whenever they grow
 --]]
 
-function Turn.begin(run: number, tick: number, elapsed: number, wire: number)
+function Turn.room(count: number)
+	local steps: Steps = Steps
+	if count <= steps.capacity then
+		return
+	end
+
+	local capacity: number = math.max(count, steps.capacity * 2)
+	local slots: buffer = buffer.create(capacity * 2)
+	local kinds: buffer = buffer.create(capacity)
+	local data: buffer = buffer.create(capacity * FOOTSTEP_BYTES)
+
+	buffer.copy(slots, 0, steps.slots)
+	buffer.copy(kinds, 0, steps.kinds)
+	buffer.copy(data, 0, steps.data)
+
+	steps.capacity = capacity
+	steps.slots = slots
+	steps.kinds = kinds
+	steps.data = data
+end
+
+--[[
+    Keeps the Invisible marks as the run begun last has them, once, before
+    the first mark changes after it: the front's setInvisible and a
+    worker's hand-in change them between runs, and the next run's begin
+    judges the steps it carries from that run by that run's own marks
+--]]
+
+function Turn.hush()
+	if Carry.hushed ~= Run then
+		Carry.hushed = Run
+		buffer.copy(Carry.marks, 0, Invisible)
+	end
+end
+
+--[[
+    Begins a run: its count, its relay tick unwrapped, the relay ticks since
+    the run before, the tick its blocks carry and its bands, which its turns
+    read as the table stands, its turns' clocks from 0 while they are on,
+    and while records go as changes, the history's plane its records go in.
+    With carry, a turn this run follows a run its viewer was left, so the
+    run before's footsteps, still in the buffers, are kept for file, but
+    for each that fell while its slot's life was Invisible, which no one
+    hears
+
+    @ carry | whether to keep them, false or nil to keep none
+--]]
+
+function Turn.begin(run: number, tick: number, elapsed: number, wire: number, tuning: Tuning, carry: boolean?)
 	Run = run
 	RunTick = tick
 	Elapsed = elapsed
 	TickWire = wire
+	Tune = tuning
 
 	if Clock.on then
 		buffer.fill(Clock.laps, 0, 0)
+	end
+
+	Steps.carried = 0
+	Carry.count = 0
+	if carry then
+		local count: number = Steps.count
+		if count > Carry.capacity then
+			Carry.capacity = count
+			Carry.slots = buffer.create(count * 2)
+			Carry.kinds = buffer.create(count)
+			Carry.lives = buffer.create(count)
+			Carry.bodies = buffer.create(count)
+			Carry.data = buffer.create(count * FOOTSTEP_BYTES)
+		end
+
+		-- The world still holds the run before's lives and kinds, and its Invisible marks too unless one changed since
+		-- that run began, when hush kept them
+		local marks: buffer = Carry.hushed == run - 1 and Carry.marks or Invisible
+		local stepSlots: buffer = Steps.slots
+		local kept: number = 0
+
+		for index: number = 0, count - 1 do
+			local slot: number = buffer.readu16(stepSlots, index * 2)
+			local life: number = buffer.readu8(Generations, slot)
+
+			if buffer.readu8(marks, slot) ~= life + 1 then
+				buffer.writeu16(Carry.slots, kept * 2, slot)
+				buffer.writeu8(Carry.kinds, kept, buffer.readu8(Steps.kinds, index))
+				buffer.writeu8(Carry.lives, kept, life)
+				buffer.writeu8(Carry.bodies, kept, buffer.readu8(Kinds, slot))
+				buffer.copy(Carry.data, kept * FOOTSTEP_BYTES, Steps.data, index * FOOTSTEP_BYTES, FOOTSTEP_BYTES)
+				kept += 1
+				Carry.places[kept] = Steps.places[index + 1]
+			end
+		end
+
+		Carry.count = kept
 	end
 
 	-- The plane names the run and its tick for every change against its records
@@ -586,10 +733,43 @@ end
     Files each of the count bodies the front walked this run in its cell's
     list in its kind's cells, in the order the states were walked, which
     each turn keeps, held to the grid's edges, and a NaN place to its first
-    cell, since a turn finds that inside no radius
+    cell, since a turn finds that inside no radius. The footsteps begin
+    kept go past this run's, as its carried steps, each whose slot holds
+    the life and kind it fell in, so a viewer's flags this run judge the
+    body that took it. A slot absent this run still holds its last life and
+    kind, so its steps go past too, unheard, since it is culled from no one.
+    The run is then the one filed
 --]]
 
 function Turn.file(count: number)
+	local carried: number = Carry.count
+	if carried > 0 then
+		local from: number = Steps.count
+		Turn.room(from + carried)
+
+		local stepSlots: buffer = Steps.slots
+		local stepKinds: buffer = Steps.kinds
+		local stepData: buffer = Steps.data
+		local at: number = from
+
+		for index: number = 0, carried - 1 do
+			local slot: number = buffer.readu16(Carry.slots, index * 2)
+
+			if
+				buffer.readu8(Generations, slot) == buffer.readu8(Carry.lives, index)
+				and buffer.readu8(Kinds, slot) == buffer.readu8(Carry.bodies, index)
+			then
+				buffer.writeu16(stepSlots, at * 2, slot)
+				buffer.writeu8(stepKinds, at, buffer.readu8(Carry.kinds, index))
+				buffer.copy(stepData, at * FOOTSTEP_BYTES, Carry.data, index * FOOTSTEP_BYTES, FOOTSTEP_BYTES)
+				at += 1
+				Steps.places[at] = Carry.places[index + 1]
+			end
+		end
+
+		Steps.carried = at - from
+	end
+
 	local grid: Grid = Radii.grid
 	local positions: { vector } = grid.positions
 	local walkOrder: buffer = grid.walk
@@ -648,6 +828,12 @@ function Turn.file(count: number)
 	end
 
 	grid.count = count
+	Carry.filed = Run
+end
+
+-- The run Turn.file last filed, whose footsteps the buffers hold, 0 before the first
+function Turn.filed(): number
+	return Carry.filed
 end
 
 -- Whether a slot's look is set for its current life
@@ -1303,9 +1489,37 @@ local function addFootstep(view: View, offset: number)
 	Out.footstepCount = count
 end
 
+--[[
+    Adds the run's footsteps from first to last, by their index in its
+    steps, that the viewer hears: each of an enemy its flags hold culled and
+    not sent this turn, inside the step's range of where it stands now
+--]]
+
+local function listen(view: View, origin: vector, first: number, last: number)
+	local viewFlags: buffer = view.flags
+	local steps: Steps = Steps
+	local stepSlots: buffer = steps.slots
+	local stepKinds: buffer = steps.kinds
+	local stepPlaces: { vector } = steps.places
+
+	for index: number = first, last do
+		local slot: number = buffer.readu16(stepSlots, index * 2)
+		local flags: number = buffer.readu16(viewFlags, slot * 2)
+
+		if bit32.btest(flags, CULLED) and not bit32.btest(flags, SENT) then
+			local offset: vector = stepPlaces[index + 1] - origin
+			if vector.dot(offset, offset) <= Earshot[buffer.readu8(stepKinds, index)] then
+				addFootstep(view, index * FOOTSTEP_BYTES)
+			end
+		end
+	end
+end
+
 -- The higher of two listed records' places in the queue
 local function ahead(a: number, b: number): boolean
-	return buffer.readf64(Priorities, a * 8) > buffer.readf64(Priorities, b * 8)
+	local priorities: buffer = Lists.priorities
+
+	return buffer.readf64(priorities, a * 8) > buffer.readf64(priorities, b * 8)
 end
 
 -- Takes the stale entries past count off the end of a list a turn refilled, so it is exactly that long
@@ -1321,7 +1535,7 @@ end
     Places a list's records inside the tick's room under a budget, as fits
     finds it, highest in the queue first when they can't all fit, each whole
     or as its change, prepared first so the sort knows their sizes, and
-    stops at the first that doesn't fit. Those left keep at most one tier
+    stops at the first that doesn't fit. Those left keep at most one band
     tick owed. An empty list needs no room
 --]]
 
@@ -1494,7 +1708,7 @@ local function claim(view: View, own: number?)
 		return
 	end
 
-	local flags: number = bit32.band(buffer.readu16(view.flags, own * 2), bit32.bnot(RELEVANT + NEAR + CULLED))
+	local flags: number = bit32.band(buffer.readu16(view.flags, own * 2), bit32.bnot(RELEVANT + EDGES + CULLED))
 	flags = bit32.band(flags, bit32.bnot(SENT + REVEAL + HIDE + VISIBILITY_CARRIED))
 
 	local generation: number = buffer.readu8(Generations, own)
@@ -1523,8 +1737,8 @@ end
     radius and the viewer's distance, and each it holds anything for
     elsewhere. Any other holds nothing and is out of its kind's reach, where
     it can't be wanted, so it stays as it is. Each gets its relevancy and
-    tier by its kind, a player and a body entering at the inner radius and
-    leaving past the outer, and one holding nothing out of range is done;
+    band by its kind, a player and a body entering each at the inner radius
+    and leaving past the outer, and one holding nothing out of range is done;
     the rest, in the order the states were walked, get whether anti-ESP
     hides them, which leaves them culled, and the stretch that follows.
     Invisible bodies are wanted by no one and never culled
@@ -1646,6 +1860,9 @@ local function consider(view: View, viewer: Viewer, own: number?)
 	local slotBits: number = SLOTS - 1
 	local listed: number = 0
 	local ordered: boolean = true
+	local enters: { number } = Tune.enters
+	local leaves: { number } = Tune.leaves
+	local outermost: number = Tune.bands - 1
 
 	for index: number = 1, count do
 		local slot: number
@@ -1667,11 +1884,13 @@ local function consider(view: View, viewer: Viewer, own: number?)
 		local kept: number = buffer.readu16(viewFlags, slot * 2)
 		local kind: number = buffer.readu8(kinds, slot)
 		local relevant: boolean
-		local near: boolean = false
+		local within: number = 0
 
 		if kind == NPC then
 			relevant = squared <= NpcRangeSquared
-			near = squared <= NpcNearSquared
+			if squared <= NpcNearSquared then
+				within = 1
+			end
 		elseif kind == SLEEPER then
 			relevant = squared <= SleeperSquared
 		else
@@ -1681,21 +1900,23 @@ local function consider(view: View, viewer: Viewer, own: number?)
 				relevant = squared <= EnterSquared
 			end
 
-			if bit32.btest(kept, NEAR) then
-				near = squared <= NearLeaveSquared
-			else
-				near = squared < NearEnterSquared
+			-- The edges from the outermost in, up to the first it is outside: inside nearer than its enter, or still
+			-- inside up to its leave when it was the run before
+			local was: number = bit32.extract(kept, EDGES_AT, EDGES_WIDTH)
+			for walked: number = 1, outermost do
+				local edge: number = outermost - walked + 1
+				if squared < enters[edge] or (walked <= was and squared <= leaves[edge]) then
+					within = walked
+				else
+					break
+				end
 			end
 		end
 
 		-- Whether anti-ESP culls it is found afresh below
-		local flags: number = bit32.band(kept, bit32.bnot(RELEVANT + NEAR + CULLED))
+		local flags: number = bit32.band(kept, bit32.bnot(RELEVANT + EDGES + CULLED))
 		if relevant then
-			flags = bit32.bor(flags, RELEVANT)
-
-			if near then
-				flags = bit32.bor(flags, NEAR)
-			end
+			flags = bit32.replace(bit32.bor(flags, RELEVANT), within, EDGES_AT, EDGES_WIDTH)
 		end
 
 		if flags ~= 0 then
@@ -1793,28 +2014,164 @@ local function consider(view: View, viewer: Viewer, own: number?)
 end
 
 --[[
+    Picks a viewer's crowd cap members once it has more candidates than
+    tiers.crowd.size, the players it is sent this run with no reveal or hide
+    pending: that many with the smallest key, ties to the lower slot, each
+    the squared distance over the square of the pair's weight, a recent
+    shooter's times the cone's unless its last run held it out of view.
+    Gives whether the turn caps, its members stamped with the turn
+--]]
+
+local function cap(view: View, origin: vector): boolean
+	local size: number = Tune.crowdSize
+	local tracked: { number } = view.tracked
+	local viewFlags: buffer = view.flags
+	local count: number = 0
+
+	for _, slot: number in tracked do
+		if
+			bit32.band(buffer.readu16(viewFlags, slot * 2), SENT + REVEAL + HIDE) == SENT
+			and buffer.readu32(Present, slot * 4) == Run
+			and buffer.readu8(Kinds, slot) == PLAYER
+		then
+			count += 1
+		end
+	end
+
+	if count <= size then
+		return false
+	end
+
+	local keys: buffer = Crowd.keys
+	local slots: buffer = Crowd.slots
+	local positions: { vector } = Radii.grid.positions
+	local shotUntil: buffer = view.shotUntil
+	local held: number = 0
+
+	for _, slot: number in tracked do
+		local flags: number = buffer.readu16(viewFlags, slot * 2)
+		if
+			bit32.band(flags, SENT + REVEAL + HIDE) ~= SENT
+			or buffer.readu32(Present, slot * 4) ~= Run
+			or buffer.readu8(Kinds, slot) ~= PLAYER
+		then
+			continue
+		end
+
+		local weight: number = 1
+		if buffer.readu32(shotUntil, slot * 4) >= RunTick then
+			weight = WeightShooter
+		end
+
+		if not bit32.btest(flags, OUTSIDE) then
+			weight *= WeightCone
+		end
+
+		local offset: vector = positions[slot + 1] - origin
+		local key: number = vector.dot(offset, offset) / (weight * weight)
+		local place: number = held
+
+		if held < size then
+			-- Up from the end of the heap, past each parent nearer than it
+			held += 1
+
+			while place > 0 do
+				local parent: number = (place - 1) // 2
+				local parentKey: number = buffer.readf64(keys, parent * 8)
+				local parentSlot: number = buffer.readu16(slots, parent * 2)
+				if parentKey > key or (parentKey == key and parentSlot > slot) then
+					break
+				end
+
+				buffer.writef64(keys, place * 8, parentKey)
+				buffer.writeu16(slots, place * 2, parentSlot)
+				place = parent
+			end
+		else
+			-- Nearer than the farthest member, it takes that one's place and goes down past each child farther than it
+			local rootKey: number = buffer.readf64(keys, 0)
+			if key > rootKey or (key == rootKey and slot > buffer.readu16(slots, 0)) then
+				continue
+			end
+
+			place = 0
+			while place * 2 + 1 < size do
+				local child: number = place * 2 + 1
+				local childKey: number = buffer.readf64(keys, child * 8)
+				local childSlot: number = buffer.readu16(slots, child * 2)
+				local right: number = child + 1
+				if right < size then
+					local rightKey: number = buffer.readf64(keys, right * 8)
+					local rightSlot: number = buffer.readu16(slots, right * 2)
+					if rightKey > childKey or (rightKey == childKey and rightSlot > childSlot) then
+						child, childKey, childSlot = right, rightKey, rightSlot
+					end
+				end
+
+				if childKey < key or (childKey == key and childSlot < slot) then
+					break
+				end
+
+				buffer.writef64(keys, place * 8, childKey)
+				buffer.writeu16(slots, place * 2, childSlot)
+				place = child
+			end
+		end
+
+		buffer.writef64(keys, place * 8, key)
+		buffer.writeu16(slots, place * 2, slot)
+	end
+
+	local turn: number = Crowd.turns + 1
+	local members: buffer = Crowd.members
+	Crowd.turns = turn
+	Crowd.rest += count - size
+
+	for place: number = 0, size - 1 do
+		buffer.writef64(members, buffer.readu16(slots, place * 2) * 8, turn)
+	end
+
+	return true
+end
+
+--[[
     Lists what each slot the viewer holds anything for has pending, last
-    tracked first: one no longer handed in ends, one holding nothing is let
-    go, and the rest list their hide, reveal or look entry. A sent player's
-    or NPC's record is listed when its tier tick comes and it has something
-    to send: a change, a rest repeat or the still repeat. At or past its
-    floor it is owed; under it, it waits in the queue by its weight times
-    the relay ticks since its last record. A player outside the viewer's
-    cone past the out-of-view radius, and no recent shooter, is held to the
-    out-of-view rate, and is owed a record the run it no longer is. Returns
-    how many hides, reveals, look entries, owed and queued records it listed
+    tracked first: one no longer handed in ends, one holding nothing is let go,
+    the rest list a hide, reveal or look entry, and a sent player's or NPC's
+    record comes on its band's tick with a change or a repeat to send: owed
+    once its floor is due, else queued by its weight times the relay ticks
+    since its last, a player outside the crowd cap at the cap's rates and in
+    a queue placed last. A player out of the cone past the out-of-view radius,
+    no recent shooter, is held to that rate. Gives each list's count in order
 
     @ looking | the viewer's look, or with no out-of-view rate its body's
     facing, nil for a viewer with no body
+    @ zoomed | whether its players go at the nearest band's aim and floor
+    wherever they stand, their weights still their own band's
+
+    @ missed | the relay ticks since the view's last turn when this turn
+    follows a run it was left, whose credit each pair takes in full, held to
+    MOST_CREDIT; 0 for any other turn, whose credit is one run's
 --]]
 
 local function schedule(
 	view: View,
 	own: number?,
 	origin: vector,
-	looking: vector?
-): (number, number, number, number, number)
+	looking: vector?,
+	zoomed: boolean,
+	missed: number
+): (number, number, number, number, number, number)
 	local hides: number, reveals: number, restyles: number, floors: number, fills: number = 0, 0, 0, 0, 0
+	local hideList: { number } = Lists.hides
+	local revealList: { number } = Lists.reveals
+	local restyleList: { number } = Lists.restyles
+	local floorList: { number } = Lists.floors
+	local fillList: { number } = Lists.fills
+	local priorities: buffer = Lists.priorities
+	local bands: number = Tune.bands
+	local aims: { number } = Tune.aims
+	local floorRates: { number } = Tune.floors
 	local positions: { vector } = Radii.grid.positions
 	local tracked: { number } = view.tracked
 	local viewFlags: buffer = view.flags
@@ -1834,6 +2191,15 @@ local function schedule(
 		wide = cone.wide
 	end
 
+	-- Past the crowd cap's members, each player is held to the cap's rates and its fill queued after every other
+	local capping: boolean = Tune.crowdSize > 0 and cap(view, origin)
+	local members: buffer = Crowd.members
+	local turn: number = Crowd.turns
+	local crowdRate: number = Tune.crowdRate
+	local crowdFloor: number = Tune.crowdFloor
+	local restList: { number } = Lists.rest
+	local rested: number = 0
+
 	for index: number = #tracked, 1, -1 do
 		local slot: number = tracked[index]
 		local flags: number = buffer.readu16(viewFlags, slot * 2)
@@ -1841,7 +2207,7 @@ local function schedule(
 
 		if not present and slot ~= own then
 			-- A body no longer handed in is relevant to no one, and whatever the viewer was sent of it ends
-			flags = bit32.band(flags, bit32.bnot(RELEVANT + NEAR + CULLED))
+			flags = bit32.band(flags, bit32.bnot(RELEVANT + EDGES + CULLED))
 			flags = settle(view, slot, flags, false, buffer.readu8(view.generations, slot))
 			buffer.writeu16(viewFlags, slot * 2, flags)
 		end
@@ -1853,15 +2219,15 @@ local function schedule(
 
 		if bit32.btest(flags, HIDE) then
 			hides += 1
-			Hides[hides] = slot
+			hideList[hides] = slot
 		elseif not present then
 			continue
 		elseif bit32.btest(flags, REVEAL) then
 			reveals += 1
-			Reveals[reveals] = slot
+			revealList[reveals] = slot
 		elseif bit32.btest(flags, LOOK + HELD) and bit32.btest(flags, SENT + OWN) then
 			restyles += 1
-			Restyles[restyles] = slot
+			restyleList[restyles] = slot
 		end
 
 		if not present or not bit32.btest(flags, SENT) or bit32.btest(flags, REVEAL + HIDE) then
@@ -1874,28 +2240,40 @@ local function schedule(
 		end
 
 		local offset: vector = positions[slot + 1] - origin
-		local near: boolean = bit32.btest(flags, NEAR)
+		local within: number = bit32.extract(flags, EDGES_AT, EDGES_WIDTH)
 		local aimRate: number
 		local floorRate: number
 		local weight: number = WeightFar
-
-		if near then
-			weight = WeightNear
-		end
+		local rest: boolean = false
 
 		if kind == NPC then
 			aimRate = NpcFarRate
-			if near then
+			if within ~= 0 then
 				aimRate = RelayRate
+				weight = WeightNear
 			end
 
 			floorRate = aimRate
-		elseif near then
-			aimRate = NearAim
-			floorRate = NearFloor
 		else
-			aimRate = FarAim
-			floorRate = FarFloor
+			-- Its band's place from 1, the nearest inside every edge, whose rates a zoomed viewer is sent it at
+			local band: number = bands - within
+			if band == 1 then
+				weight = WeightNear
+			end
+
+			if zoomed then
+				band = 1
+			end
+
+			aimRate = aims[band]
+			floorRate = floorRates[band]
+
+			-- The cap's rates never raise a player's own
+			if capping and buffer.readf64(members, slot * 8) ~= turn then
+				rest = true
+				aimRate = math.min(aimRate, crowdRate)
+				floorRate = math.min(floorRate, crowdFloor)
+			end
 		end
 
 		local shooter: boolean = buffer.readu32(shotUntil, slot * 4) >= RunTick
@@ -1937,9 +2315,17 @@ local function schedule(
 			end
 		end
 
-		-- Each tier tick's credit for every relay tick since the last run, so its rate keeps its seconds
-		local aim: number = buffer.readf32(aimCredits, slot * 4) + math.min(aimRate * Elapsed / RelayRate, 1)
-		local floor: number = buffer.readf32(floorCredits, slot * 4) + math.min(floorRate * Elapsed / RelayRate, 1)
+		-- Each band tick's credit for every relay tick since the last run, so its rate keeps its seconds, and after a
+		-- run the viewer was left, for every relay tick since its last turn
+		local aim: number
+		local floor: number
+		if missed > 0 then
+			aim = math.min(buffer.readf32(aimCredits, slot * 4) + aimRate * missed / RelayRate, MOST_CREDIT)
+			floor = math.min(buffer.readf32(floorCredits, slot * 4) + floorRate * missed / RelayRate, MOST_CREDIT)
+		else
+			aim = buffer.readf32(aimCredits, slot * 4) + math.min(aimRate * Elapsed / RelayRate, 1)
+			floor = buffer.readf32(floorCredits, slot * 4) + math.min(floorRate * Elapsed / RelayRate, 1)
+		end
 
 		if outside then
 			buffer.writeu16(viewFlags, slot * 2, bit32.bor(flags, OUTSIDE))
@@ -1960,7 +2346,7 @@ local function schedule(
 		local last: number = buffer.readu32(lastRecord, slot * 4)
 		local still: boolean = buffer.readu32(Changed, slot * 4) <= last and buffer.readu8(repeats, slot) == 0
 
-		-- Its tier tick passes with nothing to send while it stays still
+		-- Its band tick passes with nothing to send while it stays still
 		if still and RunTick - last < StillTicks then
 			buffer.writef32(aimCredits, slot * 4, aim - 1)
 			buffer.writef32(floorCredits, slot * 4, math.max(floor - 1, 0))
@@ -1970,18 +2356,21 @@ local function schedule(
 
 		buffer.writef32(aimCredits, slot * 4, aim)
 		buffer.writef32(floorCredits, slot * 4, floor)
-		buffer.writef64(Priorities, slot * 8, weight * (RunTick - last))
+		buffer.writef64(priorities, slot * 8, weight * (RunTick - last))
 
 		if floor >= 1 then
 			floors += 1
-			Floors[floors] = slot
+			floorList[floors] = slot
+		elseif rest then
+			rested += 1
+			restList[rested] = slot
 		else
 			fills += 1
-			Fills[fills] = slot
+			fillList[fills] = slot
 		end
 	end
 
-	return hides, reveals, restyles, floors, fills
+	return hides, reveals, restyles, floors, fills, rested
 end
 
 -- Sends the open withheld block to the watchers alone
@@ -2026,8 +2415,8 @@ end
 --[[
     The watched target's withheld block: each culled player it is not sent,
     never an NPC or an Invisible or Parked one, nor a teammate, since
-    anti-ESP never hides one. Each goes at the target's aim rate for its
-    tier every tier tick, changed or not, with its look while pending,
+    anti-ESP never hides one. Each goes at its band's aim rate from the
+    target every band tick, changed or not, with its look while pending,
     outside the target's budget and to the watchers alone. It carries the
     sequence of the run's last copy, so a look entry clears once the
     acknowledgments of that copy cover it
@@ -2040,6 +2429,8 @@ local function withhold(view: View)
 	end
 
 	local records: number, looks: number = 0, 0
+	local bands: number = Tune.bands
+	local aims: { number } = Tune.aims
 
 	for _, slot: number in view.tracked do
 		local flags: number = buffer.readu16(view.flags, slot * 2)
@@ -2082,7 +2473,7 @@ local function withhold(view: View)
 				mark = bit32.bor(bit32.band(mark, bit32.bnot(WITHHELD_HELD_CARRIED)), WITHHELD_HELD)
 			end
 
-			local rate: number = bit32.btest(flags, NEAR) and NearAim or FarAim
+			local rate: number = aims[bands - bit32.extract(flags, EDGES_AT, EDGES_WIDTH)]
 			aim = buffer.readf32(withheld.aim, slot * 4) + math.min(rate * Elapsed / RelayRate, 1)
 		end
 
@@ -2160,6 +2551,7 @@ local function viewOf(key: Key): View
 		sequence = Constants.FIRST_SEQUENCE,
 		newest = 0,
 		turn = 0,
+		turned = 0,
 		own = nil :: number?,
 		tracked = {} :: { number },
 		places = buffer.create(SLOTS * 2),
@@ -2398,9 +2790,13 @@ end
 
     @ back | the newest block its client was sent watching, on the run it
     is back from a spectate, nil on any other
+
+    @ missed | whether the relay's budget left the viewer in the run
+    before, so each pair's credit counts every relay tick since its last
+    turn, held to MOST_CREDIT, and it hears that run's footsteps first
 --]]
 
-function Turn.turn(viewer: Viewer, back: number?)
+function Turn.turn(viewer: Viewer, back: number?, missed: boolean?)
 	local clocked: boolean = Clock.on
 	if clocked then
 		Clock.from = os.clock()
@@ -2408,6 +2804,12 @@ function Turn.turn(viewer: Viewer, back: number?)
 
 	local key: Key = viewer.key
 	local view: View = viewOf(key)
+	local since: number = 0
+	if missed and view.turned ~= 0 then
+		since = RunTick - view.turned
+	end
+
+	view.turned = RunTick
 
 	-- Its own radii: players and bodies enter inside its distance in the server's proportion and leave past it, and
 	-- sleepers and NPCs go no farther than it either
@@ -2455,8 +2857,8 @@ function Turn.turn(viewer: Viewer, back: number?)
 		end
 	end
 
-	local hides: number, reveals: number, restyles: number, floors: number, fills: number =
-		schedule(view, own, origin, looking)
+	local hides: number, reveals: number, restyles: number, floors: number, fills: number, rested: number =
+		schedule(view, own, origin, looking, viewer.zoomed == true, since)
 
 	if clocked then
 		lapped(LAP.schedule)
@@ -2467,37 +2869,32 @@ function Turn.turn(viewer: Viewer, back: number?)
 	Spent = 0
 
 	for index: number = 1, hides do
-		addHide(view, Hides[index])
+		addHide(view, Lists.hides[index])
 	end
 
 	for index: number = 1, reveals do
-		addReveal(view, Reveals[index])
+		addReveal(view, Lists.reveals[index])
 	end
 
 	for index: number = 1, restyles do
-		addLook(view, Restyles[index])
+		addLook(view, Lists.restyles[index])
 	end
 
-	-- A culled enemy's steps go once, to each viewer it is culled from inside the step's range
-	local viewFlags: buffer = view.flags
-	local steps: Steps = Steps
-	local stepSlots: buffer = steps.slots
-	local stepKinds: buffer = steps.kinds
-	local stepPlaces: { vector } = steps.places
-	for index: number = 0, steps.count - 1 do
-		local slot: number = buffer.readu16(stepSlots, index * 2)
-		local flags: number = buffer.readu16(viewFlags, slot * 2)
-
-		if bit32.btest(flags, CULLED) and not bit32.btest(flags, SENT) then
-			local offset: vector = stepPlaces[index + 1] - origin
-			if vector.dot(offset, offset) <= Earshot[buffer.readu8(stepKinds, index)] then
-				addFootstep(view, index * FOOTSTEP_BYTES)
-			end
-		end
+	-- A culled enemy's steps go once, to each viewer it is culled from inside the step's range, and a turn after a
+	-- run its viewer was left hears the steps of that run first, a run late, as it finds the enemies this turn
+	if missed then
+		listen(view, origin, Steps.count, Steps.count + Steps.carried - 1)
 	end
 
-	placeRecords(view, Floors, floors, Hard)
-	placeRecords(view, Fills, fills, Soft)
+	listen(view, origin, 0, Steps.count - 1)
+
+	placeRecords(view, Lists.floors, floors, Hard)
+	placeRecords(view, Lists.fills, fills, Soft)
+
+	-- The fills of the players outside the crowd cap take only the soft room the others leave
+	if rested > 0 then
+		placeRecords(view, Lists.rest, rested, Soft)
+	end
 
 	if clocked then
 		lapped(LAP.place)
@@ -2582,13 +2979,14 @@ function Turn.views(): { [Key]: View }
 end
 
 --[[
-    The running totals since start of the records the tier ticks placed in
-    a viewer's blocks, of those the viewer's room left out, and of the
-    bodies the viewers' turns gathered to measure
+    The running totals since start of the records the band ticks placed in
+    a viewer's blocks, of those the viewer's room left out, of the bodies
+    the viewers' turns gathered to measure, and of the candidates the turns
+    held outside their viewer's crowd cap
 --]]
 
-function Turn.counts(): (number, number, number)
-	return RecordsSent, RecordsCut, Radii.grid.visited
+function Turn.counts(): (number, number, number, number)
+	return RecordsSent, RecordsCut, Radii.grid.visited, Crowd.rest
 end
 
 --[[

@@ -1,7 +1,7 @@
 --[[
-    Drives step 3's server members on the running dev game with Volt bots on
-    a floor it builds: a sleeper made and moved, a body, a teleport, a
-    spectate, a called platform and anti-ESP behind an occluder it places
+    Drives the server's members on the running dev game with Volt bots on a
+    floor it builds: anti-ESP behind occluders it places, with verdict memory
+    off and on, a sleeper, a body, a teleport, a spectate and a called platform
 --]]
 
 --!strict
@@ -14,6 +14,7 @@ local Packages = ReplicatedStorage.Packages
 local Tread = require(Packages.Tread)
 local Volt = require(Packages.Volt)
 
+local AntiEsp = require(Packages.Tread.Server.AntiEsp)
 local Relay = require(Packages.Tread.Server.Relay)
 local Spectate = require(Packages.Tread.Server.Spectate)
 
@@ -33,6 +34,27 @@ local SETTLE: number = 1 -- Seconds the bodies get to land and anti-ESP to test 
 local CLOSE: number = 0.1 -- Studs a place may sit from where it should
 local SEPARATOR: string = "; " -- Between the problems in one report
 local PROBE_STAGE: string = "wiringProbe"
+local ASIDE: Vector3 = Vector3.new(0, 0, 60) -- From the viewer's line to where the moved occluder waits, off every ray
+
+-- The dev game's own anti-ESP hold and visible rate, which set how long an answer cast afresh takes to hide a visible
+-- pair whose line is blocked
+local HOLD: number = require(ServerScriptService.Server.Config.Tread).antiEsp.hold
+local VISIBLE_RATE: number = require(ServerScriptService.Server.Config.Tread).antiEsp.visibleRate
+local RECHECKS: number = 2 -- Visible rechecks past the hold: by the first a fresh answer has hidden the pair, then room
+
+-- Seconds the target must stay sent once the moved occluder blocks its line, past when a fresh answer would have hidden
+-- it, so only an answer served from memory keeps it sent
+local SERVED: number = HOLD + RECHECKS / VISIBLE_RATE
+
+-- The dev game's near-hidden rate and relay rate, which set how soon an answer cast afresh reveals a near hidden pair
+-- whose line is clear: at its next near recheck, then the next relay run
+local NEAR_RATE: number = require(ServerScriptService.Server.Config.Tread).antiEsp.nearRate
+local RELAY_RATE: number = require(ReplicatedStorage.Shared.Dev.Config).rates.relay
+local REVEALS: number = 3 -- Rechecks and relay ticks a fresh answer gets: in process, the workers' lead, then room
+
+-- Seconds the target must stay unsent once nothing stands on its line, past when a fresh answer would have revealed
+-- it, so only an answer or box served from memory keeps it hidden
+local KEPT_HIDDEN: number = REVEALS * (1 / NEAR_RATE + 1 / RELAY_RATE)
 
 -- Where each bot's character is built along the floor, the viewer's target behind the occluder from it
 local VIEWER: Vector3 = Vector3.new(0, FLOOR_TOP + LIFT, 0)
@@ -53,6 +75,7 @@ type Made = {
 	body: Tread.Body?,
 	stops: { () -> () }, -- Each callback's disconnect and the platform's removal
 	parts: { Instance },
+	memory: boolean?, -- Whether verdict memory ran as the run found it, nil until the run turns it on
 }
 
 -- The newest tick the history has written, which the probe stage keeps; added once a server, since stages stay
@@ -72,6 +95,48 @@ local function waitFor(done: () -> boolean): boolean
 	end
 
 	return true
+end
+
+--[[
+    Waits until verdict memory has kept answers past where its count stood
+    and SETTLE seconds have gone, long enough for every pair's recheck to
+    keep its own, up to SECONDS, and gives whether it got there
+--]]
+
+local function keptPast(stood: number): boolean
+	local settled: number = os.clock() + SETTLE
+
+	return waitFor(function (): boolean
+		local kept: number = AntiEsp.memory()
+
+		return kept > stood and os.clock() >= settled
+	end)
+end
+
+--[[
+    Whether holds says so at every Heartbeat for seconds, the wait held to
+    that deadline, giving false at the first Heartbeat it doesn't
+--]]
+
+local function heldFor(seconds: number, holds: () -> boolean): boolean
+	local deadline: number = os.clock() + seconds
+
+	while os.clock() < deadline do
+		if not holds() then
+			return false
+		end
+
+		RunService.Heartbeat:Wait()
+	end
+
+	return holds()
+end
+
+-- Anti-ESP's player pairs failed open on the server since start, a read that changes nothing
+local function failOpens(): number
+	local _, _, failed: number = AntiEsp.counts()
+
+	return failed
 end
 
 -- A part that is anchored and touches nothing, colliding or not, in a parent
@@ -156,6 +221,103 @@ local function drive(handle: Tread.Server, made: Made, problems: { string }, occ
 	if not shown then
 		table.insert(problems, `with the occluder gone the target was not sent to the viewer within {SECONDS} s`)
 	end
+
+	-- And again with verdict memory on. A second occluder waits off the line, placed while memory is off so its
+	-- arrival moves no epoch. Each change to the include list waits first for answers kept past where the count
+	-- stood, so the pair's kept answer goes only through the listener that hears the change
+	local line: Vector3 = (VIEWER + TARGET) / 2
+	local moved: Part = part("WiringMovedOccluder", OCCLUDER_SIZE, line + ASIDE, false, occluders())
+	table.insert(made.parts, moved)
+
+	local remembered: boolean = AntiEsp.memoryOn()
+	local remember: boolean = true
+	made.memory = remembered
+	AntiEsp.useMemory(remember)
+	local startKept: number, startBoxRays: number = AntiEsp.memory()
+
+	if not keptPast(startKept) then
+		table.insert(
+			problems,
+			`with verdict memory on no answer was kept within {SECONDS} s, so DescendantAdded is unproven`
+		)
+	end
+
+	-- Onto the line by CFrame, which no listener hears, so the target stays sent only while this pair's own answer
+	-- is served from memory, as the listener's check below needs it to be. A fail-open would keep it sent too
+	local failedBefore: number = failOpens()
+	moved.CFrame = CFrame.new(line)
+	local served: boolean = heldFor(SERVED, function (): boolean
+		return Relay.isSent(viewer.player, slotOf(target))
+	end)
+
+	local failed: number = failOpens() - failedBefore
+	if not served then
+		local unproven: string = "so its answer was cast afresh and DescendantAdded is unproven"
+		table.insert(problems, `the target was hidden within {SERVED} s of an occluder moved onto its line, {unproven}`)
+	end
+
+	if failed > 0 then
+		local unproven: string = "so the target may have been sent without memory and DescendantAdded is unproven"
+		table.insert(
+			problems,
+			`anti-ESP failed open {failed} times on the server while the target was held sent, {unproven}`
+		)
+	end
+
+	local again: Part = part("WiringMemoryOccluder", OCCLUDER_SIZE, line, false, occluders())
+	table.insert(made.parts, again)
+
+	local rehidden: boolean = waitFor(function (): boolean
+		return not Relay.isSent(viewer.player, slotOf(target))
+	end)
+
+	if not rehidden then
+		table.insert(problems, `with verdict memory on the target was still sent behind an occluder after {SECONDS} s`)
+	end
+
+	local hiddenKept: number = AntiEsp.memory()
+	if not keptPast(hiddenKept) then
+		local unproven: string = "so DescendantRemoving is unproven"
+		table.insert(problems, `with the target hidden no answer was kept within {SECONDS} s, {unproven}`)
+	end
+
+	-- Both off the line by CFrame, unheard, so the target stays unsent only while this pair's hidden answer or kept
+	-- box is served from memory, as the listener's check below needs it to be
+	moved.CFrame = CFrame.new(line + ASIDE)
+	again.CFrame = CFrame.new(line + ASIDE)
+	local stayed: boolean = heldFor(KEPT_HIDDEN, function (): boolean
+		return not Relay.isSent(viewer.player, slotOf(target))
+	end)
+
+	if not stayed then
+		local within: string = string.format("%.2f", KEPT_HIDDEN)
+		local unproven: string = "so its answer was cast afresh and DescendantRemoving is unproven"
+		table.insert(
+			problems,
+			`the target was sent within {within} s of both occluders moving off its line, {unproven}`
+		)
+	end
+
+	-- Gone from the include list, which the listener hears, so the pair is cast afresh against a clear line
+	again:Destroy()
+	local reshown: boolean = waitFor(function (): boolean
+		return Relay.isSent(viewer.player, slotOf(target))
+	end)
+
+	if not reshown then
+		table.insert(
+			problems,
+			`with verdict memory on the target was not sent within {SECONDS} s of the occluder going`
+		)
+	end
+
+	local endKept: number, endBoxRays: number = AntiEsp.memory()
+	local kept: number, boxRays: number = endKept - startKept, endBoxRays - startBoxRays
+	AntiEsp.useMemory(remembered)
+	made.memory = nil
+
+	local checks: string = `served {served}, hidden {rehidden}, kept hidden {stayed} and shown {reshown}`
+	local memory: string = `with memory {checks}, {kept} kept answers and {boxRays} box rays`
 
 	-- 2) A sleeper made in the air and moved down to the floor, its shapes following the fall
 	local sleeper: Tread.Sleeper? = handle:createSleeper(CFrame.new(SLEEPER), {})
@@ -269,7 +431,7 @@ local function drive(handle: Tread.Server, made: Made, problems: { string }, occ
 	local anti: string = `anti-ESP {stats.antiEspTests} tests and {stats.antiEspHidden} hidden this second`
 	local rise: string = string.format("the rider rose %.2f studs", rider:getState().root.Y - start)
 
-	return `hidden {hidden}, shown {shown}, the sleeper fell {fell}, {rise}, {anti}`
+	return `hidden {hidden}, shown {shown}, {memory}, the sleeper fell {fell}, {rise}, {anti}`
 end
 
 --[[
@@ -305,6 +467,12 @@ local function clean(handle: Tread.Server, made: Made, problems: { string })
 		instance:Destroy()
 	end
 
+	-- Verdict memory as the run found it, when the checks threw while it was on
+	local memory: boolean? = made.memory
+	if memory ~= nil then
+		AntiEsp.useMemory(memory)
+	end
+
 	local left: number = #handle:getAll()
 	if left ~= made.targets then
 		table.insert(problems, `after the clean-up getAll gave {left} targets, where it gave {made.targets} before`)
@@ -336,6 +504,7 @@ return function (): (boolean, string | nil)
 		body = nil,
 		stops = {},
 		parts = { occluder, folder },
+		memory = nil,
 	}
 
 	local ran: boolean, result: any = pcall(drive, handle, made, problems, occluder)

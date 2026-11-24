@@ -1,7 +1,7 @@
 --[[
-    The approved example's three tables with Frontier Zero's values, built
-    fresh on every call, and the helpers the Config cases share to break
-    one key of a copy and read the refusal it gets
+    The approved example's three tables, built fresh on every call, with
+    Frontier Zero's values but its two bands, in at 200 studs and out at 220,
+    which the relay's pinned digests rest on, and the Config cases' helpers
 --]]
 
 --!strict
@@ -205,9 +205,11 @@ function Example.shared(): Shared
 end
 
 --[[
-    Frontier Zero's server settings, with its two hooks as functions that do
-    nothing, a stand-in NPC range until its NPCs set one, and an empty
-    folder standing in for its occluders until its anti-ESP prefabs fill one
+    Frontier Zero's server settings but for its distance bands, which are two,
+    in at 200 studs and out at 220, the bands the relay's pinned digests rest
+    on, with its two hooks as functions that do nothing, a stand-in NPC range
+    until its NPCs set one, and an empty folder standing in for its occluders
+    until its anti-ESP prefabs fill one
 --]]
 
 function Example.server(): ServerSettings
@@ -224,12 +226,8 @@ function Example.server(): ServerSettings
 		slots = { reserve = 296 },
 		relevancy = { enter = 950, leave = 1000 },
 		tiers = {
-			nearEnter = 200,
-			nearLeave = 220,
-			nearFloor = 15,
-			nearAim = 20,
-			farFloor = 10,
-			farAim = 15,
+			bands = { { aim = 20, floor = 15 }, { aim = 15, floor = 10 } },
+			edges = { { enter = 200, leave = 220 } },
 			outOfView = { rate = 5, cone = 70, radius = 40 },
 		},
 

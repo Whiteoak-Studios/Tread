@@ -124,6 +124,7 @@ export type Summary = {
 	asks: number,
 	reveals: number,
 	hides: number,
+	held: number, -- The candidates the serial copy's turns held outside their viewer's crowd cap, through the last run
 	calls: { [string]: number }, -- Each of the relay's members called between runs, by name
 	mismatches: { string }, -- The first LISTED found
 	found: number,
@@ -395,8 +396,8 @@ local function query(side: Side, everyone: { Key }, names: { [Key]: string }, to
 	local relay: any = side.copy.Relay
 	local queries: { [string]: string } = side.record.queries
 
-	local sent: number, cut: number, visited: number = relay.counts()
-	queries.counts = `{sent} {cut} {visited}`
+	local sent: number, cut: number, visited: number, rest: number = relay.counts()
+	queries.counts = `{sent} {cut} {visited} {rest}`
 
 	for _, key: Key in everyone do
 		local name: string = names[key]
@@ -436,6 +437,7 @@ function RelayCheck.check(plan: Plan, serialCopy: Copy, workersCopy: Copy, setti
 		asks = 0,
 		reveals = 0,
 		hides = 0,
+		held = 0,
 		calls = {},
 		mismatches = {},
 		found = 0,
@@ -865,6 +867,9 @@ function RelayCheck.check(plan: Plan, serialCopy: Copy, workersCopy: Copy, setti
 		RelayCheck.compare(plan.name, run, serial.record, workers.record, summary)
 		summary.runs = run
 
+		local _, _, _, held: number = serial.copy.Relay.counts()
+		summary.held = held
+
 		-- Each client's acknowledgment of what it read of the serial copy, which both copies take in the next run
 		for _, viewer: any in viewers do
 			local client: Client = clients[viewer.key]
@@ -893,9 +898,10 @@ function RelayCheck.line(summary: Summary, seconds: number): string
 	table.sort(calls)
 
 	local reached: string = `{summary.blocks} blocks, {summary.withheld} withheld blocks, {summary.frames} tap frames`
-	local crossed: string = `{summary.asks} asks, {summary.reveals} reveals and {summary.hides} hides`
+	local crossed: string = `{summary.asks} asks, {summary.reveals} reveals, {summary.hides} hides`
+	local capped: string = `{summary.held} held outside a crowd cap`
 	local head: string =
-		`RelayCheck {summary.layout}: {summary.runs} runs in {string.format("%.1f", seconds)} s, {reached}, {crossed}`
+		`RelayCheck {summary.layout}: {summary.runs} runs in {string.format("%.1f", seconds)} s, {reached}, {crossed}, {capped}`
 	local parts: { string } = { head, `calls {table.concat(calls, ", ")}`, `{summary.found} mismatches` }
 
 	for _, mismatch: string in summary.mismatches do

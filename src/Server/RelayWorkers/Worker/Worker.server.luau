@@ -1,7 +1,7 @@
 --[[
-    One of the relay's Actor workers, run in a clone of its Actor: loads
-    Remote in the serial phase, runs each round's turns desynchronized and
-    fires the round's result or failure back by its Actor's BindableEvent
+    One Actor worker of a pool, the relay's or anti-ESP's, run in a clone of
+    its Actor: loads its pool's Remote in the serial phase, runs each round
+    desynchronized and fires its result or failure back by its BindableEvent
 --]]
 
 --!strict
@@ -29,6 +29,7 @@ end
 local actor: Actor = found
 local worker: number = index
 local event: BindableEvent = made
+local pool: string = `{actor.Parent}` -- The pool's folder, which every clone sits in as its script starts
 
 local Run: Run? = nil -- Remote.run, nil until the setup has loaded Remote and run Remote.setup
 local FireFailed: boolean = false -- Whether a desynchronized fire has failed, which is warned of once
@@ -39,12 +40,12 @@ actor:BindToMessage(Layout.SETUP, function (remote: ModuleScript, settings: unkn
 	-- require can't run desynchronized, so Remote is loaded here in the serial phase
 	local loaded: boolean, Remote: any = pcall(require, remote)
 	if not loaded then
-		return warn(`Relay worker {worker} could not require Remote, so it stays unready: {Remote}`)
+		return warn(`Worker {worker} in {pool} could not require Remote, so it stays unready: {Remote}`)
 	end
 
 	local setUp: boolean, failure: any = pcall(Remote.setup, settings)
 	if not setUp then
-		return warn(`Relay worker {worker} could not run Remote.setup, so it stays unready: {failure}`)
+		return warn(`Worker {worker} in {pool} could not run Remote.setup, so it stays unready: {failure}`)
 	end
 
 	Run = Remote.run
@@ -58,7 +59,8 @@ actor:BindToMessageParallel(Layout.RUN, function (round: number, shared: buffer,
 	local failure: string? = nil
 	local clocks: buffer? = nil
 
-	-- A throw out of Remote.run means a bad hand-in or a broken worker, since Remote catches each viewer's own
+	-- A throw out of Remote.run means a bad hand-in or a broken worker, since the relay's Remote catches each
+	-- viewer's own and anti-ESP's runs no game code
 	if run then
 		local ran: boolean, value: any, timed: any = pcall(run, shared, own)
 		if ran then
@@ -68,7 +70,7 @@ actor:BindToMessageParallel(Layout.RUN, function (round: number, shared: buffer,
 			failure = `{value}`
 		end
 	else
-		failure = `Relay worker {worker} was sent round {round} before its setup`
+		failure = `Worker {worker} in {pool} was sent round {round} before its setup`
 	end
 
 	local finish: number = os.clock()
@@ -98,7 +100,7 @@ actor:BindToMessageParallel(Layout.RUN, function (round: number, shared: buffer,
 		FireFailed = true
 		actor:SetAttribute(Layout.FIRE_FAILED, `{thrown}`)
 
-		local failed: string = `Relay worker {worker} could not fire its BindableEvent desynchronized`
+		local failed: string = `Worker {worker} in {pool} could not fire its BindableEvent desynchronized`
 		warn(`{failed}, so it fires in the serial phase: {thrown}`)
 	end
 

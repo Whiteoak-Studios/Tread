@@ -1,7 +1,7 @@
 --[[
     Dev client values: Frontier Zero's remote smoothing, ragdoll, correction,
     draw distance and detail numbers, stand-ins where it sets none, and the dev
-    place's view, keys, prompt, shooter, replay, kit, panels and run windows
+    place's view, keys, prompt, shooter, replay, kit, panels, ghosts and runs
 --]]
 
 --!strict
@@ -179,6 +179,24 @@ return {
 		radii = { 25, 100, 500 }, -- Studs either way of the player the area cycles through, before the whole map
 	},
 
+	-- The ghosts on this key, or a touch screen's button: a box where the server holds each player drawn nearest the
+	-- camera, and a readout of how far the tick drawn stands behind the server's clock
+	ghost = {
+		key = Enum.KeyCode.G, -- Bound to nothing else in the dev place
+		button = UDim2.new(0.5, 56, 0, 8), -- The touch button's top left, 8 pixels right of the live panel's button
+		wait = 10, -- Seconds the start waits at boot for the player's PlayerGui
+		slots = 16, -- The most players an ask names, the ghosts event's bound
+		askEvery = 0.25, -- Seconds at least between asks, inside the server's 4 a second
+		linger = 0.5, -- Seconds a ghost stays after the newest message that named it, once messages stop
+		refresh = 0.1, -- Seconds between the readout's readings
+		ring = 32, -- The newest ticks received kept with their stamps, 1.6 s at the 20 Hz relay
+		still = 0.5, -- Studs a second below which the gap over the speed isn't read
+		color = Color3.fromRGB(70, 230, 120), -- Green, apart from the ESP's red and grey and the hitboxes' colors
+		transparency = 0.5,
+		anchorSize = Vector3.new(0.1, 0.1, 0.1), -- The invisible part each box is adorned to
+		drawn = "DevGhost", -- The Workspace folder the boxes draw in, and the ScreenGui the readout shows in
+	},
+
 	-- G5's client cost: the window the dev server's ClientCost scenario opens, and what each client's line reads
 	cost = {
 		attribute = "ClientCost", -- The Workspace attribute the scenario sets to a window's label, and clears at its end
@@ -206,6 +224,49 @@ return {
 		interval = 1, -- Seconds between samples of the receive rates, as the A0 arm's client takes them
 		longest = 90, -- Seconds a window samples at most, past the scenario's 40 s window, before it ends on its own
 		percentiles = { 0.5, 0.95, 0.99 }, -- Each rate's, as the line prints them
+	},
+
+	-- The parallel probes: the windows the dev server's ClientParallel scenario opens, P6's worker counts, loop and
+	-- landing arms, and P8's arms over stand-in rigs
+	parallel = {
+		attributes = {
+			cores = "ClientCores", -- The Workspace attribute set to P6's window's label, and cleared at its end
+			bend = "ClientBend", -- And P8's
+		},
+
+		readyWait = 10, -- Seconds a pool's workers have to bind their topics, or to connect a bend arm, before it stops
+		resultWait = 2, -- Seconds the workers have to hand in an arm's samples once it ends
+
+		-- P6's counts, as the dev server's ParallelProbe takes them, over the interpreted loop
+		cores = {
+			workers = { 1, 2, 4, 8, 16 }, -- Worker counts measured in turn, each with clones of its own
+			repeats = 50, -- Batches at each count, and serial runs of the loop for the baseline
+			workMs = 2, -- Milliseconds the loop is sized to take on this client
+			bytes = 4096, -- The buffer each pass of the loop goes over
+			trialPasses = 20, -- Passes each sizing run times
+			trials = 5, -- Sizing runs, the fastest of which sizes the loop
+			batchWait = 1, -- Seconds a batch may be in flight before its count stops short
+			runWait = 20, -- Seconds a count's batches may take in all before the count stops short
+		},
+
+		-- P6's landing arms, one after another on the same workers
+		landing = {
+			events = { "PreRender", "PreSimulation", "PostSimulation" }, -- Each arm's frame event, in turn
+			workers = 4,
+			holdMs = 0.25, -- Milliseconds each callback holds its thread before it synchronizes
+			frames = 600, -- Of its event an arm runs for at most
+			seconds = 10, -- And seconds
+		},
+
+		-- P8's arms, off, then serial on the main thread, then on each worker count, each over stand-ins of its own
+		bend = {
+			workers = { 1, 2, 4, 8 },
+			steps = 600, -- Simulation steps an arm counts at most
+			seconds = 8, -- And seconds
+			settle = 0.5, -- Seconds an arm's stand-ins stand before its steps count
+			at = Vector3.new(-6000, 900, 6000), -- Where every stand-in stands, far from the loads and out of the camera's view
+			rise = { base = 0, spacing = 0.1, count = 8 }, -- Studs each target rises above its rest, cycled by step
+		},
 	},
 
 	-- The dev place's exploit kit: what its panel counts, what each tool does, and how the ESP draws

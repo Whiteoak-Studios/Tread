@@ -31,6 +31,10 @@ local FAILURE_LENGTH: number = 1000
 local OWN_BYTES: number = 7 -- An own hand-in's header
 local CALL_BYTES: number = 15
 local HAND_BYTES: number = 57
+local SHARED_HEADER: number = 35 -- A shared hand-in's header
+local TUNING_HEADER: number = 20 -- Its bands' count, flags and crowd fields, before each band and edge
+local MAX_BANDS: number = 8 -- Constants.MAX_BANDS
+local U8_TOP: number = 2 ^ 8 - 1
 
 type Check = (boolean, string) -> ()
 
@@ -64,12 +68,6 @@ local function start(turn: any)
 		leave = 1000,
 		sleepers = 500,
 		npcs = 800,
-		nearEnterSquared = 40000,
-		nearLeaveSquared = 48400,
-		nearAim = 20,
-		nearFloor = 15,
-		farAim = 15,
-		farFloor = 10,
 		weightNear = 1,
 		weightFar = 0.5,
 		weightShooter = 2,
@@ -112,12 +110,13 @@ local function same(a: buffer, at: number, b: buffer, bAt: number, length: numbe
 end
 
 -- A Shared for a reader to fill
-local function emptyShared(): any
+local function emptyShared(Wire: any): any
 	return {
 		run = 0,
 		tick = 0,
 		elapsed = 0,
 		wire = 0,
+		tune = Wire.tuning(),
 		places = 0,
 		looks = {},
 		lookCount = 0,
@@ -132,10 +131,12 @@ local function emptyShared(): any
 end
 
 --[[
-    The shared hand-in at its edges: slots 0 and 4,095, a life of 255, the
-    longest look and held item beside empty ones, the u32 run and changed
-    tick at their tops, a NaN team and facing, and more footsteps than a
-    world's buffers start with; then an empty one, with zero footsteps
+    The shared hand-in at its edges: the most bands with every one of their
+    fields at its top, slots 0 and 4,095, a life of 255, the longest look
+    and held item beside empty ones, the u32 run and changed tick at their
+    tops, a NaN team and facing, and more footsteps than a world's buffers
+    start with; then one band into the same reader, its lists cut to it, and
+    an empty one, with zero footsteps
 --]]
 
 local function shared(s: Sides, check: Check)
@@ -181,13 +182,33 @@ local function shared(s: Sides, check: Check)
 		},
 	}
 
-	local sharedOut: any = emptyShared()
+	local sharedOut: any = emptyShared(Wire)
 	sharedOut.run = run
 	sharedOut.tick = 2 ^ 40 + 0.5
 	sharedOut.elapsed = 3
 	sharedOut.wire = U16_TOP
 	sharedOut.places = #bodies
 	sharedOut.observing = true
+
+	-- The most bands and edges, each f64 a value of its own, a NaN and an infinity among them
+	local tune: any = sharedOut.tune
+	tune.bands = MAX_BANDS
+	tune.flags = U8_TOP
+	tune.crowdSize = U16_TOP
+	tune.crowdRate = 1e300
+	tune.crowdFloor = 0.5
+	for band: number = 1, MAX_BANDS do
+		tune.aims[band] = band * 2.5
+		tune.floors[band] = band * 1.25
+	end
+
+	for edge: number = 1, MAX_BANDS - 1 do
+		tune.enters[edge] = (edge * 1000.5) ^ 2
+		tune.leaves[edge] = (edge * 1100.25) ^ 2
+	end
+
+	tune.floors[MAX_BANDS] = 0 / 0
+	tune.leaves[MAX_BANDS - 1] = math.huge
 
 	for place: number, body: { [string]: any } in bodies do
 		local slot: number = body.slot
@@ -238,7 +259,9 @@ local function shared(s: Sides, check: Check)
 	end
 
 	local data: buffer = Wire.writeShared(from, sharedOut)
-	local read: any = emptyShared()
+	local read: any = emptyShared(Wire)
+	local readTune: any = read.tune
+	local readAims: { number } = readTune.aims
 	local at: number = Wire.readLooks(data, into, read)
 	Wire.readBodies(data, at, into, read, true)
 
@@ -249,6 +272,23 @@ local function shared(s: Sides, check: Check)
 			read[field] == sharedOut[field],
 			`The shared hand-in's {field} came back {read[field]}, not {sharedOut[field]}`
 		)
+	end
+
+	-- Each f64 by its bytes, so the NaN compares
+	local function sameNumber(a: number, b: number): boolean
+		return a == b or (a ~= a and b ~= b)
+	end
+
+	check(read.tune == readTune and readTune.aims == readAims, "The reader's bands came back in new tables")
+	for _, field: string in { "bands", "flags", "crowdSize", "crowdRate", "crowdFloor" } do
+		check(readTune[field] == tune[field], `The bands' {field} came back {readTune[field]}, not {tune[field]}`)
+	end
+
+	for _, list: string in { "aims", "floors", "enters", "leaves" } do
+		check(#readTune[list] == #tune[list], `The bands' {list} came back {#readTune[list]} long, not {#tune[list]}`)
+		for index: number, value: number in tune[list] do
+			check(sameNumber(readTune[list][index], value), `The bands' {list}[{index}] came back otherwise`)
+		end
 	end
 
 	local plane: number = (run % DEPTH) * SLOTS
@@ -335,15 +375,35 @@ local function shared(s: Sides, check: Check)
 		check(intoSteps.places[index + 1] == steps.places[index + 1], `Footstep {index}'s place came back wrong`)
 	end
 
+	-- One band into the same reader cuts its lists to it, with no edge
+	local one: any = emptyShared(Wire)
+	one.tune.bands = 1
+	one.tune.aims[1] = 20
+	one.tune.floors[1] = 15
+	Wire.readLooks(Wire.writeShared(from, one), into, read)
+	check(
+		readTune.bands == 1
+			and #readTune.aims == 1
+			and #readTune.floors == 1
+			and #readTune.enters == 0
+			and #readTune.leaves == 0
+			and readTune.aims[1] == 20
+			and readTune.floors[1] == 15,
+		`One band came back as {readTune.bands} with {#readTune.aims} aims and {#readTune.enters} edges`
+	)
+
 	-- An empty run: no body, no mark, no footstep and no sink
 	steps.count = 0
-	local empty: any = emptyShared()
+	local empty: any = emptyShared(Wire)
 	empty.run = 1
 	local emptyData: buffer = Wire.writeShared(from, empty)
-	local emptyRead: any = emptyShared()
+	local emptyRead: any = emptyShared(Wire)
 	Wire.readBodies(emptyData, Wire.readLooks(emptyData, into, emptyRead), into, emptyRead, true)
 
-	check(buffer.len(emptyData) == 35, `An empty shared hand-in took {buffer.len(emptyData)} B, not its 35 B header`)
+	check(
+		buffer.len(emptyData) == SHARED_HEADER + TUNING_HEADER,
+		`An empty shared hand-in took {buffer.len(emptyData)} B, not its 35 B header and its bands' 20 B`
+	)
 	check(
 		emptyRead.run == 1 and emptyRead.places == 0 and not emptyRead.observing,
 		"An empty shared hand-in's header came back wrong"
@@ -354,8 +414,8 @@ end
 --[[
     A worker's own hand-in at its edges: every call kind with its ids and
     values at their tops, more calls than a log starts with, and 300
-    viewers with and without a slot, a target, a look and a return, each
-    with no target carrying its visible and quiet rows; then one with zero
+    viewers with and without a slot, a target, a look, a return and a zoom,
+    each with no target carrying its visible and quiet rows; then one with zero
 --]]
 
 local function own(s: Sides, check: Check)
@@ -419,6 +479,7 @@ local function own(s: Sides, check: Check)
 			received = index % 3 == 1 and U16_TOP or index,
 			sequence = index % 7 == 0 and U16_TOP or index,
 			back = not watching and index % 2 == 1,
+			zoomed = index % 5 < 2,
 			traffic = index * 1e9 + 0.5,
 			team = team,
 			row = (index - 1) * ROW_BYTES,
@@ -445,7 +506,19 @@ local function own(s: Sides, check: Check)
 	for index: number, hand: any in hands do
 		local back: any = read[index]
 		for _, field: string in
-			{ "id", "slot", "target", "position", "look", "acknowledged", "received", "sequence", "back", "traffic" }
+			{
+				"id",
+				"slot",
+				"target",
+				"position",
+				"look",
+				"acknowledged",
+				"received",
+				"sequence",
+				"back",
+				"zoomed",
+				"traffic",
+			}
 		do
 			check(back[field] == hand[field], `Viewer {index}'s {field} came back {back[field]}, not {hand[field]}`)
 		end
@@ -621,7 +694,7 @@ local function result(s: Sides, check: Check)
 	Wire.view(writer, U32_TOP, second, secondShadow)
 
 	local failure: string = string.rep("x", FAILURE_LENGTH)
-	local data: buffer = Wire.finish(writer, U32_TOP, 0, 123, VIEWERS, failure)
+	local data: buffer = Wire.finish(writer, U32_TOP, 0, 123, U32_TOP - 1, VIEWERS, failure)
 
 	local records: buffer = buffer.create(SLOTS * RECORD_BYTES)
 	local reader: any = Wire.reader(records)
@@ -632,7 +705,11 @@ local function result(s: Sides, check: Check)
 		"The result's counts of turns, views and answers came back wrong"
 	)
 	check(
-		reader.places == SLOTS and reader.sent == U32_TOP and reader.cut == 0 and reader.visited == 123,
+		reader.places == SLOTS
+			and reader.sent == U32_TOP
+			and reader.cut == 0
+			and reader.visited == 123
+			and reader.rest == U32_TOP - 1,
 		"The result's run counts came back wrong"
 	)
 	check(reader.failed == VIEWERS and reader.failure == failure, "The result's failure came back wrong")
@@ -743,10 +820,10 @@ local function result(s: Sides, check: Check)
 
 	Wire.begin(writer, 0)
 	Wire.view(writer, 1, first, firstShadow)
-	Wire.open(reader, Wire.finish(writer, 0, 0, 0, 0, ""))
+	Wire.open(reader, Wire.finish(writer, 0, 0, 0, 0, 0, ""))
 
 	check(
-		reader.places == 0 and reader.failed == 0 and reader.failure == "",
+		reader.places == 0 and reader.rest == 0 and reader.failed == 0 and reader.failure == "",
 		"The second result's header came back wrong"
 	)
 	check(not Wire.nextTurn(reader) and Wire.nextView(reader) == 1, "The second result's turns or view came back wrong")

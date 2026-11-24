@@ -997,7 +997,7 @@ function Interpolate.withheld(data: buffer)
 	local tick: number = arrive(Read.tick)
 	applyLooks(tick)
 
-	-- A record for a generation the slot table hasn't announced is dropped, since the next comes at its tier rate
+	-- A record for a generation the slot table hasn't announced is dropped, since the next comes at its band's rate
 	local records: buffer = Read.recordData
 	for index: number = 1, Read.recordCount do
 		local offset: number = Read.records[index]
