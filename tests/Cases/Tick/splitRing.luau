@@ -7,7 +7,7 @@
 --!strict
 local Split = require("../../Fixtures/Server/Split")
 
-local CALM_TICKS: number = 20 -- The calm ticks before a tick that defers
+local CALM_TICKS: number = 3 -- The calm ticks before a tick that defers
 local DEFERRALS: number = 3 -- The deferred ticks the case runs
 local QUARTER: number = 0.25 -- A Heartbeat's share of a tick that owes none
 local HALF: number = 0.5 -- The share that begins the next calm tick

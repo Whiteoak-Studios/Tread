@@ -26,14 +26,14 @@ local NPCS: { { number } } = { { 2, -12 }, { 2, 0 }, { 2, 12 } }
 -- Each tick's bytes out and the digest of the bots' tap frames, measured from a run of this load with every cap off
 local BYTES: { number } = { 1024, 2312, 2312, 2312, 2312, 2312, 2312, 2312 }
 local DIGESTS: { number } = {
-	394771816,
-	402290391,
-	1582143928,
-	3067451433,
-	3886542407,
-	3473469802,
-	4025994559,
-	2508636545,
+	2741917612,
+	1332849378,
+	2145591313,
+	415932788,
+	479943523,
+	471198982,
+	539057932,
+	1342521553,
 }
 
 -- A command walking forward along -Z with nothing pressed

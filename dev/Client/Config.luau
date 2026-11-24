@@ -36,7 +36,7 @@ type JointLimits = index<index<ClientSettings, "bodies">, "jointLimits">
 
 return {
 	interpolation = {
-		delay = 0.15, -- Seconds, where the adaptive delay starts
+		delay = 0.10, -- Seconds, where the adaptive delay starts
 		delayMax = 0.25, -- Past this the client snaps
 		scaleMin = 0.95,
 		scaleMax = 1.05,

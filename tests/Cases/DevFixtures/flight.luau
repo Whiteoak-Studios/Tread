@@ -10,7 +10,7 @@ local DevServer = require("../../Fixtures/DevServer/Harness")
 local Rig = require("../../Fixtures/Server/Rig")
 
 local TURN: number = 2 * math.pi
-local DELAY: number = 150 -- Milliseconds of interpolation delay the shooter's Move reports, the rewind's least
+local DELAY: number = 150 -- Milliseconds of interpolation delay the shooter's Move reports, inside the rewind's clamp
 local REWOUND: number = 5 -- Relay ticks a command's expected render time lies behind it: the 0.1 s round trip and the delay
 local SETTLE: number = 20 -- Ticks for both bodies to land and the shooter's eye to settle
 local SPRINT: number = 10 -- Ticks the NPC sprints before the shot's command, so it crosses at full speed

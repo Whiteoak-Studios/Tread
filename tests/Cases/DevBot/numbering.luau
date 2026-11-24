@@ -11,7 +11,7 @@ local Harness = require("../../Fixtures/DevBot/Harness")
 local WRAP: number = 2 ^ 16
 local NEAR_WRAP: number = WRAP - 4 -- A tick a few short of the u16 wrap
 local REPEATS: number = 2 -- The commands each Move repeats before its new one
-local MILLISECONDS: number = 150 -- The delay the bot harness's config reports, 0.15 s
+local MILLISECONDS: number = 100 -- The delay the bot harness's config reports, 0.10 s
 local SEED: number = 1
 local FIRST_TICKS: number = 4 -- Ticks run before any OwnerState
 

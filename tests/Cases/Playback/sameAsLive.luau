@@ -18,7 +18,7 @@ local VISITOR: number = 52 -- Revealed at K + 8
 local SLEEPER: number = 53 -- Moved down at K + 18
 local TARGET: number = 60
 local GENERATION: number = 1
-local LAG: number = 150 -- Milliseconds, the live client's interpolation.delay
+local LAG: number = 100 -- Milliseconds, the live client's interpolation.delay
 local HALF: number = 1 / 40 -- Seconds, half a relay interval: two live frames a tick
 local REST_FROM: number = 10 -- The walker stops here, sends repeats at K + 12 and K + 16 and moves on after
 local REPEAT: number = 12
@@ -38,7 +38,7 @@ local SECOND_HEAD: number = 2
 local CLOSE: number = 1e-6
 
 -- The ticks after the keyframe the two are compared at, half an interval past each
-local COMPARED: { number } = { 4, 6, 9, 11, 13, 17, 19, 22, 24, 33 }
+local COMPARED: { number } = { 4, 6, 9, 11, 13, 17, 19, 21, 24, 33 }
 
 -- The walker's place on a tick: moving on, but held still from its rest to the tick it moves on
 local function walkerAt(index: number): vector
@@ -190,8 +190,8 @@ return function (): (boolean, string | nil)
 
 	-- The scene draws each rule live: the visitor once shown, the hidden player before its hide closes and not
 	-- after, the sleeper partway down its fall, and the walker's new look
-	local falling: any = liveDraws[22][SLEEPER]
-	if liveDraws[11][VISITOR] == nil or liveDraws[22][HIDDEN] == nil or liveDraws[24][HIDDEN] ~= nil then
+	local falling: any = liveDraws[21][SLEEPER]
+	if liveDraws[11][VISITOR] == nil or liveDraws[21][HIDDEN] == nil or liveDraws[24][HIDDEN] ~= nil then
 		return false, "The live scene didn't show the visitor, or the hidden player before and not after its hide"
 	elseif falling == nil or not (falling.position.y < SLEPT_AT.y and falling.position.y > DROPPED_AT.y) then
 		return false, "The live scene didn't draw the sleeper partway down its fall"

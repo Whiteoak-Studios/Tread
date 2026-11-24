@@ -12,7 +12,7 @@ local Game = require("../Codec/Game")
 local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
 local WIRE: number = 2 ^ 16 -- The values a block's u16 sequence and tick hold
 
--- Frontier Zero's interpolation block and rates, from game-integration
+-- Frontier Zero's interpolation block and rates, from game-integration, but the 0.15 s delay the cases are timed on
 local SETTINGS: { [string]: number } = { delay = 0.15, delayMax = 0.25, scaleMin = 0.95, scaleMax = 1.05 }
 local RATES: { [string]: number } = { simulation = 20, relay = 20 }
 

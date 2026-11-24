@@ -289,7 +289,7 @@ function Example.server(): ServerSettings
 		rewind = {
 			ceiling = 0.5,
 			rttCap = 0.2,
-			delayMin = 0.15,
+			delayMin = 0.10,
 			delayMax = 0.25,
 			extra = 2,
 			band = 1,
@@ -341,7 +341,7 @@ function Example.client(): ClientSettings
 		dress = function (_: Model, _: { [string]: any }, _: boolean) end,
 		undress = function (_: Model) end,
 		hold = function (_: Model, _: { [string]: any }?) end,
-		interpolation = { delay = 0.15, delayMax = 0.25, scaleMin = 0.95, scaleMax = 1.05 },
+		interpolation = { delay = 0.10, delayMax = 0.25, scaleMin = 0.95, scaleMax = 1.05 },
 
 		bodies = {
 			radius = 250,

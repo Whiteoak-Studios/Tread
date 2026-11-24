@@ -14,7 +14,7 @@ local WINDOW_SECONDS: number = 10 -- How far back each stage's times are kept, t
 local HEARTBEATS_KEPT: number = 2400 -- Heartbeats the per-Heartbeat ring holds, so a reader once a second misses none
 local LABEL_PREFIX: string = "Tread" -- Before each stage's name in its profiler label
 local FINISH_LABEL: string = `{LABEL_PREFIX} finish` -- The profiler label of a hold's poll
-local CALM_TICKS: number = 20 -- The calm ticks in a row a tick needs before it may defer its split stage
+local CALM_TICKS: number = 3 -- The calm ticks in a row a tick needs before it may defer its split stage
 local CALM_GAP: number = 3 -- The fewest Heartbeats from a tick that ran alone to the next for it to count as calm
 
 -- What a Heartbeat's entry says the loop did in it, each a bit of its flags

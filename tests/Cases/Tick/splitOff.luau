@@ -7,7 +7,7 @@
 --!strict
 local Split = require("../../Fixtures/Server/Split")
 
-local CALM_TICKS: number = 20 -- The calm ticks before a tick that defers while the split is on
+local CALM_TICKS: number = 3 -- The calm ticks before a tick that defers while the split is on
 local OFF_TICKS: number = CALM_TICKS * 2 -- The calm ticks run while it is off, twice the count
 local QUARTER: number = 0.25 -- A Heartbeat's share of a tick that owes none
 local HALF: number = 0.5 -- The share that begins the next calm tick
@@ -27,17 +27,17 @@ return function (): (boolean, string | nil)
 	end
 
 	got = Split.beat(loop, QUARTER)
-	if got ~= "poll 40, after 40, slices 40" or Split.flags(loop) ~= Tick.POLLED + Tick.RELEASED then
+	if got ~= "poll 6, after 6, slices 6" or Split.flags(loop) ~= Tick.POLLED + Tick.RELEASED then
 		return false, `With the split off, a held tick's next Heartbeat ran {got}, flagged {Split.flags(loop)}`
 	end
 
 	got = Split.beat(loop, QUARTER)
-	if got ~= "slices 40" or Split.flags(loop) ~= 0 then
+	if got ~= "slices 6" or Split.flags(loop) ~= 0 then
 		return false, `With the split off, the Heartbeat after the finish ran {got}, flagged {Split.flags(loop)}`
 	end
 
 	got = Split.beat(loop, HALF)
-	if got ~= "before 41, slices 41, split 41" or Split.flags(loop) ~= Tick.TICKED + Tick.HELD then
+	if got ~= "before 7, slices 7, split 7" or Split.flags(loop) ~= Tick.TICKED + Tick.HELD then
 		return false, `With the split off, a calm tick ran {got}, flagged {Split.flags(loop)}`
 	end
 
@@ -48,14 +48,14 @@ return function (): (boolean, string | nil)
 	end
 
 	got = `{Split.beat(loop, QUARTER)}; {Split.beat(loop, QUARTER)}; {Split.beat(loop, HALF)}`
-	if got ~= "poll 41, after 41, slices 41; slices 41; before 42, slices 42, early 42" then
+	if got ~= "poll 7, after 7, slices 7; slices 7; before 8, slices 8, early 8" then
 		return false, `The first calm tick after the split went on ran {got}`
 	end
 
 	-- 3) Off while the rest waits: the rest still runs at the next Heartbeat, and the next tick runs whole
 	Tick.useSplit(false)
 	got = `{Split.beat(loop, QUARTER)}; {Split.beat(loop, QUARTER)}; {Split.beat(loop, HALF)}`
-	if got ~= "slices 42, split 42; poll 42, after 42, slices 42; before 43, slices 43, split 43" then
+	if got ~= "slices 8, split 8; poll 8, after 8, slices 8; before 9, slices 9, split 9" then
 		return false, `With the split turned off while a rest waited, the next three Heartbeats ran {got}`
 	elseif Tick.splitOn() then
 		return false, "Tick.splitOn answered true after Tick.useSplit(false)"

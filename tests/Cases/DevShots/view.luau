@@ -61,7 +61,7 @@ local function movedBack(): (boolean, string?)
 	local at: vector = vector.create(-30, FEET.y, -40)
 	rig.relay({ tick = FIRST, reveals = reveal(), records = { record(at) } })
 	rig.relay({ tick = SECOND, records = { record(at + vector.create(STRIDE, 0, 0)) } })
-	rig.frames(2)
+	rig.frames(1)
 
 	local now: number = rig.handle:getRenderTime()
 	local pose: any = rig.State.new()

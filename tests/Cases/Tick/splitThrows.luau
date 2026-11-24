@@ -7,7 +7,7 @@
 --!strict
 local Split = require("../../Fixtures/Server/Split")
 
-local CALM_TICKS: number = 20 -- The calm ticks before a tick that defers
+local CALM_TICKS: number = 3 -- The calm ticks before a tick that defers
 local QUARTER: number = 0.25 -- A Heartbeat's share of a tick that owes none
 local HALF: number = 0.5 -- The share that begins the next calm tick
 
@@ -24,25 +24,25 @@ return function (): (boolean, string | nil)
 	Split.calm(loop, CALM_TICKS)
 
 	local got: string = `{Split.beat(loop, QUARTER)}; {Split.beat(loop, QUARTER)}; {Split.beat(loop, HALF)}`
-	if got ~= "poll 20, after 20, tail 20, slices 20; slices 20; before 21, slices 21, early 21" then
+	if got ~= "poll 3, after 3, tail 3, slices 3; slices 3; before 4, slices 4, early 4" then
 		return false, `The tick after {CALM_TICKS} calm ones ran {got}`
 	end
 
 	-- 1) The slice throws before the rest: reported, and the rest still runs and holds
-	loop.faults["slices 21"] = "throws"
+	loop.faults["slices 4"] = "throws"
 	got = Split.beat(loop, QUARTER)
-	loop.faults["slices 21"] = nil
+	loop.faults["slices 4"] = nil
 
-	if got ~= "slices 21, split 21" or Split.flags(loop) ~= Tick.DEFERRED + Tick.HELD then
+	if got ~= "slices 4, split 4" or Split.flags(loop) ~= Tick.DEFERRED + Tick.HELD then
 		return false, `A rest's Heartbeat whose slice threw ran {got}, flagged {Split.flags(loop)}`
 	elseif table.concat(loop.reports, ", ") ~= "stage slices" then
 		return false, `A slice that threw before a rest left the reports {table.concat(loop.reports, ", ")}`
 	end
 
 	-- 2) The stage after the split stage throws at the release: the stage after it and the slice still run
-	loop.faults["after 21"] = "throws"
+	loop.faults["after 4"] = "throws"
 	got = Split.beat(loop, QUARTER)
-	if got ~= "poll 21, after 21, tail 21, slices 21" or Tick.holding() then
+	if got ~= "poll 4, after 4, tail 4, slices 4" or Tick.holding() then
 		return false, `A release whose later stage threw ran {got}, holding {Tick.holding()}`
 	elseif table.concat(loop.reports, ", ") ~= "stage slices, stage after" then
 		return false, `A later stage that threw at a release left the reports {table.concat(loop.reports, ", ")}`
@@ -50,21 +50,21 @@ return function (): (boolean, string | nil)
 
 	-- 3) It throws in the rest itself: the stage after it still runs, nothing is held, and the loop goes on
 	got = Split.beat(loop, HALF)
-	if got ~= "before 22, slices 22, early 22" then
+	if got ~= "before 5, slices 5, early 5" then
 		return false, `The next calm tick ran {got}, not deferred`
 	end
 
 	loop.holds = false
-	loop.faults["after 22"] = "throws"
+	loop.faults["after 5"] = "throws"
 	got = Split.beat(loop, QUARTER)
-	if got ~= "slices 22, split 22, after 22, tail 22" or Split.flags(loop) ~= Tick.DEFERRED or Tick.holding() then
+	if got ~= "slices 5, split 5, after 5, tail 5" or Split.flags(loop) ~= Tick.DEFERRED or Tick.holding() then
 		return false, `A rest whose later stage threw ran {got}, flagged {Split.flags(loop)}`
 	elseif #loop.reports ~= 3 then
 		return false, `A later stage that threw in a rest left the reports {table.concat(loop.reports, ", ")}`
 	end
 
 	got = `{Split.beat(loop, QUARTER)}; {Split.beat(loop, HALF)}`
-	if got ~= "slices 22; before 23, slices 23, split 23, after 23, tail 23" then
+	if got ~= "slices 5; before 6, slices 6, split 6, after 6, tail 6" then
 		return false, `After a rest whose later stage threw, the loop ran {got}`
 	end
 

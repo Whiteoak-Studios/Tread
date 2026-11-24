@@ -14,18 +14,18 @@ local CLIENT: string = "src/Network/Client.luau"
 local VOLT: string = "ReplicatedStorage.Packages.Volt"
 local SETTLE: number = 30 -- Ticks of stand-ins before the Move, so the rewinds sit inside the history
 local HALF: number = 0.5 -- The share of a tick after SETTLE the Move arrives at
-local DELAY: number = 100 -- Milliseconds, under the rewind's 150 ms floor, so the lag carries the floor
+local DELAY: number = 100 -- Milliseconds, at the rewind's 100 ms floor
 local FAR: number = 10 -- Relay ticks a claim lies off, so rewindFor answers with the expected time
 local CLOSE: number = 1e-9
 local YAW: number = 0.75 -- The newest command's yaw, each older one's a quarter radian more, which its frame's look carries
 local YAW_STEP: number = 0.25
 
 -- Each command's lag from the bot's 0.1 s round trip, its queue wait of 0.5, 1.5 and 2.5 ticks at 20 Hz and the
--- 0.15 s floor
+-- 0.10 s floor
 local LAGS: { [number]: number } = {
-	[SETTLE + 1] = 275,
-	[SETTLE + 2] = 325,
-	[SETTLE + 3] = 375,
+	[SETTLE + 1] = 225,
+	[SETTLE + 2] = 275,
+	[SETTLE + 3] = 325,
 }
 
 return function (): (boolean, string | nil)
@@ -75,10 +75,10 @@ return function (): (boolean, string | nil)
 	local character: any = server:create(bot, rig:at(0, 0))
 	run(SETTLE)
 
-	-- A stand-in waited none, and before any Move the delay is 0, held at the 150 ms floor
+	-- A stand-in waited none, and before any Move the delay is 0, held at the 100 ms floor
 	local settled: any = frames[SETTLE] and Tap.read(frames[SETTLE]).owner
-	if not settled or settled.lag ~= 250 then
-		return false, `The settled frame's lag is {settled and settled.lag}, not the 250 ms of a stand-in`
+	if not settled or settled.lag ~= 200 then
+		return false, `The settled frame's lag is {settled and settled.lag}, not the 200 ms of a stand-in`
 	end
 
 	-- Three commands in one Move half a tick after SETTLE, so the one for SETTLE + n waits n - 0.5 ticks in the queue

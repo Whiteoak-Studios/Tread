@@ -179,7 +179,7 @@ return {
 	rewind = {
 		ceiling = 0.5,
 		rttCap = 0.2,
-		delayMin = 0.15,
+		delayMin = 0.10,
 		delayMax = 0.25,
 		extra = 2, -- Ticks
 		band = 1,

@@ -52,7 +52,7 @@ return function (): (boolean, string | nil)
 		{ name = "with no queue wait", rtt = 0, wait = 0, delay = 0.15, want = 97 },
 		{ name = "with the queue wait at its cap", rtt = 0, wait = 3, delay = 0.15, want = 94 },
 		{ name = "with the queue wait past its cap", rtt = 0, wait = 7, delay = 0.15, want = 94 },
-		{ name = "with the delay below its floor", rtt = 0, wait = 0, delay = 0, want = 97 },
+		{ name = "with the delay below its floor", rtt = 0, wait = 0, delay = 0, want = 98 },
 		{ name = "with the delay inside its range", rtt = 0, wait = 0, delay = 0.2, want = 96 },
 		{ name = "with the delay above its top", rtt = 0, wait = 0, delay = 1, want = 95 },
 		{

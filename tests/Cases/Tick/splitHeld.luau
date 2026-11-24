@@ -7,7 +7,7 @@
 --!strict
 local Split = require("../../Fixtures/Server/Split")
 
-local CALM_TICKS: number = 20 -- The calm ticks before a tick that defers
+local CALM_TICKS: number = 3 -- The calm ticks before a tick that defers
 local UNHELD: number = CALM_TICKS + 5 -- The calm ticks run while the split stage holds nothing, past the count
 local QUARTER: number = 0.25 -- A Heartbeat's share of a tick that owes none
 local HALF: number = 0.5 -- The share that begins the next calm tick
@@ -21,26 +21,26 @@ return function (): (boolean, string | nil)
 	local got: string = Split.calm(loop, UNHELD)
 	if string.find(got, "early", 1, true) then
 		return false, `A tick deferred over {UNHELD} calm ticks whose split stage held nothing: {got}`
-	elseif not string.find(got, "split 25, after 25", 1, true) then
+	elseif not string.find(got, "split 8, after 8", 1, true) then
 		return false, `The calm ticks whose split stage held nothing ran {got}`
 	end
 
 	-- 2) Once it holds, the tick that first holds runs whole and the next defers
 	loop.holds = true
 	got = `{Split.beat(loop, QUARTER)}; {Split.beat(loop, QUARTER)}; {Split.beat(loop, HALF)}`
-	if got ~= "slices 25; slices 25; before 26, slices 26, split 26" then
+	if got ~= "slices 8; slices 8; before 9, slices 9, split 9" then
 		return false, `The first tick whose split stage holds ran {got}`
 	end
 
 	got = `{Split.beat(loop, QUARTER)}; {Split.beat(loop, QUARTER)}; {Split.beat(loop, HALF)}`
-	if got ~= "poll 26, after 26, slices 26; slices 26; before 27, slices 27, early 27" then
+	if got ~= "poll 9, after 9, slices 9; slices 9; before 10, slices 10, early 10" then
 		return false, `The tick after the first held one ran {got}`
 	end
 
 	-- 3) A deferred rest that holds nothing leaves the next tick whole
 	loop.holds = false
 	got = `{Split.beat(loop, QUARTER)}; {Split.beat(loop, QUARTER)}; {Split.beat(loop, HALF)}`
-	if got ~= "slices 27, split 27, after 27; slices 27; before 28, slices 28, split 28, after 28" then
+	if got ~= "slices 10, split 10, after 10; slices 10; before 11, slices 11, split 11, after 11" then
 		return false, `After a deferred rest that held nothing, the next tick ran {got}`
 	end
 

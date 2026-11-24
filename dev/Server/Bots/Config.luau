@@ -425,7 +425,7 @@ return {
 
 	stage = "bots", -- The stage every bot sends from, after the relay
 	scope = "Tread", -- The Volt scope a bot's client side sends on
-	delay = 0.15, -- Seconds of interpolation delay a bot's Move reports, where the dev client's adaptive delay starts
+	delay = 0.10, -- Seconds of interpolation delay a bot's Move reports, where the dev client's adaptive delay starts
 
 	roam = {
 		arrive = 4, -- Studs from its goal at which a bot picks the next one

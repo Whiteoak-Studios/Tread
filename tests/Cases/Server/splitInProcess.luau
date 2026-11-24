@@ -1,7 +1,7 @@
 --[[
     With every turn in process no round is ever out, so with the split on
     nothing defers and the server sends what it does with it off, every
-    message on the same Heartbeat, past the twenty calm ticks the split needs
+    message on the same Heartbeat, past the calm ticks the split needs
 --]]
 
 --!strict
