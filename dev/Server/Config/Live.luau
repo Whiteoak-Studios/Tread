@@ -40,8 +40,11 @@ return {
 		"BenchStepSplit",
 		"BenchStepNpcs",
 		"BenchStepLevers",
+		"BenchStepNear",
 		"ClientParallel",
 		"ParallelFrames",
+		"ParallelStep",
+		"ParallelBounds",
 	},
 
 	-- The Run all queue's reports, each saved to the experience's DataStore under the queue's start time

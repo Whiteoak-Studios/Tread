@@ -8,8 +8,8 @@
 local Step = require("../../Fixtures/DevStep/Step")
 
 -- Step 3's levers in the list's order, after verdict memory, and whether each is marked alone
-local ORDER: string = "verdictMemory,stageSplit,antiEspWhole,npcBudget,relayBudget,farUnderLoad"
-local ALONE: { [string]: boolean } = { stageSplit = true }
+local ORDER: string = "verdictMemory,stageSplit,antiEspWhole,npcBudget,relayBudget,farUnderLoad,nearRate60"
+local ALONE: { [string]: boolean } = { stageSplit = true, nearRate60 = true }
 
 -- The caps as the fixture boots them, with each off, and with the settings' values changed below
 local CAPS: string = "true 0.001 0.005 20/0.5"

@@ -1,7 +1,7 @@
 --[[
     The parallel probes on the dev server: ParallelProbe's worker counts,
-    batches, loop and waits, ParallelReturn's rounds, values and sizes, and
-    ParallelFrames' arms, each wait a count's, a probe's or an arm's own
+    batches, loop and waits, ParallelReturn's rounds, values and sizes,
+    ParallelFrames' arms, ParallelStep's probes and ParallelBounds' loads
 --]]
 
 --!strict
@@ -48,5 +48,27 @@ return {
 		armedWait = 5, -- Seconds an arm's clones have to connect their frame callbacks
 		roundWait = 1, -- Seconds a round's results have to be all seen, past which it counts as never in
 		armWait = 60, -- Seconds an arm's rounds may take in all
+	},
+
+	-- ParallelStep's probes P9, P2, P7 and P3, each run on the same clones of the step worker
+	step = {
+		workers = 4, -- Clones of the step worker
+		slots = 90, -- Parts under Workspace.TestContent that P2's queries and P7's boxes are planned beside
+		boxes = 2000, -- P7's boxes at the hull's size
+		smallRadius = 0.5, -- Studs, P2's smaller sphere, the other being the step's radius
+		slotSeed = 2463534242, -- Where the slot pick's generator starts, a whole number from 1 to 2^32 - 1
+		planSeed = 362436069, -- And P2's queries'
+		boxSeed = 521288629, -- And P7's boxes'
+		pieceBytes = 250000, -- The most of P2's results a clone fires back at once, under P5's largest return
+		answerWait = 30, -- Seconds one probe's answers from every clone may take, past which a clone counts as silent
+	},
+
+	-- ParallelBounds' probe P10: the boxes the step's exact check is handed on bot loads, then the bounds query beside
+	-- it on the main thread and on the step block's clones, with the step block's boxes, seeds, pieces and waits
+	bounds = {
+		loads = { "S3", "S4", "Spread150" }, -- The bot harness's scenarios sampled, one after another
+		timing = { seeds = { 1 }, warmup = 5, window = 20, interval = 1 }, -- Each load's run, a bot harness Timing
+		cap = 60000, -- The most boxes a load keeps, past 149 bots at 20 ticks a second through its 20 s window
+		parallelBoxes = 5000, -- Each load's first boxes the clones answer too, behind P7's
 	},
 }

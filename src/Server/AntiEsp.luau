@@ -203,6 +203,7 @@ local LyingRays: number = 0
 local LookAheadMin: number = 0
 local LookAheadMax: number = 0
 local HiddenInterval: number = 0
+local NearRate: number = 0 -- Hz, as start or AntiEsp.setNearRate last set it
 local NearInterval: number = 0 -- A hidden pair's, while its target is within NearSquared of the viewer's eye
 local NearSquared: number = 0
 local VisibleInterval: number = 0
@@ -236,6 +237,11 @@ local FailOpens: number = 0
 
 local LyingTests: number = 0 -- Sleepers' and bodies' pair tests since AntiEsp.lying last gave them
 local Rays: number = 0 -- The rays cast on the engine, here and on the workers, since AntiEsp.rays last gave them
+
+-- Since start, for a dev bench's reads: the tests that left a pair hidden by its test before hidden on the near
+-- schedule, and the seconds summed from each one's test before to it
+local NearChecks: number = 0
+local NearSeconds: number = 0
 
 -- Verdict memory, a dev bench's switch: a player pair's last answer kept while nothing its rays are aimed from has
 -- moved, and the box of the Block part that last blocked it tested ahead of the engine. Each holds only for the
@@ -457,7 +463,8 @@ function AntiEsp.start(
 	LookAheadMin = server.antiEsp.lookAheadMin
 	LookAheadMax = server.antiEsp.lookAheadMax
 	HiddenInterval = 1 / server.antiEsp.hiddenRate
-	NearInterval = 1 / server.antiEsp.nearRate
+	NearRate = server.antiEsp.nearRate
+	NearInterval = 1 / NearRate
 	NearSquared = server.antiEsp.nearRadius ^ 2
 	VisibleInterval = 1 / server.antiEsp.visibleRate
 	Hold = server.antiEsp.hold
@@ -1498,7 +1505,9 @@ end
     clock now, and schedules its next. An open ray shows it; every ray
     blocked hides it, unless it was visible and a test found it so inside
     the hold, which keeps it sent until a test after the hold. A sleeper's
-    or body's pair joins its viewer's group for this slice
+    or body's pair joins its viewer's group for this slice. A player pair
+    hidden by its test before and left hidden on the near schedule counts
+    as a near recheck, with the seconds since that test
 --]]
 
 local function settle(pair: number, open: boolean, now: number)
@@ -1516,6 +1525,9 @@ local function settle(pair: number, open: boolean, now: number)
 	end
 
 	Tests += 1
+
+	-- When it was last tested, made or moved, which a near recheck's gap runs from
+	local last: number = PairChecked[pair]
 	PairChecked[pair] = now
 
 	if open then
@@ -1537,6 +1549,8 @@ local function settle(pair: number, open: boolean, now: number)
 			schedule(pair, VisibleQueue, now + VisibleInterval)
 		end
 	else
+		-- Hidden by its test before, so neither its first test nor one after a fail-open or a hold
+		local recheck: boolean = PairVerdicts[pair] == HIDDEN
 		PairVerdicts[pair] = HIDDEN
 		HiddenResults += 1
 
@@ -1546,6 +1560,11 @@ local function settle(pair: number, open: boolean, now: number)
 		if lying then
 			restamp(pair)
 		elseif vector.dot(offset, offset) <= NearSquared then
+			if recheck then
+				NearChecks += 1
+				NearSeconds += now - last
+			end
+
 			schedule(pair, NearQueue, now + NearInterval)
 		else
 			schedule(pair, HiddenQueue, now + HiddenInterval)
@@ -2279,6 +2298,45 @@ end
 
 function AntiEsp.memory(): (number, number)
 	return KeptTests, BoxRays
+end
+
+--[[
+    Sets the near rate, the Hz a hidden pair is retested at while its
+    target stands within antiEsp.nearRadius of its viewer's eye, from each
+    pair's next test, for a dev bench's before and after on one server. An
+    entry queued keeps its due time, and a new one waits behind the
+    queue's last, so no pair comes due early. It is refused before start,
+    which sets the rate the settings give, and for any rate but a finite
+    number above 0, leaving the rate as it was
+--]]
+
+function AntiEsp.setNearRate(rate: number)
+	if not Started then
+		error("AntiEsp.setNearRate ran before AntiEsp.start", 2)
+	elseif type(rate) ~= "number" or not (rate > 0 and rate < math.huge) then
+		error(`AntiEsp.setNearRate takes a rate in Hz as a finite number above 0, not {rate}`, 2)
+	end
+
+	NearRate = rate
+	NearInterval = 1 / rate
+end
+
+-- The near rate in Hz, as start or AntiEsp.setNearRate last set it
+function AntiEsp.nearRate(): number
+	return NearRate
+end
+
+--[[
+    The near hidden rechecks since start, each a test that left a player
+    pair hidden by its test before hidden on the near schedule, a pair's
+    first test and one after a fail-open or a hold left out, and the
+    seconds summed from each one's test before to it, on the clock each was
+    settled on, changing nothing, so each dev bench reading them takes the
+    difference between two of its own reads
+--]]
+
+function AntiEsp.near(): (number, number)
+	return NearChecks, NearSeconds
 end
 
 -- Gives a slot's life of a generation a team, nil for none

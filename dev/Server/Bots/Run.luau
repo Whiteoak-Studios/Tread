@@ -107,6 +107,9 @@ export type Walked = { from: number, moved: number, last: Vector3 }
 -- blocked
 export type Memory = { kept: number, boxRays: number }
 
+-- Anti-ESP's near hidden rechecks and their gaps summed in seconds, each a running total as a window last read it
+export type Near = { checks: number, seconds: number }
+
 -- Tread's work each Heartbeat of a window, oldest first, taken from the tick loop's ring as the window reads
 export type Readout = {
 	times: { number }, -- Seconds of the tick loop's whole work in each, the bots' stage's included
@@ -862,12 +865,13 @@ end
     the last second beside it, each read printed as it comes, the server's
     frames, every finished tick's summed stages and finish, Tread's time
     each Heartbeat, the counts, the relay's clocks while on, verdict memory's
-    counts and the commands lazy decode skipped, their lines printed after,
-    then the percentiles of every stats figure, every figure's samples and
-    the figures the lines carry. Given a step half's load point, it also
-    takes the interval of each Heartbeat after one a tick began in, and
-    where the real player's character stood from the point and how far it
-    walked read to read. It ends on its own deadline
+    counts, anti-ESP's near rechecks and the commands lazy decode skipped,
+    their lines printed after, then the percentiles of every stats figure,
+    every figure's samples and the figures the lines carry. Given a step
+    half's load point, it also takes the interval of each Heartbeat after
+    one a tick began in, and where the real player's character stood from
+    the point and how far it walked read to read. It ends on its own
+    deadline
 --]]
 
 local function window(
@@ -901,6 +905,8 @@ local function window(
 	local skippedBefore: number = Commands.skipped()
 	local keptBefore: number, boxRaysBefore: number = AntiEsp.memory()
 	local memory: Memory = { kept = keptBefore, boxRays = boxRaysBefore }
+	local checksBefore: number, gapsBefore: number = AntiEsp.near()
+	local near: Near = { checks = checksBefore, seconds = gapsBefore }
 	local stalled: boolean = false
 	local second: number = 0
 
@@ -975,6 +981,9 @@ local function window(
 
 		local kept: number, boxRays: number = AntiEsp.memory()
 		Run.memory(memory, kept, boxRays, stats.ticks, rates)
+
+		local checks: number, gaps: number = AntiEsp.near()
+		Run.near(near, checks, gaps, stats.seconds, rates)
 
 		local relayDropped: any = stats.relayDropped
 		if type(relayDropped) == "number" then
@@ -1861,6 +1870,29 @@ function Run.memory(last: Memory, kept: number, boxRays: number, ticks: any, rat
 end
 
 --[[
+    A read of anti-ESP's near hidden rechecks pushed onto rates: their
+    change since the window's last read over the read's seconds as
+    antiEspNearRechecks, and only for a read that had any, the change in
+    their summed gaps over that change, in milliseconds, as antiEspNearGap,
+    the totals then kept as the last read. A read with no seconds pushes no
+    rate, as Run.counts leaves out the workers' busy time
+--]]
+
+function Run.near(last: Near, checks: number, seconds: number, readSeconds: any, rates: Samples)
+	local rechecks: number = checks - last.checks
+	if type(readSeconds) == "number" and readSeconds > 0 then
+		push(rates, "antiEspNearRechecks", rechecks / readSeconds)
+	end
+
+	if rechecks > 0 then
+		push(rates, "antiEspNearGap", (seconds - last.seconds) / rechecks * MILLISECONDS)
+	end
+
+	last.checks = checks
+	last.seconds = seconds
+end
+
+--[[
     A stats read's relay clocks pushed onto samples, each section's newest
     run in milliseconds as clock <name>Ms. A read with relay.clocks off
     carries none and pushes nothing
@@ -1959,11 +1991,11 @@ end
     time on the place in the tick with the largest p95 with the bots' stage
     there and on each of the first three places, the ticks deferred and the
     split's fallbacks, any frame holding a tick, the tick total, each stage,
-    the finish, the send time, anti-ESP's figures, verdict memory's and any
-    workers', the frame caps' counts, the counts with the crowd cap's rest a
-    relay run, the viewer's bytes, any OwnerState sends and checks, the
-    commands lazy decode skipped and any relay clocks. One with no samples
-    is left out
+    the finish, the send time, anti-ESP's figures, verdict memory's, the near
+    rechecks' and any workers', the frame caps' counts, the counts with the
+    crowd cap's rest a relay run, the viewer's bytes, any OwnerState sends
+    and checks, the commands lazy decode skipped and any relay clocks. One
+    with no samples is left out
 --]]
 
 function Run.figures(taken: Taken): Figures
@@ -2043,6 +2075,8 @@ function Run.figures(taken: Taken): Figures
 	put(figures, "antiEspKept", taken.rates.antiEspKept, P50)
 	put(figures, "antiEspBoxRays", taken.rates.antiEspBoxRays, P50)
 	total(figures, "antiEspHidden", samples.antiEspHidden)
+	put(figures, "antiEspNearRechecks", taken.rates.antiEspNearRechecks, P50)
+	put(figures, "antiEspNearGap", taken.rates.antiEspNearGap, P50)
 	total(figures, "antiEspFailOpens", samples.antiEspFailOpens)
 	total(figures, "antiEspWorkerTests", samples.antiEspWorkerTests)
 	put(figures, "antiEspWorkerBusy", taken.rates.antiEspWorkerBusy, P50)

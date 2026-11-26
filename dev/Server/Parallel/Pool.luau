@@ -82,19 +82,48 @@ function Pool.within(seconds: number, check: () -> boolean): boolean
 end
 
 --[[
-    Clones that many workers into their folder under ServerScriptService,
+    Runs the work with an event under each clone, each connected to the
+    callback, then disconnects and destroys every one, whatever happened
+--]]
+
+function Pool.answering(actors: { Actor }, callback: (...any) -> (), work: (events: { BindableEvent }) -> ())
+	local events: { BindableEvent } = {}
+	local connections: { RBXScriptConnection } = {}
+	for _, actor: Actor in actors do
+		local event: BindableEvent = Instance.new("BindableEvent")
+		event.Parent = actor
+		table.insert(events, event)
+		table.insert(connections, event.Event:Connect(callback))
+	end
+
+	local ran: boolean, thrown: unknown = pcall(work, events)
+
+	for index: number, event: BindableEvent in events do
+		connections[index]:Disconnect()
+		event:Destroy()
+	end
+
+	if not ran then
+		error(thrown, 0)
+	end
+end
+
+--[[
+    Clones that many workers of the template given, or of the worker
+    template when given none, into their folder under ServerScriptService,
     waits for each to bind its topics, then runs the body with them. It
     gives why it stopped short, the body's own reason or a throw, nil when
     it didn't, and takes away every clone whatever happened
 --]]
 
-function Pool.with(workers: number, body: ({ Actor }) -> string?): string?
+function Pool.with(workers: number, body: ({ Actor }) -> string?, template: Actor?): string?
 	local folder: Folder = Instance.new("Folder")
 	folder.Name = HOME
 
+	local source: Actor = template or Template
 	local actors: { Actor } = {}
 	for index: number = 1, workers do
-		local actor: Actor = Template:Clone()
+		local actor: Actor = source:Clone()
 		actor.Name = `Worker{index}`
 		actor:SetAttribute(Work.WORKER, index)
 		actor.Parent = folder

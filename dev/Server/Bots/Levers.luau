@@ -23,6 +23,7 @@ local Game = require(ServerScriptService.Server.Game)
 local Run = require(ServerScriptService.Server.Bots.Run)
 
 local BEFORE: Config.Bands = require(ServerScriptService.Server.Bots.Config).step.before
+local NEAR_RAISED: number = require(ServerScriptService.Server.Bots.Config).step.nearRaised -- Hz, nearRate60's on
 local SEPARATOR: string = ", " -- Between the levers in a line
 
 -- One lever: its name, the step that added it, 0 for one from before the build, and how it is read and set
@@ -107,6 +108,11 @@ end
 -- Sets the NPCs' budget to the dev server's own when on, refused when it started with none, and to none when off
 local function setNpcBudget(on: boolean)
 	Npcs.setBudget(on and started(settings().npcs.budget, "npcs.budget") or nil)
+end
+
+-- Sets anti-ESP's near rate to the bench's raised rate when on, and to the dev server's own when off
+local function setNearRate(on: boolean)
+	AntiEsp.setNearRate(on and NEAR_RAISED or settings().antiEsp.nearRate)
 end
 
 -- Sets relay.budget to the dev server's own when on, refused when it started with none, and to none when off, which
@@ -227,6 +233,18 @@ local Levers = {
 				return Relay.underLoad() ~= nil
 			end,
 			set = setUnderLoad,
+		},
+
+		-- Flipped only by the near-rate run, so no other run's halves differ by anti-ESP's near rate
+		{
+			name = "nearRate60",
+			session = 3,
+			live = true,
+			alone = true,
+			get = function (): boolean
+				return AntiEsp.nearRate() == NEAR_RAISED
+			end,
+			set = setNearRate,
 		},
 	} :: { Lever },
 }

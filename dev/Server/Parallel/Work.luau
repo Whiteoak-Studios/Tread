@@ -26,10 +26,30 @@ local Work = {
 	HAND = "Hand", -- A round: its number, the spin in seconds and the store its stamps go into
 	WAKE = "Wake", -- An arm's callback: the frame event it runs on, the spin in seconds and the store
 
+	-- ParallelStep's messages to a step worker, P9's check and P7's first arm handled serially, the rest desynchronized
+	CHECK = "Check", -- P9's check: the worker's event and the main thread's include list
+	CAST = "Cast", -- P2's casts: the pieces' event, the closing event, the slots, every part, the hull, radii and seed
+	OVERLAP = "Overlap", -- P7's serial arm: the worker's event, the slots, the hull, the box count and the boxes' seed
+	OVERLAP_PARALLEL = "OverlapParallel", -- P7's desynchronized arm, with the same message
+	BATTERY = "Battery", -- P3's battery: the worker's event
+
+	-- P10's bounds query, desynchronized: the worker's event, the first box's place among every box the clone is sent,
+	-- the slots, the hull, a count of P7's boxes to rebuild and their seed, then a buffer of the boxes that follow them
+	BOUNDS = "Bounds",
+
 	-- The attributes on a worker's Actor
 	WORKER = "Worker", -- Its index from 1, which only a clone the pool parents carries
 	BOUND = "Bound", -- Set once it has bound every topic
 	ARMED = "Armed", -- Set once a ParallelFrames arm's frame callback is connected
+
+	-- A step worker's loads, each set true or to its failure's message before it marks itself bound
+	CONFIG = "LoadedConfig", -- The dev shared table, ReplicatedStorage.Shared.Dev.Config
+	ENGINE = "LoadedEngine", -- Tread's Step.Engine
+	WORLD = "LoadedWorld", -- Tread's Step.World
+	BUILTINS = "LoadedBuiltins",
+	QUERIES = "LoadedQueries",
+	CASTS = "BuiltCasts", -- Engine.casts over the shared table's collision
+	WORLD_BUILT = "BuiltWorld", -- World.new from the shared table, as the server builds its own
 
 	-- Its fields in the marks table, at (index - 1) * FIELDS plus each, the times by os.clock()
 	START = 1,

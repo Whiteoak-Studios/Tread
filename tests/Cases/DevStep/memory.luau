@@ -16,11 +16,11 @@ local TITLE: string = "Step benchmark verdict memory run session 3, "
 -- Each live lever's state as the dev server starts them, verdict memory off, in name order, and with it alone on
 local STARTED: string = table.concat({
 	"antiEspWhole true,antiEspWorkers false,bands true,crowdCap true,farUnderLoad true,lazyDecode true",
-	"npcBudget true,ownerChecks true,relayBudget true,stageSplit false,verdictMemory false",
+	"nearRate60 false,npcBudget true,ownerChecks true,relayBudget true,stageSplit false,verdictMemory false",
 }, ",")
 local REMEMBERING: string = table.concat({
 	"antiEspWhole true,antiEspWorkers false,bands true,crowdCap true,farUnderLoad true,lazyDecode true",
-	"npcBudget true,ownerChecks true,relayBudget true,stageSplit false,verdictMemory true",
+	"nearRate60 false,npcBudget true,ownerChecks true,relayBudget true,stageSplit false,verdictMemory true",
 }, ",")
 
 -- Each live lever's state now, by name, in name order

@@ -162,9 +162,9 @@ end
 
 --[[
     A half's figures at the size the live half's lines give them, with a
-    live step 1 half's OwnerState sends and checks, step 2's and step 3's at
-    the most digits a 150-player half could print, and each relay clock
-    named at its p50 and p95 when clocks are given
+    live step 1 half's OwnerState sends and checks, step 2's, step 3's and
+    the near rechecks' at the most digits a 150-player half could print, and
+    each relay clock named at its p50 and p95 when clocks are given
 --]]
 
 function Report.figures(clocks: { string }?): { [string]: number }
@@ -201,6 +201,8 @@ function Report.figures(clocks: { string }?): { [string]: number }
 		antiEspTests = 331.95,
 		antiEspRays = 10441.2,
 		antiEspHidden = 43120,
+		antiEspNearRechecks = 1341000, -- All 22,350 pairs of 150 players near, hidden and rechecked at 60 Hz
+		antiEspNearGap = 150, -- Milliseconds: an ask past failOpen's 150 ms fails the pair open, ending its rechecks
 		antiEspFailOpens = 0,
 		antiEspWorkerTests = 1740000,
 		antiEspWorkerBusy = 85.125,

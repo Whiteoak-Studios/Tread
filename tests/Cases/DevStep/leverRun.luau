@@ -12,7 +12,8 @@ local NO_CAPS: string = "false nil nil nil"
 local CAPS: string = "true 0.001 0.005 20/0.5"
 local HELD: string = "held for the run, each load's own lever off before and on after: "
 
--- The levers line as the run holds them: session 2's three off, the split as the server starts it, the caps off
+-- The levers line as the run holds them: session 2's three off, the split as the server starts it, the caps off, and
+-- the raised near rate off as the server starts it
 local LEVERS: string = table.concat({
 	"bands (session 2, live) off",
 	"crowdCap (session 2, live) off",
@@ -23,6 +24,7 @@ local LEVERS: string = table.concat({
 	"npcBudget (session 3, live) off",
 	"relayBudget (session 3, live) off",
 	"farUnderLoad (session 3, live) off",
+	"nearRate60 (session 3, live) off",
 }, ", ")
 
 -- What the run printed and asked for, in order: before then after for the crowd cap and the bands, after first for

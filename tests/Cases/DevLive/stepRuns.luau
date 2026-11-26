@@ -1,7 +1,7 @@
 --[[
-    The split, NPC budget and levers runs are scenarios the panel lists for
-    their minutes outside Run all, saved as the other step runs are, and each
-    whole report, its halves' long lines dropped, fits the size budget
+    The split, NPC budget, levers and near-rate runs are scenarios the panel
+    lists for their minutes outside Run all, saved as the other step runs are,
+    and each whole report, its halves' long lines dropped, fits the size budget
 --]]
 
 --!strict
@@ -41,6 +41,13 @@ local RUNS: { Listed } = {
 		title = "Step benchmark levers run session 3, ",
 		tables = { "S4 crowdCap", "S4 antiEspWorkers", "Spread300 bands" },
 	},
+	{
+		name = "BenchStepNear",
+		kind = "near",
+		minutes = 5,
+		title = "Step benchmark near rate run session 3, ",
+		tables = { "S3 nearRate60, antiEspWorkers off", "S3 nearRate60, antiEspWorkers on" },
+	},
 }
 
 return function (): (boolean, string | nil)
@@ -62,6 +69,7 @@ return function (): (boolean, string | nil)
 		BenchStepSplit = mounted.BenchStepSplit,
 		BenchStepNpcs = mounted.BenchStepNpcs,
 		BenchStepLevers = mounted.BenchStepLevers,
+		BenchStepNear = mounted.BenchStepNear,
 	}
 
 	for _, run: Listed in RUNS do

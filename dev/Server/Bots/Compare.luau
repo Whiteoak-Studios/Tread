@@ -73,6 +73,13 @@ local TAIL: { Row } = {
 		quiet = true,
 	},
 	{ names = { "antiEspHidden" }, label = `{BESIDE} hidden results`, places = WHOLE },
+	{
+		names = { "antiEspNearRechecks" },
+		label = `{BESIDE} near hidden rechecks a second p50`,
+		places = RATE,
+		quiet = true,
+	},
+	{ names = { "antiEspNearGap" }, label = `{BESIDE} near hidden recheck gap ms p50`, places = TIME, quiet = true },
 	{ names = { "antiEspFailOpens" }, label = `{BESIDE} fail-opens`, places = WHOLE },
 	{ names = { "antiEspWorkerTests" }, label = `{BESIDE} tests on workers`, places = WHOLE, quiet = true },
 	{ names = { "antiEspWorkerBusy" }, label = `{BESIDE} workers busy ms a second p50`, places = TIME, quiet = true },

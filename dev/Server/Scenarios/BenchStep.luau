@@ -21,6 +21,8 @@ local LOADS: { Config.StepLoad } = require(ServerScriptService.Server.Bots.Confi
 local MEMORY: Config.StepLoad = require(ServerScriptService.Server.Bots.Config).step.memory
 local NPCS: Config.StepLoad = require(ServerScriptService.Server.Bots.Config).step.npcs
 local LEVER_LOADS: { Config.StepLoad } = require(ServerScriptService.Server.Bots.Config).step.levers
+local NEAR_LOADS: { Config.StepLoad } = require(ServerScriptService.Server.Bots.Config).step.near
+local NEAR_RAISED: number = require(ServerScriptService.Server.Bots.Config).step.nearRaised -- Hz, nearRate60's on
 local TIMING: Config.Timing = require(ServerScriptService.Server.Bots.Config).step.timing
 local SESSION: number = require(ServerScriptService.Server.Bots.Config).step.session
 local HALVES: { string } = { "before", "after" } -- What the halves with the levers off and on are called
@@ -35,7 +37,9 @@ local MEMORY_TITLE: string = "Step benchmark verdict memory run"
 local SPLIT_TITLE: string = "Step benchmark split run"
 local NPCS_TITLE: string = "Step benchmark NPC budget run"
 local LEVERS_TITLE: string = "Step benchmark levers run"
+local NEAR_TITLE: string = "Step benchmark near rate run"
 local HELD: string = "held for the run, each load's own lever off before and on after" -- The levers run's one part
+local FOUND: string = "as the run found them, before each load holds the levers its table names" -- The near-rate run's
 local DATE: string = "!%Y-%m-%d" -- The UTC date, as the header names it
 local SEPARATOR: string = "; " -- Between the header's parts, and between the halves' lines
 local COMMA: string = ", " -- Between the refusals a half's levers gave
@@ -48,11 +52,13 @@ local CARRY_NOTE: string = "with relayBudget on, a viewer's turn after a run tha
 	.. "footsteps, which raises the bytes rows and leaves the records rows alone"
 local SPLIT_NOTE: string = "with stageSplit on, the frame holding a tick holds frame 1 alone, the relay's dispatch "
 	.. "moves to the Heartbeat after and the bots' stage to the one after that"
+local NEAR_NOTE: string = `with nearRate60 on, anti-ESP retests a near hidden pair at {NEAR_RAISED} Hz, and off at the `
+	.. "server's antiEsp.nearRate of" -- And the near-rate run's, before that rate
 
 type Figures = Compare.Figures
 
 -- The step benchmark's runs besides its own: the noise run, and those that flip one lever alone a load
-export type Kind = "noise" | "memory" | "split" | "npcs" | "levers"
+export type Kind = "noise" | "memory" | "split" | "npcs" | "levers" | "near"
 
 -- What a kind of run is called
 local function titleOf(kind: Kind?): string
@@ -66,6 +72,8 @@ local function titleOf(kind: Kind?): string
 		return NPCS_TITLE
 	elseif kind == "levers" then
 		return LEVERS_TITLE
+	elseif kind == "near" then
+		return NEAR_TITLE
 	end
 
 	return TITLE
@@ -81,6 +89,8 @@ local function loadsOf(kind: Kind?): ({ Config.StepLoad }, { string })
 		return { NPCS }, HALVES
 	elseif kind == "levers" then
 		return LEVER_LOADS, HALVES
+	elseif kind == "near" then
+		return NEAR_LOADS, HALVES
 	end
 
 	return LOADS, HALVES
@@ -98,6 +108,27 @@ end
 -- Adds every refusal of one list to another
 local function addAll(refused: { string }, more: { string })
 	table.move(more, 1, #more, #refused + 1, refused)
+end
+
+-- Adds each state a flip found to the states but for a lever they already name, so each keeps the first state found
+local function addFirst(states: { [string]: boolean }, found: { [string]: boolean })
+	for name: string, state: boolean in found do
+		if states[name] == nil then
+			states[name] = state
+		end
+	end
+end
+
+-- The levers a load holds, by name in name order, none for a load that holds none
+local function heldNames(load: Config.StepLoad): { string }
+	local names: { string } = {}
+	for name: string in load.hold or {} do
+		table.insert(names, name)
+	end
+
+	table.sort(names)
+
+	return names
 end
 
 --[[
@@ -131,15 +162,26 @@ local function held(): ({ [string]: boolean }, { string })
 	for _, load: Config.StepLoad in LEVER_LOADS do
 		local found: { [string]: boolean }, refusals: { string } = Levers.flip(SESSION, false, load.lever)
 		addAll(refused, refusals)
-
-		for name: string, state: boolean in found do
-			if states[name] == nil then
-				states[name] = state
-			end
-		end
+		addFirst(states, found)
 	end
 
 	return states, refused
+end
+
+--[[
+    Sets each lever a load holds, by its name, to the state it gives for
+    both the load's halves, adding to the run's states the state each was
+    in when the run first set it, and each refusal to the run's refusals
+--]]
+
+local function hold(load: Config.StepLoad, states: { [string]: boolean }, refused: { string })
+	local holding: { [string]: boolean } = load.hold or {}
+
+	for _, name: string in heldNames(load) do
+		local found: { [string]: boolean }, refusals: { string } = Levers.flip(SESSION, holding[name], name)
+		addAll(refused, refusals)
+		addFirst(states, found)
+	end
 end
 
 --[[
@@ -171,14 +213,17 @@ end
     The header: the run and its session, the UTC date, the place's version
     and the server's job, the real players in, the relay workers started,
     the anti-ESP workers made, what the session's build changes in how the
-    rows read, and every lever as it stands in each half, or once as the
-    levers run holds them
+    rows read, the near-rate run's two near rates, and every lever as it
+    stands in each half, or once as the levers run holds them or as the
+    near-rate run finds them
 --]]
 
 local function header(kind: Kind?, load: Config.StepLoad): string
 	local levers: { string } = {}
 	if kind == "levers" then
 		table.insert(levers, `{HELD}: {leversIn(kind, load, nil)}`)
+	elseif kind == "near" then
+		table.insert(levers, `{FOUND}: {leversIn(kind, load, nil)}`)
 	else
 		for place: number, on: boolean in COLUMNS do
 			local name: string, flip: boolean? = named(kind, place, on)
@@ -186,12 +231,14 @@ local function header(kind: Kind?, load: Config.StepLoad): string
 		end
 	end
 
+	local _, _, settings: Tread.ServerSettings = Game.get()
 	local notes: { string } = { CLOCK_NOTE, CARRY_NOTE }
 	if kind == "split" then
 		table.insert(notes, SPLIT_NOTE)
+	elseif kind == "near" then
+		table.insert(notes, `{NEAR_NOTE} {settings.antiEsp.nearRate} Hz`)
 	end
 
-	local _, _, settings: Tread.ServerSettings = Game.get()
 	local made: number = settings.antiEsp.workers or 0
 	local antiEsp: string = `{made} anti-ESP workers made`
 	if made == 0 then
@@ -278,20 +325,24 @@ local function unshown(scenario: string, before: Figures?, after: Figures?): { s
 end
 
 --[[
-    The header, each load's two halves in the configured order and the
-    load's table once both are done, titled by the load and any lever it
-    flips, and for the memory run its halves' check, with a line for each
-    half and each problem. A half that fails reads missing in its table
-    while the rest still run. It gives whether every half drove and cleaned
-    up with its levers set as it asked
+    The header, then each load's held levers set, its two halves in the
+    configured order and its table once both are done, titled by the load,
+    any lever it flips and each it holds, and for the memory run its halves'
+    check, with a line for each half and each problem. A held lever's first
+    state found joins the run's states and each refusal its refusals. A
+    half that fails reads missing in its table while the rest still run. It
+    gives whether every half drove and cleaned up with its levers set as it
+    asked
 --]]
 
-local function runLoads(kind: Kind?, lines: { string }): boolean
+local function runLoads(kind: Kind?, lines: { string }, states: { [string]: boolean }, refusals: { string }): boolean
 	local loads: { Config.StepLoad }, names: { string } = loadsOf(kind)
 	local passed: boolean = true
 	print(header(kind, loads[1]))
 
 	for _, load: Config.StepLoad in loads do
+		hold(load, states, refusals)
+
 		local figures: { [string]: Figures } = {} -- Each half's that drove, by its name
 		local judged: { [string]: Figures } = {} -- Those of the halves whose levers were set as they asked
 
@@ -315,6 +366,11 @@ local function runLoads(kind: Kind?, lines: { string }): boolean
 			title = `{load.scenario} {load.lever}`
 		end
 
+		local holding: { [string]: boolean } = load.hold or {}
+		for _, lever: string in heldNames(load) do
+			title = `{title}, {lever} {holding[lever] and "on" or "off"}`
+		end
+
 		print(Compare.table(title, names, figures[names[1]], figures[names[2]]))
 
 		if kind == "memory" then
@@ -329,13 +385,13 @@ end
 
 --[[
     Runs the step benchmark, or the kind of run given. The noise run sets
-    the session's levers on before its first half and the levers run holds
-    them off with each lever its loads flip, and each puts back what it
-    found after its last, however the run ended. A throw anywhere in the
-    run fails it with a line naming the throw. It passes only when every
-    half drove and cleaned up with its levers set as it asked, and in the
-    memory run its after half showed verdict memory and its before half
-    didn't
+    the session's levers on before its first half, the levers run holds
+    them off with each lever its loads flip, and the near-rate run's loads
+    each hold their own, and each puts back what it found after its last,
+    however the run ended. A throw anywhere in the run fails it with a line
+    naming the throw. It passes only when every half drove and cleaned up
+    with its levers set as it asked, every hold was set, and in the memory
+    run its after half showed verdict memory and its before half didn't
 --]]
 
 return function (kind: Kind?): (boolean, string | nil)
@@ -351,7 +407,7 @@ return function (kind: Kind?): (boolean, string | nil)
 		states, refused = held()
 	end
 
-	local ran: boolean, result: any = pcall(runLoads, kind, lines)
+	local ran: boolean, result: any = pcall(runLoads, kind, lines, states, refused)
 	addAll(refused, Levers.restore(states))
 
 	local passed: boolean = ran and result == true
