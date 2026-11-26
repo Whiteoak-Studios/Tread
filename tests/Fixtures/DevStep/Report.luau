@@ -201,7 +201,7 @@ function Report.figures(clocks: { string }?): { [string]: number }
 		antiEspTests = 331.95,
 		antiEspRays = 10441.2,
 		antiEspHidden = 43120,
-		antiEspNearRechecks = 1341000, -- All 22,350 pairs of 150 players near, hidden and rechecked at 60 Hz
+		antiEspNearRechecks = 447000, -- All 22,350 pairs of 150 players near, hidden and rechecked each tick at 20 Hz
 		antiEspNearGap = 150, -- Milliseconds: an ask past failOpen's 150 ms fails the pair open, ending its rechecks
 		antiEspFailOpens = 0,
 		antiEspWorkerTests = 1740000,

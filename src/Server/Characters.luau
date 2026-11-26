@@ -684,6 +684,7 @@ local function enlist(key: Key, player: Player?, slot: number, generation: numbe
 		target = nil,
 		look = nil,
 		zoomed = false,
+		delay = 0,
 	}
 	Invisible[slot] = false
 	Departed[slot] = nil
@@ -1639,10 +1640,10 @@ end
 --[[
     The relay stage, on a relay tick: the owners' part unless it already
     ran for the tick, then each character whose player is still here is a
-    viewer, with its acknowledgments, its newest look and the target it
-    spectates, then the relay gives every viewer its blocks, with each
-    platform's place at the tick for its riders, and a share of the focus
-    parts moves
+    viewer, with its acknowledgments, its newest look and delay and the
+    target it spectates, then the relay gives every viewer its blocks, with
+    each platform's place at the tick for its riders, and a share of the
+    focus parts moves
 
     @ relayTick | the relay tick as the server counts it, unwrapped
     @ tick | the simulation tick that starts it, unwrapped
@@ -1668,6 +1669,7 @@ function Characters.relay(relayTick: number, tick: number)
 			viewer.received = received
 			viewer.target = Spectate.targetOf(character.player)
 			viewer.look = Commands.look(connection)
+			viewer.delay = Commands.delay(connection)
 
 			count += 1
 			ViewerList[count] = viewer

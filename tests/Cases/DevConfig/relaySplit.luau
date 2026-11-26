@@ -41,10 +41,10 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- 1) Absent, false or no boolean, the relay table holds records as changes and the budget alone
+	-- 1) Absent, false or no boolean, the relay table holds records as changes, the past and the budget alone
 	local absent: { [string]: any } = place.load(CONFIG)
-	if Config.hash(absent.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET }) then
-		return false, `With {attribute} absent, relay holds more or less than changes set true and the budget`
+	if Config.hash(absent.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET, past = true }) then
+		return false, `With {attribute} absent, relay holds more or less than changes and past set true and the budget`
 	end
 
 	for _, value: any in OFF do
@@ -54,14 +54,14 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- 2) True, the split beside records as changes and the budget, and every other setting as with it absent
+	-- 2) True, the split beside records as changes, the past and the budget, and every other setting as with it absent
 	workspace:SetAttribute(attribute, true)
 	local on: { [string]: any } = place.load(CONFIG)
 	local restored: { [string]: any } = table.clone(on)
 	restored.relay = absent.relay
 
-	if Config.hash(on.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET, split = true }) then
-		return false, `With {attribute} true, relay is not records as changes and the budget with the split on`
+	if Config.hash(on.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET, split = true, past = true }) then
+		return false, `With {attribute} true, relay is not changes, the past and the budget with the split on`
 	elseif Config.hash(restored) ~= Config.hash(absent) then
 		return false, `With {attribute} true, a setting besides relay changed`
 	end

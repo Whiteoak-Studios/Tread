@@ -26,15 +26,13 @@ local RELAY_BUDGET: number = 0.005 -- Its frame caps, the dev place's: seconds a
 local UNDER_LOAD_RUNS: number = 20 -- Relay runs in a row over that budget before the far band halves
 local UNDER_LOAD_SCALE: number = 0.5
 local NPC_BUDGET: number = 0.001 -- Seconds a tick's NPC steps may take
-local NEAR_RATE: number = 30 -- Hz, the dev place's antiEsp.nearRate and the Example's, which anti-ESP starts on
 local PLACE_VERSION: number = 412
 local JOB_ID: string = "job-1"
 
 -- A half the stand-in run was asked for: its load, its name, the mode, the timing, and the live levers' states then:
 -- step 1's, step 2's, how many bands the relay holds, whether it holds a crowd cap, whether anti-ESP packs for its
 -- workers and whether verdict memory runs, and step 3's, whether the split is on, whether anti-ESP's slice runs whole,
--- the NPCs' budget, relay.budget and the far rate under load as runs/scale, each nil while off, and anti-ESP's near
--- rate in Hz
+-- the NPCs' budget, relay.budget and the far rate under load as runs/scale, each nil while off
 export type Asked = {
 	scenario: string,
 	half: string?,
@@ -51,7 +49,6 @@ export type Asked = {
 	npcBudget: number?,
 	relayBudget: number?,
 	underLoad: string?,
-	nearRate: number,
 }
 
 -- What the stand-in run gives back for a half, or throws
@@ -68,7 +65,7 @@ export type Mounted = {
 	Commands: any, -- Tread's own, whose lazy decode is one of step 1's live levers
 	Characters: any, -- Tread's own, whose owner checks are the other
 	Relay: any, -- Tread's own, started on the Example's tables, whose bands, crowd cap, budget and far rate are levers
-	AntiEsp: any, -- Tread's own on the Example's tables, whose workers, memory, whole slice and near rate are levers
+	AntiEsp: any, -- Tread's own on the Example's tables, whose workers, memory and whole slice are levers
 	Npcs: any, -- Tread's own, whose budget is one of step 3's
 	Tick: any, -- Tread's own, unstarted, whose split is the other
 	Config: any, -- The bot harness's
@@ -128,7 +125,7 @@ end
     scenarios handed that one, and the real levers over stand-ins for the
     dev game, whose server started 4 relay workers with its clocks, the
     out-of-view rate and records as changes on, made 2 anti-ESP workers and
-    has the dev place's bands, crowd cap, frame caps and near rate, and for
+    has the dev place's bands, crowd cap and frame caps, and for
     the bot run, which answers each half as the answer given says. Anti-ESP
     is started on the Example's tables with every ray open, since verdict
     memory's switch refuses before start. The levers start as the dev
@@ -172,7 +169,7 @@ function Step.load(answer: Answer): Mounted
 			crowd = { size = 32, rate = 20, floor = 5 },
 			underLoad = { runs = UNDER_LOAD_RUNS, scale = UNDER_LOAD_SCALE },
 		},
-		antiEsp = { workers = ANTI_ESP_WORKERS, whole = true, nearRate = NEAR_RATE },
+		antiEsp = { workers = ANTI_ESP_WORKERS, whole = true },
 		npcs = { budget = NPC_BUDGET },
 	}
 
@@ -200,7 +197,6 @@ function Step.load(answer: Answer): Mounted
 				npcBudget = Npcs.budget(),
 				relayBudget = Relay.budget(),
 				underLoad = underLoadOf(Relay),
-				nearRate = AntiEsp.nearRate(),
 			})
 
 			table.insert(events, `half {scenario}/{half}`)

@@ -8,6 +8,7 @@
 local roblox: any = require("@lune/roblox") -- Its typedefs leave out the datatypes and implementProperty
 
 local Environment = require("../../Environment")
+local Past = require("../Codec/Past")
 local Pool = require("./Pool")
 
 local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
@@ -300,7 +301,8 @@ function Handle.new(options: Options?): Rig
 
 	--[[
 	    Sends one relay block. Its tick is required and its sequence counts
-	    up from 1. Reveals and hides are { slot, generation, kind }; looks
+	    up from 1. Reveals and hides are { slot, generation, kind }, a reveal
+	    with a past as the Past fixture lays it out; looks
 	    are { slot, generation, outfit?, held? }; records are Record fields
 	    by name, every one but slot, generation and position optional;
 	    footsteps are Block's
@@ -312,9 +314,8 @@ function Handle.new(options: Options?): Rig
 		block.sequence = rig.sequence % WIRE
 		block.tick = spec.tick % WIRE
 
-		local reveals: { any } = spec.reveals or {}
 		local hides: { any } = spec.hides or {}
-		block.reveals, block.revealCount = reveals, #reveals
+		Past(block, spec.reveals or {}, Record, Constants, limits)
 		block.hides, block.hideCount = hides, #hides
 
 		local looks: { any } = spec.looks or {}

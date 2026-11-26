@@ -44,9 +44,9 @@ local RUNS: { Listed } = {
 	{
 		name = "BenchStepNear",
 		kind = "near",
-		minutes = 5,
+		minutes = 2.5,
 		title = "Step benchmark near rate run session 3, ",
-		tables = { "S3 nearRate60, antiEspWorkers off", "S3 nearRate60, antiEspWorkers on" },
+		tables = { "S3 antiEspWorkers" },
 	},
 }
 

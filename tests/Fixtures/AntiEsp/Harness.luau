@@ -29,6 +29,7 @@ local RTT: number = 0.2 -- Every bot viewer's round trip, inside the example's l
 local BUDGET: number = 1 -- Seconds a slice may take, more than any case's due tests need
 local LATE: number = 2 * BUDGET -- What a stand-in clock's late read gives, past the deadline of any slice it starts
 local TOLERANCE: number = 1e-6 -- Studs a logged ray's end may sit from a point and still end there
+local TICK_SLACK: number = 1e-9 -- Ticks a slice's time times the rate may fall short of its tick and still be in it
 
 type ServerSettings = Config.ServerSettings
 type Shared = Config.Shared
@@ -311,22 +312,28 @@ function Harness.reborn(self: Self, slot: number): number
 	return generation
 end
 
--- One slice at a schedule time, with every due test run unless a budget is given, and its rays logged fresh
-function Harness.slice(self: Self, now: number, budget: number?)
+--[[
+    One slice at a schedule time, with every due test run unless a budget
+    is given, and its rays logged fresh, on the server tick given, or else
+    the simulation tick that time falls in
+--]]
+
+function Harness.slice(self: Self, now: number, budget: number?, tick: number?)
 	table.clear(self.rays)
-	AntiEsp.run(budget or BUDGET, now)
+	AntiEsp.run(budget or BUDGET, now, tick or math.floor(now * self.shared.rates.simulation + TICK_SLACK))
 end
 
 --[[
     One slice at a schedule time on a stand-in clock started anew, whose
     read numbered late finds the deadline passed and every read after it,
-    none when late is left out
+    none when late is left out, on the server tick given or the one the
+    time falls in
 --]]
 
-function Harness.sliceOn(self: Self, clock: Clock, now: number, late: number?)
+function Harness.sliceOn(self: Self, clock: Clock, now: number, late: number?, tick: number?)
 	clock.reads = 0
 	clock.late = late or math.huge
-	self:slice(now)
+	self:slice(now, nil, tick)
 end
 
 --[[

@@ -22,6 +22,7 @@ local Config = require(script.Config)
 local Cost = require(script.Cost)
 local Elevator = require(ReplicatedStorage.Shared.Dev.Elevator)
 local Exploits = require(script.Exploits)
+local Gap = require(script.Gap)
 local Ghost = require(script.Ghost)
 local Input = require(script.Input)
 local Live = require(script.Live)
@@ -225,6 +226,7 @@ local client: Tread.Client = Tread.startClient(Shared, clientSettings)
 Exploits.start({ client = client, shared = Shared }) -- In this frame, so the ESP hears the first slot table
 Shots.start(client, Shared) -- In this frame too, so it hears every slot drawn
 Cost.start(client) -- In this frame too, so it counts every rig drawn
+Gap.start(client) -- In this frame too, so it hears every rig drawn
 Receive.start() -- Its listener lives for the client session, as Cost's does
 Probe.start() -- Its listeners live for the client session too
 local view: View.View = View.new(client, Config.view, cast)

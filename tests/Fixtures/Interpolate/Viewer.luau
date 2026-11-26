@@ -8,9 +8,11 @@
 --!strict
 local Environment = require("../../Environment")
 local Game = require("../Codec/Game")
+local Past = require("../Codec/Past")
 
 local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
 local WIRE: number = 2 ^ 16 -- The values a block's u16 sequence and tick hold
+local TICK_BYTES: number = 8 -- Each sample's relay tick, an f64, as the interpolation's ring keeps it
 
 -- Frontier Zero's interpolation block and rates, from game-integration, but the 0.15 s delay the cases are timed on
 local SETTINGS: { [string]: number } = { delay = 0.15, delayMax = 0.25, scaleMin = 0.95, scaleMax = 1.05 }
@@ -41,10 +43,14 @@ local Viewer = {}
 
 --[[
     A started viewer. Each override answers a require at its dotted path,
-    as Environment.load takes them
+    as Environment.load takes them, and a delay given stands in for the
+    0.15 s floor
 --]]
 
-function Viewer.new(overrides: { [string]: any }?): Viewer
+function Viewer.new(overrides: { [string]: any }?, delay: number?): Viewer
+	local settings: { [string]: number } = table.clone(SETTINGS)
+	settings.delay = delay or SETTINGS.delay
+
 	local globals: any = Environment.load(GLOBALS, overrides)
 	local tread: any = globals.game:GetService("ReplicatedStorage").Packages.Tread
 
@@ -75,7 +81,7 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 		StateWord = StateWord,
 		World = World,
 		world = world,
-		settings = SETTINGS,
+		settings = settings,
 		rates = RATES,
 		gravity = Scene.settings.gravity,
 		limits = Game.limits,
@@ -87,7 +93,7 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 		sequence = 0,
 	}
 
-	Interpolate.start(SETTINGS, RATES, Game.limits, layout, world)
+	Interpolate.start(settings, RATES, Game.limits, layout, world)
 
 	Interpolate.onReveal(function (slot: number, kind: string, player: any, outfit: any, held: any)
 		table.insert(
@@ -121,7 +127,8 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 
 	--[[
 	    One block's bytes, exactly as long as Volt hands them over. Its tick
-	    is required. Reveals and hides are { slot, generation, kind }; looks
+	    is required. Reveals and hides are { slot, generation, kind }, a
+	    reveal with a past as the Past fixture lays it out; looks
 	    are { slot, generation, outfit?, held?, empty? }, empty a held part
 	    of length 0; records are Record fields by name, every one but slot,
 	    generation and position optional; footsteps are Block's
@@ -132,9 +139,8 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 		block.sequence = sequence % WIRE
 		block.tick = spec.tick % WIRE
 
-		local reveals: { any } = spec.reveals or {}
 		local hides: { any } = spec.hides or {}
-		block.reveals, block.revealCount = reveals, #reveals
+		Past(block, spec.reveals or {}, Record, Constants, Game.limits)
 		block.hides, block.hideCount = hides, #hides
 
 		local looks: { any } = spec.looks or {}
@@ -227,6 +233,33 @@ function Viewer.new(overrides: { [string]: any }?): Viewer
 		local drawn: boolean, pitch: number = Interpolate.pose(slot, state)
 
 		return drawn, state, pitch
+	end
+
+	--[[
+	    What a ring holding these samples draws at the render time, in a
+	    fresh state, with whether it draws: each sample { tick, record }
+	    oldest first, its record Record fields by name
+	--]]
+
+	function viewer.sample(samples: { { [string]: any } }): (boolean, any)
+		local count: number = #samples
+		local ticks: buffer = buffer.create(count * TICK_BYTES)
+		local records: buffer = buffer.create(count * Constants.RECORD_BYTES)
+
+		for index: number, sample: { [string]: any } in samples do
+			local record: { [string]: any } = Record.new()
+			for name: string, value: any in sample.record do
+				record[name] = value
+			end
+
+			buffer.writef64(ticks, (index - 1) * TICK_BYTES, sample.tick)
+			Record.write(record, records, (index - 1) * Constants.RECORD_BYTES, Game.limits)
+		end
+
+		local state: any = State.new()
+		local drawn: boolean = Interpolate.sample(ticks, records, 0, count - 1, count, Interpolate.renderTime(), state)
+
+		return drawn, state
 	end
 
 	-- A state word for a record, every field at rest but those given

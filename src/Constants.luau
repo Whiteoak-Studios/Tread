@@ -81,6 +81,8 @@ local MAX_PLATFORMS: number = 2 ^ PLATFORM_BITS - 1 -- Platform ids 1 up, since 
 local MAX_RELAY_BYTES: number = 896 -- The withheld block's bound too
 local RELAY_HEADER_BYTES: number = 9 -- The sequence, the relay tick and the counts of its five counted sections
 local REVEAL_BYTES: number = 3 -- A reveal-and-kind entry: slot and generation, then kind
+local PAST_RECORDS: number = 7 -- The most past records a player's reveal carries, what 3 bits of its kind byte count
+local PAST_BYTES: number = 1 + RECORD_BYTES -- A past record: its age in relay ticks u8, then the whole record
 local HIDE_BYTES: number = 3 -- A hide entry: slot and generation, then its reason
 local MAX_RELAY_RECORDS: number = (MAX_RELAY_BYTES - RELAY_HEADER_BYTES) // RECORD_BYTES -- Withheld blocks' too
 local LOOK_ENTRY_BYTES: number = 3 -- A look entry's slot and generation and flags, before each present part
@@ -173,6 +175,8 @@ return {
 	MAX_RELAY_BYTES = MAX_RELAY_BYTES,
 	RELAY_HEADER_BYTES = RELAY_HEADER_BYTES,
 	REVEAL_BYTES = REVEAL_BYTES,
+	PAST_RECORDS = PAST_RECORDS,
+	PAST_BYTES = PAST_BYTES,
 	HIDE_BYTES = HIDE_BYTES,
 	MAX_RELAY_RECORDS = MAX_RELAY_RECORDS,
 	LOOK_ENTRY_BYTES = LOOK_ENTRY_BYTES,

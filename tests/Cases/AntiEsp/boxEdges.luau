@@ -10,11 +10,13 @@ local roblox: any = require("@lune/roblox") -- Its typedefs leave out the dataty
 local Environment = require("../../Environment")
 
 local HARNESS: string = "tests/Fixtures/AntiEsp/Harness.luau"
+local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 local CONSTANTS: string = "src/Constants.luau"
 local CASTS: string = "src/Server/AntiEspWorkers/Casts.luau"
 local SLICE: number = 60 -- Seconds a slice may take, so no test of a scene's runs out on a loaded machine
 local NAN: number = 0 / 0 -- A coordinate no comparison holds for
-local AGAIN: number = 1 / 30 -- Seconds to a near hidden pair's recheck, the example's nearRate of 30
+local RATE: number = Environment.load(EXAMPLE).shared().rates.simulation -- The example's server ticks a second
+local AGAIN: number = 1 / RATE -- Seconds to a near hidden pair's recheck, at the next tick
 local GRAZE: number = 1 / 200 -- Studs under the wall's top the head ray runs, inside the 1/64-stud inset
 local HEAD: number = 5 -- The example's standing head-top point, studs above the feet
 local WALL_Z: number = -15 -- Where each wall stands between the viewer at the origin and the target

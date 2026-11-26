@@ -29,6 +29,7 @@ local MASK_BITS: number = 16 -- The sequences before the newest a client's ackno
 local WRAP: number = 2 ^ 16
 local STEPS: number = 3 -- Mock steps that carry a flush across, as manualFlush.luau finds
 local RECORD_BYTES: number = Constants.RECORD_BYTES
+local PAST_BYTES: number = Constants.PAST_BYTES
 local SLOTS: number = Constants.SLOTS
 local BASE_AT: number = 2 -- A change record's base, after its slot and generation
 local BITS: number = 8 -- A byte's, each one slot's answer in a viewer's row of anti-ESP's answers
@@ -58,6 +59,13 @@ export type Withheld = {
 	records: { Record.Record },
 }
 
+-- A reveal's past records as a client read them, oldest first: each one's age in relay ticks and its 16 B
+export type Past = {
+	slot: number,
+	ages: { number },
+	raws: { string },
+}
+
 -- A change record as a client read it: whose it is, its base and its bytes as sent
 export type Delta = {
 	slot: number,
@@ -71,6 +79,7 @@ export type Seen = {
 	lost: number,
 	sequences: { number }, -- Each block's sequence, a lost one's left out
 	reveals: { Block.Reveal },
+	pasts: { Past }, -- Each reveal's past, in the order of reveals, empty for a reveal with none
 	hides: { Block.Hide },
 	looks: { Look },
 	footsteps: { Block.Footstep },
@@ -140,6 +149,7 @@ local function seen(): Seen
 		lost = 0,
 		sequences = {},
 		reveals = {},
+		pasts = {},
 		hides = {},
 		looks = {},
 		footsteps = {},
@@ -542,6 +552,20 @@ local function readLooks(data: buffer, block: Block.Block): { Look }
 	return looks
 end
 
+-- The past records a block's reveal carries, as a client read them
+local function readPast(data: buffer, reveal: Block.Reveal): Past
+	local past: Past = { slot = reveal.slot, ages = {}, raws = {} }
+	local at: number = reveal.pastAt or 0
+
+	for index: number = 1, reveal.pastCount or 0 do
+		past.ages[index] = buffer.readu8(data, at)
+		past.raws[index] = buffer.readstring(data, at + 1, RECORD_BYTES)
+		at += PAST_BYTES
+	end
+
+	return past
+end
+
 -- A client reads one block, unless it is one it is set to lose
 function Harness._receive(self: Self, key: any, data: buffer)
 	local client: Client = self.clients[key]
@@ -572,6 +596,7 @@ function Harness._receive(self: Self, key: any, data: buffer)
 		local reveal: Block.Reveal = block.reveals[index]
 		client.drawn[reveal.slot] = { generation = reveal.generation, kind = reveal.kind }
 		table.insert(view.reveals, table.clone(reveal))
+		table.insert(view.pasts, readPast(data, reveal))
 		table.insert(slots.reveals, reveal.slot)
 	end
 

@@ -20,12 +20,11 @@ local LIVE: { [string]: number } = {
 	npcBudget = 3,
 	relayBudget = 3,
 	farUnderLoad = 3,
-	nearRate60 = 3,
 }
 local NAMES: string = table.concat({
 	"lazyDecode,ownerChecks,relayWorkers,relayClocks,outOfView,changes",
 	"bands,crowdCap,antiEspWorkers,verdictMemory",
-	"stageSplit,antiEspWhole,npcBudget,relayBudget,farUnderLoad,nearRate60",
+	"stageSplit,antiEspWhole,npcBudget,relayBudget,farUnderLoad",
 }, ",")
 
 -- Every lever as the line names it with the stand-in server's settings, as the dev server starts them
@@ -45,7 +44,6 @@ local LINE: string = table.concat({
 	"npcBudget (session 3, live) on",
 	"relayBudget (session 3, live) on",
 	"farUnderLoad (session 3, live) on",
-	"nearRate60 (session 3, live) off",
 }, ", ")
 
 -- The relay's bands, aim/floor in Hz, and edges, enter/leave in studs: the dev place's, and the before half's

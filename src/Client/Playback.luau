@@ -33,6 +33,7 @@ local World = require(script.Parent.Parent.Step.World)
 local WRAP: number = 2 ^ 16 -- The values a u16 tick holds
 local YAW_STEPS: number = Constants.ANGLE_STEPS / (2 * math.pi) -- Steps a radian of facing, the units Sequence wraps
 local RECORD_BYTES: number = Constants.RECORD_BYTES
+local PAST_BYTES: number = Constants.PAST_BYTES -- A reveal's past record, its age before its whole record
 local TAP_BLOCK_BYTES: number = Constants.TAP_BLOCK_BYTES -- A tap frame's block, which may pass a relay block's 896 B
 local TICK_BYTES: number = 8 -- Each sample's relay tick, an f64, as the interpolation's ring keeps it
 local WINDOW: number = 8 -- The newest samples a life is drawn from, as the interpolation's ring keeps them
@@ -133,7 +134,8 @@ type Part = {
 type Track = {
 	slot: number,
 	marks: { Mark },
-	ticks: { number }, -- Each sample's relay tick, the tick its block arrived, oldest first
+	ticks: { number }, -- Each sample's relay tick, oldest first within a stretch
+	arrivals: { number }, -- The clip tick each sample's block arrived, its own tick but for a reveal's past, rising
 	records: { buffer }, -- Each sample's record, until they are packed below
 	sampleTicks: buffer, -- The ticks and records packed as the interpolation's sample reads them
 	sampleRecords: buffer,
@@ -479,8 +481,13 @@ local function move(track: Track, tick: number, record: buffer, limits: Limits)
 	track.placeYaw = yaw
 end
 
--- Adds a record to an open stretch as its newest sample, dropping one no newer than its newest or past a waiting hide
-local function push(track: Track, tick: number, data: buffer, offset: number, limits: Limits)
+--[[
+    Adds a record to an open stretch as its newest sample, from the clip
+    tick its block arrived, dropping one no newer than its newest or past
+    a waiting hide
+--]]
+
+local function push(track: Track, tick: number, arrived: number, data: buffer, offset: number, limits: Limits)
 	if track.kind == nil then
 		return
 	end
@@ -497,6 +504,7 @@ local function push(track: Track, tick: number, data: buffer, offset: number, li
 	local record: buffer = buffer.create(RECORD_BYTES)
 	buffer.copy(record, 0, data, offset, RECORD_BYTES)
 	table.insert(ticks, tick)
+	table.insert(track.arrivals, arrived)
 	table.insert(track.records, record)
 
 	if track.kind == "Sleeper" then
@@ -535,7 +543,7 @@ local function withhold(track: Track, tick: number, data: buffer, offset: number
 		mark(track, tick, false)
 	end
 
-	push(track, tick, data, offset, limits)
+	push(track, tick, tick, data, offset, limits)
 end
 
 --[[
@@ -847,6 +855,7 @@ function Playback._track(self: Self, slot: number): Track
 		slot = slot,
 		marks = {},
 		ticks = {},
+		arrivals = {},
 		records = {},
 		sampleTicks = buffer.create(0),
 		sampleRecords = buffer.create(0),
@@ -911,7 +920,7 @@ function Playback._key(self: Self, keyframe: Keyframe.Keyframe)
 			end
 
 			mark(track, start, false)
-			push(track, start, character.record, 0, self._limits)
+			push(track, start, start, character.record, 0, self._limits)
 			self:_wear(track, generation, start, character.look, character.held)
 		end
 	end
@@ -966,9 +975,10 @@ end
 
 --[[
     Runs one of the target's relay blocks through the live rules at the
-    clip tick it arrived: its hides, looks, reveals, records and footstep
-    entries in that order, as the interpolation applies them. It errors on
-    a change record, which a tap block carries as its whole record
+    clip tick it arrived: its hides, looks, reveals with their past
+    records, records and footstep entries in that order, as the
+    interpolation applies them. It errors on a change record, which a tap
+    block carries as its whole record
 --]]
 
 function Playback._relay(self: Self, data: buffer, tick: number, frame: number)
@@ -994,6 +1004,17 @@ function Playback._relay(self: Self, data: buffer, tick: number, frame: number)
 
 		if track then
 			reveal(track, entry.kind, tick)
+
+			-- Its past, oldest first, arrived with it, so a render draws from it only from this clip tick on
+			local past: buffer? = Read.pastData
+			local count: number? = entry.pastCount
+			local at: number? = entry.pastAt
+			if past and count and at then
+				for back: number = 0, count - 1 do
+					local offset: number = at + back * PAST_BYTES
+					push(track, tick - buffer.readu8(past, offset), tick, past, offset + 1, self._limits)
+				end
+			end
 		end
 	end
 
@@ -1004,7 +1025,7 @@ function Playback._relay(self: Self, data: buffer, tick: number, frame: number)
 		local track: Track? = self:_enter(slot, generation, tick)
 
 		if track then
-			push(track, tick, records, offset, self._limits)
+			push(track, tick, tick, records, offset, self._limits)
 		end
 	end
 
@@ -1309,7 +1330,7 @@ function Playback.render(self: Self, time: number)
 				local pitch: number = 0
 				local headYaw: number = 0
 				local headPitch: number = 0
-				local newest: number = latest(track.ticks, clip)
+				local newest: number = latest(track.arrivals, clip)
 
 				if newest >= note.first then
 					local base: number = math.max(note.first, newest - WINDOW + 1)

@@ -1,7 +1,7 @@
 --[[
-    The step benchmark's near-rate run: S3 at the server's near rate then
-    the raised one with anti-ESP's workers held off, then raised then the
-    server's own with them held on, each put back after the run
+    The step benchmark's near rate run: S3 with anti-ESP's workers off then
+    on, its near hidden pairs retested once a server tick in both halves,
+    the workers put back after the run
 --]]
 
 --!strict

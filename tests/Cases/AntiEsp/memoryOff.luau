@@ -8,7 +8,7 @@
 local Environment = require("../../Environment")
 
 local HARNESS: string = "tests/Fixtures/AntiEsp/Harness.luau"
-local EXPECTED: string = "e6b25d00" -- The scene's reasons, counts and ray bits, as anti-ESP with no verdict memory gives them
+local EXPECTED: string = "4a4a84ac" --The scene's reasons, counts and ray bits, as anti-ESP with no verdict memory gives them
 local SLICE: number = 60 -- Seconds a full slice and its lying share may take, so no test order rests on the clock
 local SEED: number = 20261120
 local MULTIPLIER: number = 16807

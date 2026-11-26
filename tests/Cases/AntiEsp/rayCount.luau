@@ -37,7 +37,8 @@ return function (): (boolean, string | nil)
 		return false, `The second ray ended at {harness.rays[KEPT].to}, not at the left shoulder`
 	end
 
-	-- Before the player pair's 30 Hz recheck inside the near radius, so the sleeper's new pair is the only one due
+	-- Inside the tick of the player pair's test, before its recheck at the next, so the sleeper's new pair is the only
+	-- one due
 	Harness.AntiEsp.isHidden(viewer, target)
 	Harness.AntiEsp.isHidden(viewer, sleeper)
 	harness:slice(0.02)

@@ -10,7 +10,8 @@ local StandIn = require("../../Fixtures/AntiEspWorkers/Pool")
 
 local POOL: string = "ReplicatedStorage.Packages.Tread.Server.RelayWorkers.Pool"
 local WORKERS: number = 2
-local SLOW: number = 0.001 -- Hz, every recheck rate, so no pair falls due again unless the case makes it
+local SLOW: number = 0.001 -- Hz, every timed recheck rate, so no pair falls due again unless the case makes it
+local NO_NEAR: number = 1 -- Studs of near radius, inside which no pair stands, so none is retested each tick
 local FAIL_OPEN: number = 1000 -- Seconds, so no batch is given up and no pair fails open while the case runs
 local SHARE: number = 0.5 -- A tick's share one short frame owes, so it runs only anti-ESP's slice
 local WALL_SIZE: vector = vector.create(1, 40, 40) -- Tall and wide enough to block every ray across it
@@ -34,7 +35,7 @@ local function build(workers: number): Built
 		settings.antiEsp.slice = 1
 		settings.antiEsp.failOpen = FAIL_OPEN
 		settings.antiEsp.hiddenRate = SLOW
-		settings.antiEsp.nearRate = SLOW
+		settings.antiEsp.nearRadius = NO_NEAR
 		settings.antiEsp.visibleRate = SLOW
 		settings.antiEsp.workers = workers
 	end, { [POOL] = override })

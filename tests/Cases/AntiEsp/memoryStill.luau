@@ -8,8 +8,10 @@
 local Environment = require("../../Environment")
 
 local HARNESS: string = "tests/Fixtures/AntiEsp/Harness.luau"
+local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 local VISIBLE_AGAIN: number = 0.5 -- Seconds to a visible pair's recheck, the example's visibleRate of 2
-local HIDDEN_AGAIN: number = 1 / 30 -- And a near hidden pair's, its nearRate of 30
+local RATE: number = Environment.load(EXAMPLE).shared().rates.simulation -- The example's server ticks a second
+local HIDDEN_AGAIN: number = 1 / RATE -- And a near hidden pair's, at the next tick
 local NEXT: number = 1 / 60 -- Seconds to a slice after a change that makes the pair due at once
 local SLICE: number = 60 -- Seconds a slice and its lying share may take, so no test runs out on a loaded machine
 local ON: boolean = true -- Verdict memory's switch

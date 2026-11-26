@@ -40,10 +40,10 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- 1) Absent, false or no boolean, the relay table holds records as changes and the budget alone
+	-- 1) Absent, false or no boolean, the relay table holds records as changes, the past and the budget alone
 	local absent: { [string]: any } = place.load(CONFIG)
-	if Config.hash(absent.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET }) then
-		return false, `With {ATTRIBUTE} absent, relay holds more or less than changes set true and the budget`
+	if Config.hash(absent.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET, past = true }) then
+		return false, `With {ATTRIBUTE} absent, relay holds more or less than changes and past set true and the budget`
 	end
 
 	for _, value: any in OFF do
@@ -59,8 +59,8 @@ return function (): (boolean, string | nil)
 	local restored: { [string]: any } = table.clone(on)
 	restored.relay = absent.relay
 
-	if Config.hash(on.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET, clocks = true }) then
-		return false, `With {ATTRIBUTE} true, relay is not records as changes with the clocks on`
+	if Config.hash(on.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET, clocks = true, past = true }) then
+		return false, `With {ATTRIBUTE} true, relay is not records as changes and the past with the clocks on`
 	elseif Config.hash(restored) ~= Config.hash(absent) then
 		return false, `With {ATTRIBUTE} true, a setting besides relay changed`
 	end

@@ -11,8 +11,10 @@ local roblox: any = require("@lune/roblox") -- Its typedefs leave out the dataty
 local Environment = require("../../Environment")
 
 local HARNESS: string = "tests/Fixtures/AntiEsp/Harness.luau"
+local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 local CONSTANTS: string = "src/Constants.luau"
-local AGAIN: number = 1 / 30 -- Seconds to a near hidden pair's recheck, the example's nearRate of 30
+local RATE: number = Environment.load(EXAMPLE).shared().rates.simulation -- The example's server ticks a second
+local AGAIN: number = 1 / RATE -- Seconds to a near hidden pair's recheck, at the next tick
 local VISIBLE_AGAIN: number = 0.5 -- And a visible pair's, its visibleRate of 2
 local SLICE: number = 60 -- Seconds a slice may take, so no pair's test runs out on a loaded machine
 local SHIFT: vector = vector.create(0.5, 0, 0) -- The shifted target's step, still behind the wall

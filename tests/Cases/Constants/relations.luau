@@ -14,7 +14,10 @@ return function (): (boolean, string | nil)
 	local constants: { [string]: number } = Environment.load(CONSTANTS)
 
 	local recordsFill: number = constants.RELAY_HEADER_BYTES + constants.MAX_RELAY_RECORDS * constants.RECORD_BYTES
-	local largestReveal: number = constants.REVEAL_BYTES + constants.MAX_LOOK_ENTRY + constants.RECORD_BYTES
+	local largestReveal: number = constants.REVEAL_BYTES
+		+ constants.PAST_RECORDS * constants.PAST_BYTES
+		+ constants.MAX_LOOK_ENTRY
+		+ constants.RECORD_BYTES
 
 	local relations: { Relation } = {
 		{
@@ -94,10 +97,19 @@ return function (): (boolean, string | nil)
 		},
 
 		{
-			relation = "a reveal with both look parts and its record is at most 104 B, and 8 fit beside the header",
-			holds = largestReveal == 104
-				and constants.RELAY_HEADER_BYTES + 8 * largestReveal <= constants.MAX_RELAY_BYTES
-				and constants.RELAY_HEADER_BYTES + 9 * largestReveal > constants.MAX_RELAY_BYTES,
+			relation = "a player's reveal with a full past, both look parts and its record is at most 223 B, and 3 fit "
+				.. "beside the header",
+			holds = largestReveal == 223
+				and constants.RELAY_HEADER_BYTES + 3 * largestReveal <= constants.MAX_RELAY_BYTES
+				and constants.RELAY_HEADER_BYTES + 4 * largestReveal > constants.MAX_RELAY_BYTES,
+		},
+
+		{
+			relation = "a past record is its u8 age and the whole record, and the 7 a reveal carries are what 3 bits "
+				.. "count, each younger than the 32 ticks a client keeps",
+			holds = 1 + constants.RECORD_BYTES == constants.PAST_BYTES
+				and constants.PAST_RECORDS == 2 ^ 3 - 1
+				and constants.PAST_RECORDS < constants.CHANGE_DEPTH,
 		},
 
 		{

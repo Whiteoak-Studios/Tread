@@ -24,8 +24,8 @@ local BODIES: { { name: string, kind: string, at: vector, sees: boolean } } = {
 local ASKS: { string } = { "Seen", "Walled", "Sleeper" } -- The left viewer's, each run
 local LEFT_RUNS: { [number]: boolean } = { [2] = true, [3] = true, [4] = true } -- The runs that leave it out
 
--- Each run's slice, after its asks: the walled player's 30 Hz near rechecks fall in the first three, and the 2 Hz
--- rechecks of the seen player and the other viewer's at the last
+-- Each run's slice, after its asks: the walled player's near rechecks, once a server tick, fall at 0.08, 0.5 and
+-- 0.55 s, and the 2 Hz rechecks of the seen player and the other viewer's at 0.5 s
 local TIMES: { number } = { 0, 0.04, 0.08, 0.5, 0.55 }
 
 type Twin = {

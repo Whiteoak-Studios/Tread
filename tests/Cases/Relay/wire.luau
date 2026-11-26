@@ -30,7 +30,7 @@ local CALLS: number = 75 -- Past the 64 a call log starts with
 local FAILURE_LENGTH: number = 1000
 local OWN_BYTES: number = 7 -- An own hand-in's header
 local CALL_BYTES: number = 15
-local HAND_BYTES: number = 57
+local HAND_BYTES: number = 58
 local SHARED_HEADER: number = 35 -- A shared hand-in's header
 local TUNING_HEADER: number = 20 -- Its bands' count, flags and crowd fields, before each band and edge
 local MAX_BANDS: number = 8 -- Constants.MAX_BANDS
@@ -483,6 +483,7 @@ local function own(s: Sides, check: Check)
 			traffic = index * 1e9 + 0.5,
 			team = team,
 			row = (index - 1) * ROW_BYTES,
+			delay = index % (U8_TOP + 1), -- 0 and 255 among them
 		}
 	end
 
@@ -518,6 +519,7 @@ local function own(s: Sides, check: Check)
 				"back",
 				"zoomed",
 				"traffic",
+				"delay",
 			}
 		do
 			check(back[field] == hand[field], `Viewer {index}'s {field} came back {back[field]}, not {hand[field]}`)

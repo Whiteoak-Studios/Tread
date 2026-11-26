@@ -46,15 +46,15 @@ local RECHECKS: number = 2 -- Visible rechecks past the hold: by the first a fre
 -- it, so only an answer served from memory keeps it sent
 local SERVED: number = HOLD + RECHECKS / VISIBLE_RATE
 
--- The dev game's near-hidden rate and relay rate, which set how soon an answer cast afresh reveals a near hidden pair
--- whose line is clear: at its next near recheck, then the next relay run
-local NEAR_RATE: number = require(ServerScriptService.Server.Config.Tread).antiEsp.nearRate
+-- The dev game's simulation and relay rates, which set how soon an answer cast afresh reveals a near hidden pair whose
+-- line is clear: at its next near recheck, the next server tick, then the next relay run
+local SIMULATION_RATE: number = require(ReplicatedStorage.Shared.Dev.Config).rates.simulation
 local RELAY_RATE: number = require(ReplicatedStorage.Shared.Dev.Config).rates.relay
-local REVEALS: number = 3 -- Rechecks and relay ticks a fresh answer gets: in process, the workers' lead, then room
+local REVEALS: number = 3 -- Rechecks and relay ticks a fresh answer gets: in process, the workers' landing, then room
 
 -- Seconds the target must stay unsent once nothing stands on its line, past when a fresh answer would have revealed
 -- it, so only an answer or box served from memory keeps it hidden
-local KEPT_HIDDEN: number = REVEALS * (1 / NEAR_RATE + 1 / RELAY_RATE)
+local KEPT_HIDDEN: number = REVEALS * (1 / SIMULATION_RATE + 1 / RELAY_RATE)
 
 -- Where each bot's character is built along the floor, the viewer's target behind the occluder from it
 local VIEWER: Vector3 = Vector3.new(0, FLOOR_TOP + LIFT, 0)

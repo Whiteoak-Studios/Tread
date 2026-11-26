@@ -192,10 +192,19 @@ local function readBlock(data: buffer, bound: number): Decoded
 	local block: Block.Block = Block.new()
 	Block.read(data, block, bound)
 
+	-- Each reveal with its past, oldest first, each record's age in relay ticks before the block's beside it
 	local reveals: { Decoded } = {}
 	for index: number = 1, block.revealCount do
 		local reveal: Block.Reveal = block.reveals[index]
-		reveals[index] = { slot = reveal.slot, generation = reveal.generation, kind = reveal.kind }
+		local past: { Decoded } = {}
+		local at: number = reveal.pastAt or 0
+
+		for entry: number = 1, reveal.pastCount or 0 do
+			past[entry] = { age = buffer.readu8(data, at), record = readRecord(data, at + 1) }
+			at += Constants.PAST_BYTES
+		end
+
+		reveals[index] = { slot = reveal.slot, generation = reveal.generation, kind = reveal.kind, past = past }
 	end
 
 	local hides: { Decoded } = {}

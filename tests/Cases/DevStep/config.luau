@@ -1,7 +1,7 @@
 --[[
     The step benchmark's block flips step 3's levers over S4 and the spread
     loads in their halves' order with the design's timing, its NPC, levers
-    and near-rate runs' loads beside them, every area inside the bounds
+    and near rate runs' loads beside them, every area inside the bounds
 --]]
 
 --!strict
@@ -12,9 +12,8 @@ local Harness = require("../../Fixtures/DevBot/Harness")
 local SPAWN: any = roblox.Vector3.new(3834, 0.5, -74) -- The real player's spawn on the plaza, where a half stands
 local HEIGHT: number = 0.5 -- The plaza floor's height above 0, where each landing stands
 
--- The loads in the order they run, each with its halves' levers in the order the halves run, any lever it flips and
--- the levers it holds, as name and state in name order
-type Load = { scenario: string, order: string, lever: string?, hold: string? }
+-- The loads in the order they run, each with its halves' levers in the order the halves run and any lever it flips
+type Load = { scenario: string, order: string, lever: string? }
 
 local LOADS: { Load } = {
 	{ scenario = "S4", order = "false,true" },
@@ -30,28 +29,8 @@ local LEVERS: { Load } = {
 	{ scenario = "Spread300", order = "false,true", lever = "bands" },
 }
 
--- The near-rate run's two loads, S3 each with the raised near rate flipped alone, anti-ESP's workers held off then on
-local NEAR: { Load } = {
-	{ scenario = "S3", order = "false,true", lever = "nearRate60", hold = "antiEspWorkers false" },
-	{ scenario = "S3", order = "true,false", lever = "nearRate60", hold = "antiEspWorkers true" },
-}
-local NEAR_RAISED: number = 60 -- Hz, the near rate the run raises the dev place's 30 to
-
--- The levers a configured load holds, as name and state in name order, nil for one that holds none
-local function holdOf(load: any): string?
-	if load.hold == nil then
-		return nil
-	end
-
-	local held: { string } = {}
-	for name: string, state: boolean in load.hold do
-		table.insert(held, `{name} {state}`)
-	end
-
-	table.sort(held)
-
-	return table.concat(held, ",")
-end
+-- The near rate run's one load, S3 with anti-ESP's workers flipped alone, off then on
+local NEAR: Load = { scenario = "S3", order = "false,true", lever = "antiEspWorkers" }
 
 -- Whether a configured load is the one expected, or why not
 local function differs(load: any, expected: Load, Config: any): string?
@@ -64,8 +43,8 @@ local function differs(load: any, expected: Load, Config: any): string?
 		return `{load.scenario} with its halves {table.concat(order, ",")}`
 	elseif load.lever ~= expected.lever then
 		return `{load.scenario} flipping {load.lever}, not {expected.lever}`
-	elseif holdOf(load) ~= expected.hold then
-		return `{load.scenario} holding {holdOf(load)}, not {expected.hold}`
+	elseif load.hold ~= nil then
+		return `{load.scenario} holding levers for both its halves`
 	elseif Config.scenarios[load.scenario] == nil then
 		return `{load.scenario}, which no scenario is`
 	end
@@ -139,17 +118,11 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	if #step.near ~= #NEAR then
-		return false, `The near-rate run runs {#step.near} loads, not {#NEAR}`
-	elseif step.nearRaised ~= NEAR_RAISED then
-		return false, `The near-rate run raises the near rate to {step.nearRaised} Hz, not {NEAR_RAISED}`
-	end
-
-	for index: number, expected: Load in NEAR do
-		local problem: string? = differs(step.near[index], expected, Config)
-		if problem then
-			return false, `The near-rate run's load {index} is {problem}`
-		end
+	local near: string? = differs(step.near, NEAR, Config)
+	if near then
+		return false, `The near rate run's load is {near}`
+	elseif step.nearRaised ~= nil then
+		return false, `The step benchmark's block holds a near rate of {step.nearRaised} Hz, which no lever sets`
 	end
 
 	local timing: any = step.timing
@@ -199,12 +172,12 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- 3) The near-rate run's loads follow no one, so each half stands its areas where the config has them, each with
+	-- 3) The near rate run's load follows no one, so each half stands its areas where the config has them, each with
 	-- its floor's margin and a body's lift inside the bounds
-	for _, load: any in step.near do
+	for _, load: any in { step.near } do
 		local scenario: any = Config.scenarios[load.scenario]
 		if scenario.follow ~= false then
-			return false, `{load.scenario} follows a real player, so the near-rate run's halves stand on other ground`
+			return false, `{load.scenario} follows a real player, so the near rate run's halves stand on other ground`
 		end
 
 		for _, group: any in scenario.groups do

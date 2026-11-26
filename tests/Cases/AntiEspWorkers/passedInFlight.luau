@@ -25,7 +25,7 @@ local BEFORE: { { number } } = {
 	{ 0.16, math.huge },
 }
 
-local LANDS_AT: number = 0.2 -- The slice its answer lands at, after the left run
+local LANDS_AT: number = 0.18 -- The slice its answer lands at, after the left run, in 0.16's tick so it isn't due again
 local THEN: number = 0.25
 
 type Twin = {

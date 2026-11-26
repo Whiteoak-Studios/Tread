@@ -269,7 +269,6 @@ function Example.server(): ServerSettings
 			slice = 0.002,
 			hiddenRate = 10,
 			nearRadius = 250,
-			nearRate = 30,
 			visibleRate = 2,
 			hold = 1,
 			failOpen = 0.15,

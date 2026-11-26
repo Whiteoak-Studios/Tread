@@ -142,6 +142,7 @@ export type Viewer = {
 	target: Key?, -- The viewer it spectates, whose blocks it gets copies of in place of its own; nil for none
 	look: vector?, -- The newest look its client sent, a unit vector on the ground; nil before any
 	zoomed: boolean?, -- Whether its players go at the nearest band's rates wherever they stand; nil as false
+	delay: number?, -- The interpolation delay in milliseconds its client's newest Move gave, 0 to 255; nil as 0
 }
 
 -- Anti-ESP's port that takes a viewer the relay's budget left, with the slots its view tracks and their count
@@ -226,6 +227,7 @@ local TickWire: number = 0 -- The relay tick this run's blocks carry, a u16
 -- The world every turn reads, which the front fills each run from the states and between runs from the members
 local World: World = Turn.world
 local Present: buffer = World.present
+local Since: buffer = World.since
 local Generations: buffer = World.generations
 local Kinds: buffer = World.kinds
 local Unparked: buffer = World.unparked
@@ -633,7 +635,8 @@ function Relay.start(
 
 	local shared: Shared = settings.shared
 	local server: ServerSettings = settings.server
-	local relay: { read changes: boolean?, read workers: number?, read clocks: boolean? }? = server.relay
+	local relay: { read changes: boolean?, read workers: number?, read clocks: boolean?, read past: boolean? }? =
+		server.relay
 
 	local workers: number = 0
 	if relay and relay.workers then
@@ -711,6 +714,9 @@ function Relay.start(
 		outOfView = outOfView,
 		changes = Changes,
 		clocks = Clock.on,
+		past = relay ~= nil and relay.past == true,
+		delayMin = server.rewind.delayMin,
+		delayMax = server.rewind.delayMax,
 	}
 
 	Send = send
@@ -1205,6 +1211,7 @@ local function handAt(hands: { Hand }, place: number): Hand
 		traffic = 0,
 		team = 0,
 		row = 0,
+		delay = 0,
 	}
 	hands[place] = fresh
 
@@ -1234,6 +1241,7 @@ local function fill(hand: Hand, viewer: Viewer, at: number, teams: buffer)
 	hand.sequence = 0
 	hand.back = false
 	hand.zoomed = viewer.zoomed == true
+	hand.delay = viewer.delay or 0
 	hand.missed = false
 	hand.traffic = 0
 
@@ -1702,6 +1710,15 @@ function Relay.run(
 		end
 
 		local kind: number = KIND_CODES[entry.kind]
+
+		-- A streak of runs with the same life and kind starts at a run that follows one it wasn't handed in at
+		if
+			buffer.readu32(Present, slot * 4) ~= Run - 1
+			or buffer.readu8(Generations, slot) ~= generation
+			or buffer.readu8(Kinds, slot) ~= kind
+		then
+			buffer.writeu32(Since, slot * 4, Run)
+		end
 
 		buffer.writeu32(Present, slot * 4, Run)
 		buffer.writeu8(Generations, slot, generation)

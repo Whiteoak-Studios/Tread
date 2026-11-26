@@ -1,7 +1,7 @@
 --[[
     AntiEsp.near counts a near hidden pair's rechecks and the seconds from
     each one's test before, and no first, far, visible, held or failed-open
-    test, alike in process and on workers when the slices come evenly
+    test, in process and on workers, each on the clock it was settled on
 --]]
 
 --!strict
@@ -12,7 +12,7 @@ local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 local HARNESS: string = "tests/Fixtures/AntiEsp/Harness.luau"
 local POOL: string = "ReplicatedStorage.Packages.Tread.Server.RelayWorkers.Pool"
 local WORKERS: number = 2
-local STEP: number = 1 / 64 -- Seconds between even slices: 3 to a near recheck at 30 Hz, 7 to a far one at 10 Hz
+local STEP: number = 1 / 64 -- Seconds between even slices: 3 or 4 to a tick at 20 Hz, 7 to a far recheck at 10 Hz
 local LATE: number = 2 -- A cut slice's first stand-in clock read past its deadline, the one before its first test
 local PATHS: { string } = { "in process", "on workers" }
 local TOTALS: { string } = { "near rechecks", "seconds of near rechecks", "tests", "fail-opens" }
@@ -52,12 +52,16 @@ local function even(count: number): { number }
 end
 
 local SCENARIOS: { Scenario } = {
-	-- Five targets over 100 even slices, where a worker's test settles on the slice an in-process one runs in. The near
-	-- hidden one is first tested at 0 and rechecked at 3 to 99, 33 rechecks. The revealed one is rechecked at 3, 6 and
-	-- 9, its wall opens before 10, and its test at 12 finds it visible. The held one is seen at 0, closed before 30,
-	-- held at 32 and 64 inside the 1 s hold, hidden at 96 and rechecked at 99. Each gap is 3 slices, so 37 rechecks and
-	-- 111 slices. Its 65 tests are the near hidden one's 34, the far one's 15 at every 7th slice, the visible one's 4
-	-- at every 32nd, the revealed one's 7, at 44 and 76 the last two, and the held one's 5
+	-- Five targets over 100 even slices, slice k in tick floor(5k / 16), so tick n's first slice is ceil(16n / 5): 0,
+	-- 4, 7, 10, 13, 16, 20 and so on. The near hidden one is first tested at 0 and rechecked at each tick's first slice
+	-- to 96, 30 rechecks. The revealed one is rechecked at 4 and 7, its wall opens before 10, and its test there finds
+	-- it visible. The held one is seen at 0, closed before 30, held at 32 and 64 inside the 1 s hold and hidden at 96,
+	-- tick 30's first, so in process its next test would be tick 31's, at 100. In process that is 32 rechecks over 103
+	-- slices, and 60 tests: the near hidden one's 31, the far one's 15 at every 7th slice, the visible one's 4 at every
+	-- 32nd, the revealed one's 6, at 42 and 74 the last two, and the held one's 4. On workers each settles on its
+	-- reach, a slice past its packing but the first, so the near hidden one's gaps span 97 slices and the revealed
+	-- one's 8; the held one's test at 96 was packed at 95, in tick 29, so it lands due and is rechecked a slice on: 33
+	-- rechecks over 106 slices, and 61 tests
 	{
 		name = "mixed",
 		targets = {
@@ -70,25 +74,27 @@ local SCENARIOS: { Scenario } = {
 		times = even(100),
 		asked = true,
 		reasons = {
-			{ slice = 12, target = 4, reason = "Clear" },
+			{ slice = 11, target = 4, reason = "Clear" },
 			{ slice = 32, target = 5, reason = "Hold" },
 			{ slice = 64, target = 5, reason = "Hold" },
 			{ slice = 96, target = 5, reason = "Hidden" },
 		},
-		checks = { 37, 37 },
-		seconds = { 111 * STEP, 111 * STEP },
-		tests = { 65, 65 },
+		checks = { 32, 33 },
+		seconds = { 103 * STEP, 106 * STEP },
+		tests = { 60, 61 },
 		failOpens = 0,
 	},
 
-	-- A near hidden pair rechecked at 3 and 6, every slice from 8 to 16 cut before its tests, so the ask after 16 finds
-	-- it 10 slices untested, past the 0.15 s fail-open. Its retest, at 17 in process and landing at 18 on workers, is
-	-- no recheck, and the next, 3 slices on, is one. Its 5 tests are at 0, 3, 6, the retest and that one
+	-- A near hidden pair rechecked at 4 and 7, every slice from 8 to 17 cut before its tests. In process the ask after
+	-- 17 finds it 10 slices untested, past the 0.15 s fail-open, and its retest at 18 is no recheck, and the next, at
+	-- tick 6's first slice, 20, is one. On workers its test at 7 settled at 8, so the ask after 18 fails it open with
+	-- that slice's packing out; its retest is packed at 19 and lands due at 20, packed again there and landing at 21,
+	-- a recheck. Its 5 tests are at 0, 4, 7, the retest and that one
 	{
 		name = "failed-open",
 		targets = { { z = -200, blocked = true } },
 		times = even(22),
-		cut = { 8, 16 },
+		cut = { 8, 17 },
 		asked = true,
 		reasons = {},
 		checks = { 3, 3 },
@@ -97,33 +103,34 @@ local SCENARIOS: { Scenario } = {
 		failOpens = 1,
 	},
 
-	-- Slices at 0, 1, 2 and 2.5 steps. In process the recheck runs at 2.5, the first slice past 1/30 s. On workers it
-	-- is packed at 2, reaching a step ahead, and settles on that reach, 3 steps, as it lands at 2.5, so its gap runs
-	-- from its first test's reach to its own
+	-- Slices at 0, 1, 2, 3.5 and 4.5 steps. In process the recheck runs at 3.5, tick 1's first slice. On workers it is
+	-- packed there too, reaching the step and a half since the slice before, and settles on that reach, 5 steps, as it
+	-- lands at 4.5, so its gap runs from its first test's reach to its own
 	{
 		name = "uneven",
 		targets = { { z = -200, blocked = true } },
-		times = { 0, STEP, 2 * STEP, 2.5 * STEP },
+		times = { 0, STEP, 2 * STEP, 3.5 * STEP, 4.5 * STEP },
 		asked = true,
 		reasons = {},
 		checks = { 1, 1 },
-		seconds = { 2.5 * STEP, 3 * STEP },
+		seconds = { 3.5 * STEP, 5 * STEP },
 		tests = { 2, 2 },
 		failOpens = 0,
 	},
 
-	-- Slices at 0, 1, 2, 12 and 13 steps, asked only before the first. On workers the recheck packed at 2 comes back at
-	-- 12, past the fail-open time from its send, so it is given up and packed again, reaching a relay tick ahead, and
-	-- lands at 13: one recheck, settled at 12 steps and a relay tick. In process it runs at 12
+	-- Slices at 0, 1, 4, 14 and 15 steps, asked only before the first. On workers the recheck packed at 4, tick 1's,
+	-- comes back at 14, past the fail-open time from its send, so it is given up and packed again, reaching a relay
+	-- tick ahead, and lands at 15: one recheck, settled at 14 steps and a relay tick. In process it runs at 4 and again
+	-- at 14, in tick 4
 	{
 		name = "given-up",
 		targets = { { z = -200, blocked = true } },
-		times = { 0, STEP, 2 * STEP, 12 * STEP, 13 * STEP },
+		times = { 0, STEP, 4 * STEP, 14 * STEP, 15 * STEP },
 		asked = false,
 		reasons = {},
-		checks = { 1, 1 },
-		seconds = { 12 * STEP, 12 * STEP + LEAD },
-		tests = { 2, 2 },
+		checks = { 2, 1 },
+		seconds = { 14 * STEP, 14 * STEP + LEAD },
+		tests = { 3, 2 },
 		failOpens = 0,
 	},
 }

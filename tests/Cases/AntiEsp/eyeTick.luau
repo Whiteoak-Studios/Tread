@@ -56,8 +56,8 @@ local LAYOUTS: { [string]: Layout } = {
 
 -- Each layout's digest, which the unchanged module gave with every eye cleared afresh each slice
 local EXPECTED: { [string]: string } = {
-	small = "40fc6295f8a29ee63c1f04bbde21a39a60e5a7520b77e677a659c36d85092135",
-	wide = "a7bc79c466e29fd79577bd9ace5e124ab84945d8af3e655871831dd53a3c4c93",
+	small = "d95ca838cbbb4cbd483c3fb525a7ddd5ecb44958384a7606e4b335ecf1215f44",
+	wide = "a076898843adb495935923aac5ab61b21cf32a8bc964edc323a75e0ceca3e2df",
 }
 
 -- A seeded generator of numbers between 0 and 1

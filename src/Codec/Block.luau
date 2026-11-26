@@ -29,17 +29,25 @@ local FLAG_BITS: number = 2
 local CULLED_REASON: number = 0 -- Anti-ESP made the hide
 local REASON_BITS: number = 1
 
+-- A reveal's kind byte: the kind code in its low 5 bits, and in its top 3 the count of past records behind the entry
+local PAST_AT: number = 5
+local PAST_BITS: number = 3
+
 -- The kind of character a reveal marks
 export type Kind = "Player" | "Npc" | "Body" | "Sleeper"
 
 -- The kind of step a footstep entry holds
 export type Step = "Walk" | "Sprint" | "Jump" | "Land"
 
--- A reveal-and-kind entry, which starts a stretch of a viewer being sent a character or marks its change of kind
+-- A reveal-and-kind entry, which starts a stretch of a viewer being sent a character or marks its change of kind. A
+-- player's may carry its past behind it, records oldest first, each an age u8 in relay ticks before the block's tick
+-- and then the whole record
 export type Reveal = {
 	slot: number,
 	generation: number,
 	kind: Kind,
+	pastCount: number?, -- The past records, 0 to 7, none when nil
+	pastAt: number?, -- Where the oldest one's age sits in the block's pastData, the rest following it
 }
 
 -- A hide entry, which ends the stretch
@@ -79,6 +87,7 @@ export type Block = {
 	tick: number, -- The relay tick its records sample
 	revealCount: number,
 	reveals: { Reveal },
+	pastData: buffer?, -- The reveals' past records, each reveal's at its pastAt
 	hideCount: number,
 	hides: { Hide },
 	lookCount: number,
@@ -118,6 +127,7 @@ function Block.new(): Block
 		tick = 0,
 		revealCount = 0,
 		reveals = {} :: { Reveal },
+		pastData = empty,
 		hideCount = 0,
 		hides = {} :: { Hide },
 		lookCount = 0,
@@ -165,12 +175,26 @@ local function writePart(data: buffer, offset: number, source: buffer, at: numbe
 	return offset + Constants.PREFIX_BYTES + length
 end
 
+-- The bytes a reveal's past fills behind its entry, erroring on more than its kind byte counts or on any but a player's
+local function pastBytes(reveal: Reveal): number
+	local count: number = reveal.pastCount or 0
+	if not (count >= 0 and count <= Constants.PAST_RECORDS) then
+		error(`A reveal carries 0 to {Constants.PAST_RECORDS} past records, not {count}`)
+	elseif count > 0 and reveal.kind ~= "Player" then
+		error(`Only a Player's reveal carries past records, not this {reveal.kind}'s`)
+	end
+
+	return count * Constants.PAST_BYTES
+end
+
 --[[
     Writes a block into data from its first byte and gives the bytes it
-    filled, its sections in order whatever order they were filled in. It
-    errors on a block past bound, 896 B unless a tap block's is given, or
-    past data, on a section past the 255 its count holds, and on a change
-    record whose length isn't the one its mask names
+    filled, its sections in order whatever order they were filled in, and
+    each reveal's past straight behind its entry. It errors on a block past
+    bound, 896 B unless a tap block's is given, or past data, on a section
+    past the 255 its count holds, on a reveal with more than 7 past records
+    or a past on any but a player's, and on a change record whose length
+    isn't the one its mask names
 --]]
 
 function Block.write(block: Block, data: buffer, bound: number?): number
@@ -187,6 +211,10 @@ function Block.write(block: Block, data: buffer, bound: number?): number
 		+ hideCount * Constants.HIDE_BYTES
 		+ footstepCount * Constants.FOOTSTEP_BYTES
 		+ recordCount * Constants.RECORD_BYTES
+
+	for index: number = 1, revealCount do
+		bytes += pastBytes(block.reveals[index])
+	end
 
 	for index: number = 1, lookCount do
 		bytes += lookBytes(block.looks[index])
@@ -225,9 +253,21 @@ function Block.write(block: Block, data: buffer, bound: number?): number
 			error(`A reveal's kind is Player, Npc, Body or Sleeper, not {reveal.kind}`)
 		end
 
+		local count: number = reveal.pastCount or 0
 		buffer.writeu16(data, offset, Record.id(reveal.slot, reveal.generation))
-		buffer.writeu8(data, offset + 2, kind - 1)
+		buffer.writeu8(data, offset + 2, bit32.replace(kind - 1, count, PAST_AT, PAST_BITS))
 		offset += Constants.REVEAL_BYTES
+
+		if count > 0 then
+			local pastData: buffer? = block.pastData
+			local pastAt: number? = reveal.pastAt
+			if not (pastData and pastAt) then
+				error("A reveal's past records sit at its pastAt in the block's pastData, and it names no such place")
+			end
+
+			buffer.copy(data, offset, pastData, pastAt, count * Constants.PAST_BYTES)
+			offset += count * Constants.PAST_BYTES
+		end
 	end
 
 	for index: number = 1, hideCount do
@@ -310,13 +350,16 @@ local function readPart(data: buffer, offset: number, length: number, bound: num
 end
 
 --[[
-    Reads a block into into, reusing its entry tables. Records, change
-    records, footstep entries and look parts are left in data, at the
-    offsets into names, so a reader decodes each where it lies, a change
-    against the client's store. It errors on a block that isn't one: past
-    bound, 896 B unless a tap block's is given, a section past its end, a
-    kind, flag or reason no value is given, or a change record whose base
-    is outside 1 to 31 or whose mask holds Y both ways
+    Reads a block into into, reusing its entry tables. Records, a reveal's
+    past records, change records, footstep entries and look parts are left
+    in data, at the offsets into names, so a reader decodes each where it
+    lies, a change against the client's store. It errors on a block that
+    isn't one: past bound, 896 B unless a tap block's is given, a section
+    past its end, a kind, flag or reason no value is given, a past on any
+    reveal but a player's, a past record whose age isn't 1 to 31 relay
+    ticks and below the one before it or whose character isn't the
+    reveal's, or a change record whose base is outside 1 to 31 or whose
+    mask holds Y both ways
 --]]
 
 function Block.read(data: buffer, into: Block, bound: number?)
@@ -341,18 +384,50 @@ function Block.read(data: buffer, into: Block, bound: number?)
 
 		local reveal: Reveal = into.reveals[index]
 		if not reveal then
-			reveal = { slot = 0, generation = 0, kind = "Player" }
-			into.reveals[index] = reveal
+			local made: Reveal = { slot = 0, generation = 0, kind = "Player" }
+			into.reveals[index] = made
+			reveal = made
 		end
 
-		local kind: Kind? = KINDS[buffer.readu8(data, offset + 2) + 1]
+		local code: number = buffer.readu8(data, offset + 2)
+		local kind: Kind? = KINDS[bit32.extract(code, 0, PAST_AT) + 1]
+		local count: number = bit32.extract(code, PAST_AT, PAST_BITS)
 		if not kind then
-			error(`A reveal's kind code {buffer.readu8(data, offset + 2)} has no kind`)
+			error(`A reveal's kind code {bit32.extract(code, 0, PAST_AT)} has no kind`)
+		elseif count > 0 and kind ~= "Player" then
+			error(`Only a Player's reveal carries past records, and this {kind}'s carries {count}`)
 		end
 
-		reveal.slot, reveal.generation = Record.split(buffer.readu16(data, offset))
+		local id: number = buffer.readu16(data, offset)
+		reveal.slot, reveal.generation = Record.split(id)
 		reveal.kind = kind
 		offset += Constants.REVEAL_BYTES
+
+		if count > 0 then
+			within(offset, count * Constants.PAST_BYTES, length)
+
+			reveal.pastCount = count
+			reveal.pastAt = offset
+
+			-- Oldest first, so each age falls below the one before it, the first below the ticks a client keeps
+			local before: number = Constants.CHANGE_DEPTH
+			for _ = 1, count do
+				local age: number = buffer.readu8(data, offset)
+				if age < 1 or age >= Constants.CHANGE_DEPTH then
+					error(`A reveal's past record is 1 to {Constants.CHANGE_DEPTH - 1} relay ticks old, not {age}`)
+				elseif age >= before then
+					error(`A reveal's past records go oldest first, and one {age} ticks old follows one {before} old`)
+				elseif buffer.readu16(data, offset + 1) ~= id then
+					error(`A reveal's past record names character {buffer.readu16(data, offset + 1)}, not its own {id}`)
+				end
+
+				before = age
+				offset += Constants.PAST_BYTES
+			end
+		else
+			reveal.pastCount = nil
+			reveal.pastAt = nil
+		end
 	end
 
 	for index: number = 1, hideCount do
@@ -457,6 +532,7 @@ function Block.read(data: buffer, into: Block, bound: number?)
 	end
 
 	into.revealCount = revealCount
+	into.pastData = data
 	into.hideCount = hideCount
 	into.lookCount = lookCount
 	into.footstepCount = footstepCount

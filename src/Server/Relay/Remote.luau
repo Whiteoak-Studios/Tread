@@ -140,6 +140,7 @@ local function viewerAt(index: number): Viewer
 		target = nil,
 		look = nil,
 		zoomed = false,
+		delay = 0,
 	}
 	Pool[index] = made
 
@@ -426,6 +427,7 @@ function Remote.run(shared: buffer, own: buffer): (buffer, buffer?)
 		viewer.received = hand.received
 		viewer.look = hand.look
 		viewer.zoomed = hand.zoomed
+		viewer.delay = hand.delay
 
 		local target: number? = hand.target
 		if target ~= nil then

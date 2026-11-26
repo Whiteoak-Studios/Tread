@@ -182,17 +182,13 @@ return function (): (boolean, string | nil)
 	end
 
 	-- Past each pair's first test, every pair the plain workers pack is kept with memory and none of them is packed,
-	-- each kept answer counted where it lands, beside the batches, at the next slice. The walled pair's answer held
-	-- at the last still slice is given up uncounted, as its move at the shift restamps it before it lands
+	-- each kept answer counted where it lands, beside the batches, at the next slice. The walled pair is tested at
+	-- each tick's first slice, so none of its answers is out at the last still slice, the third of its tick
 	local kept: number = 0
 	for slice: number = 2, SHIFT_AT do
 		local landed: number = pooledKept.kept[slice + 1]
-		local dropped: number = 0
-		if slice == SHIFT_AT then
-			dropped = 1
-		end
 
-		if pooledKept.sent[slice] + landed + dropped ~= pooled.sent[slice] then
+		if pooledKept.sent[slice] + landed ~= pooled.sent[slice] then
 			local counts: string = `{pooledKept.sent[slice]} pairs packed and {landed} kept`
 			return false, `Still slice {slice - 1} gave {counts}, not the {pooled.sent[slice]} packed without memory`
 		elseif pooledKept.inProcess[slice] ~= 0 then

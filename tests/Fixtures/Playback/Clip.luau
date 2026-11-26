@@ -5,6 +5,8 @@
 --]]
 
 --!strict
+local Past = require("../Codec/Past")
+
 local WIRE: number = 2 ^ 16 -- The values a u16 tick holds
 local REASON: string = "Clear" -- The send reason every record a frame carries is given
 local SCRATCH_BYTES: number = 128 -- Past the largest OwnerState, look or held item
@@ -74,7 +76,8 @@ function Clip.new(rig: any): Builder
 
 	--[[
 	    One relay block's bytes, its sequence counting up from 1. Reveals and
-	    hides are { slot, generation, kind }; looks are { slot, generation,
+	    hides are { slot, generation, kind }, a reveal with a past as the
+	    Past fixture lays it out; looks are { slot, generation,
 	    outfit?, held?, empty? }, empty a held part of 0 B; records are Record
 	    fields by name; footsteps are Block's
 	--]]
@@ -85,9 +88,8 @@ function Clip.new(rig: any): Builder
 		block.sequence = builder.sequence % WIRE
 		block.tick = spec.tick % WIRE
 
-		local reveals: { any } = spec.reveals or {}
 		local hides: { any } = spec.hides or {}
-		block.reveals, block.revealCount = reveals, #reveals
+		Past(block, spec.reveals or {}, Record, Constants, limits)
 		block.hides, block.hideCount = hides, #hides
 
 		local looks: { any } = spec.looks or {}

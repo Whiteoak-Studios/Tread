@@ -29,8 +29,8 @@ local FOOTSTEP_RANGE: { [string]: number } = { walk = 40, sprint = 60, jump = 60
 -- What anti-ESP's rays may hit, the occluders and solid terrain, typed as the list the setting takes
 local OCCLUSION: { Instance } = { Occluders, MonumentOccluders, Workspace.Terrain }
 
--- Set true on Workspace before the server starts to boot it with the out-of-view rate, records as changes and the
--- owner's checks off, since the server reads all three levers at its start
+-- Set true on Workspace before the server starts to boot it with the out-of-view rate, records as changes, the
+-- past a reveal carries and the owner's checks off, since the server reads all four levers at its start
 local LEVERS_OFF_ATTRIBUTE: string = "TreadLeversOff"
 local LEVERS_OFF: boolean = Workspace:GetAttribute(LEVERS_OFF_ATTRIBUTE) == true
 
@@ -55,8 +55,8 @@ local CLOCKS: boolean = Workspace:GetAttribute(CLOCKS_ATTRIBUTE) == true
 local SPLIT_ATTRIBUTE: string = "TreadRelaySplit"
 local SPLIT: boolean = Workspace:GetAttribute(SPLIT_ATTRIBUTE) == true
 
--- Records as changes and the relay's budget, with workers their count and the timeout they need, and the clocks and
--- the split while on, each left out while off
+-- Records as changes and the relay's budget, with workers their count and the timeout they need, the clocks and the
+-- split while on and a reveal's past while records go as changes, each left out while off
 local RELAY: {
 	changes: boolean,
 	budget: number,
@@ -64,6 +64,7 @@ local RELAY: {
 	timeout: number?,
 	clocks: boolean?,
 	split: boolean?,
+	past: boolean?,
 } =
 	{ changes = not LEVERS_OFF, budget = RELAY_BUDGET }
 if WORKERS > 0 then
@@ -77,6 +78,10 @@ end
 
 if SPLIT then
 	RELAY.split = true
+end
+
+if not LEVERS_OFF then
+	RELAY.past = true
 end
 
 -- Set on Workspace before the server starts to a whole number to boot anti-ESP with that many Actor workers to cast
@@ -108,7 +113,7 @@ return {
 		underLoad = { runs = 20, scale = 0.5 },
 	},
 
-	relay = RELAY, -- Each record as its change since what the viewer last acknowledged, the budget, workers, clocks, split
+	relay = RELAY, -- Records as changes since what the viewer last acknowledged, the budget, workers, clocks, split, past
 	owner = { checks = not LEVERS_OFF }, -- A player whose check agrees gets an acknowledgment for its OwnerState
 	weights = { near = 1, far = 0.5, shooter = 2, cone = 1.5 },
 	shotNear = { rate = 10, seconds = 5 },
@@ -147,8 +152,7 @@ return {
 		lookAheadMax = 0.45,
 		slice = 0.002, -- Seconds anti-ESP may take a Heartbeat
 		hiddenRate = 10,
-		nearRadius = 250, -- Studs from the viewer's eye inside which a hidden pair is rechecked at nearRate
-		nearRate = 30,
+		nearRadius = 250, -- Studs from the viewer's eye inside which a hidden pair is rechecked once every server tick
 		visibleRate = 2,
 		hold = 1,
 		failOpen = 0.15,

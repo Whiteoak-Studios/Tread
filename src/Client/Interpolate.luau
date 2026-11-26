@@ -21,6 +21,7 @@ local World = require(script.Parent.Parent.Step.World)
 
 local SLOTS: number = Constants.SLOTS
 local RECORD_BYTES: number = Constants.RECORD_BYTES
+local PAST_BYTES: number = Constants.PAST_BYTES -- A reveal's past record, its age before its whole record
 local RING: number = 8 -- The records each remote slot's ring keeps, the newest overwriting the oldest
 local TICK_BYTES: number = 8 -- Each ring sample's relay tick, an f64 since it is unwrapped past the u16
 local WIRE: number = 2 ^ 16 -- The values a u16 wire tick holds
@@ -909,10 +910,12 @@ end
     its change records as whole records, acknowledges its sequence unless
     one of them couldn't be, then applies its hides, looks, reveals,
     records and footstep entries in that order, so a reveal carries the
-    look its block brought. An entry for a generation the slot table
-    hasn't announced waits for it, and one for an older generation is
-    dropped, as is a block older than the newest spectate start or end. It
-    errors on a block that isn't one
+    look its block brought. A reveal's past records go into the slot's ring
+    behind it, at their own ticks and never as baselines. An entry for a
+    generation the slot table hasn't announced waits for it, a reveal's
+    past dropped, and one for an older generation is dropped, as is a
+    block older than the newest spectate start or end. It errors on a
+    block that isn't one
 --]]
 
 function Interpolate.receive(data: buffer)
@@ -949,6 +952,17 @@ function Interpolate.receive(data: buffer)
 
 		if verdict == "Apply" then
 			reveal(entry.slot, entry.kind, tick)
+
+			-- Its past goes in oldest first, ahead of the block's own record, so the slot draws on the frame it arrives
+			local past: buffer? = Read.pastData
+			local count: number? = entry.pastCount
+			local at: number? = entry.pastAt
+			if past and count and at then
+				for back: number = 0, count - 1 do
+					local offset: number = at + back * PAST_BYTES
+					push(entry.slot, tick - buffer.readu8(past, offset), past, offset + 1)
+				end
+			end
 		elseif verdict == "Hold" and hold(entry.slot, entry.generation) then
 			holdReveal(entry.slot, entry.kind, tick)
 		end

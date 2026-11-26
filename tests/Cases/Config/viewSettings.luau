@@ -1,7 +1,7 @@
 --[[
-    The server's check refuses settings missing rates.view, antiEsp.nearRadius
-    or antiEsp.nearRate, naming each, refuses 0, negatives, NaN and both
-    infinities in the two anti-ESP keys, and takes them above 0
+    The server's check refuses settings missing rates.view or
+    antiEsp.nearRadius, naming each, refuses 0, negatives, NaN and both
+    infinities in the near radius, and takes it above 0
 --]]
 
 --!strict
@@ -10,8 +10,8 @@ local Environment = require("../../Environment")
 local CONFIG: string = "src/Config.luau"
 local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 
-local REQUIRED: { string } = { "rates.view", "antiEsp.nearRadius", "antiEsp.nearRate" }
-local KEYS: { string } = { "antiEsp.nearRadius", "antiEsp.nearRate" } -- The two above 0
+local REQUIRED: { string } = { "rates.view", "antiEsp.nearRadius" }
+local KEYS: { string } = { "antiEsp.nearRadius" } -- Above 0
 local REFUSED: { number } = { 0, -1, -250, 0 / 0, math.huge, -math.huge }
 local TAKEN: { number } = { 1 / 512, 250, 30, 1000 }
 

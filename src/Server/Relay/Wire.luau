@@ -48,8 +48,8 @@ local UNPARKED: number = 2 ^ 0 -- A body's flag: in the states and not Parked
 local OWN_BYTES: number = 7 -- calls u32, viewers u16, flags u8
 local RESEND: number = 2 ^ 0 -- Its flag: the worker drops its shadows first, so each view it runs goes whole
 local CALL_BYTES: number = 15 -- kind u8, id u32, slot u16, value f64
-local HAND_BYTES: number = 57 -- id u32, flags u8, slot u16, target u32, place 3 f32, look 3 f32, acknowledged u16,
--- received u16, sequence u16, traffic f64, team f64
+local HAND_BYTES: number = 58 -- id u32, flags u8, slot u16, target u32, place 3 f32, look 3 f32, acknowledged u16,
+-- received u16, sequence u16, traffic f64, team f64, delay u8
 local HAS_SLOT: number = 2 ^ 0
 local HAS_TARGET: number = 2 ^ 1
 local HAS_LOOK: number = 2 ^ 2
@@ -160,6 +160,7 @@ export type Hand = {
 	team: number, -- Anti-ESP's team for its own slot, NaN for none
 	row: number, -- Its visible row's offset in the buffer holding it: the export's when written, where its quiet row
 	-- has the same offset in the quiet buffer, and the hand-in's when read, its quiet row ROW_BYTES past it
+	delay: number, -- Its client's interpolation delay in milliseconds, 0 to 255, which its reveals' past reaches past
 }
 
 -- A copy of a view's withheld set
@@ -525,6 +526,7 @@ function Wire.readBodies(data: buffer, at: number, world: World, into: Shared, c
 	local run: number = into.run
 	local plane: number = (run % DEPTH) * SLOTS
 	local present: buffer = world.present
+	local since: buffer = world.since
 	local generations: buffer = world.generations
 	local kinds: buffer = world.kinds
 	local unparked: buffer = world.unparked
@@ -539,10 +541,21 @@ function Wire.readBodies(data: buffer, at: number, world: World, into: Shared, c
 
 	for place: number = 1, into.places do
 		local slot: number = buffer.readu16(data, at)
+		local life: number = buffer.readu8(data, at + 2)
+		local kind: number = buffer.readu8(data, at + 3)
+
+		-- A streak starts as the front's walk starts one, and afresh after a run this worker was not handed
+		if
+			buffer.readu32(present, slot * 4) ~= run - 1
+			or buffer.readu8(generations, slot) ~= life
+			or buffer.readu8(kinds, slot) ~= kind
+		then
+			buffer.writeu32(since, slot * 4, run)
+		end
 
 		buffer.writeu32(present, slot * 4, run)
-		buffer.writeu8(generations, slot, buffer.readu8(data, at + 2))
-		buffer.writeu8(kinds, slot, buffer.readu8(data, at + 3))
+		buffer.writeu8(generations, slot, life)
+		buffer.writeu8(kinds, slot, kind)
 		if bit32.btest(buffer.readu8(data, at + 4), UNPARKED) then
 			buffer.writeu32(unparked, slot * 4, run)
 		end
@@ -716,6 +729,7 @@ function Wire.writeOwn(
 		buffer.writeu16(data, at + 39, hand.sequence)
 		buffer.writef64(data, at + 41, hand.traffic)
 		buffer.writef64(data, at + 49, hand.team)
+		buffer.writeu8(data, at + 57, hand.delay or 0)
 		at += HAND_BYTES
 
 		if target == nil then
@@ -770,6 +784,7 @@ local function handAt(hands: { Hand }, index: number): Hand
 		traffic = 0,
 		team = 0,
 		row = 0,
+		delay = 0,
 	}
 	hands[index] = made
 
@@ -824,6 +839,7 @@ function Wire.readOwn(data: buffer, hands: { Hand }): number
 		hand.sequence = buffer.readu16(data, at + 39)
 		hand.traffic = buffer.readf64(data, at + 41)
 		hand.team = buffer.readf64(data, at + 49)
+		hand.delay = buffer.readu8(data, at + 57)
 		at += HAND_BYTES
 
 		hand.row = 0

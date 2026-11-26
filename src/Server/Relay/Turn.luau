@@ -19,6 +19,7 @@ local HEADER_BYTES: number = Constants.RELAY_HEADER_BYTES
 local REVEAL_BYTES: number = Constants.REVEAL_BYTES
 local HIDE_BYTES: number = Constants.HIDE_BYTES
 local FOOTSTEP_BYTES: number = Constants.FOOTSTEP_BYTES
+local PAST_BYTES: number = Constants.PAST_BYTES
 local MAX_LOOK: number = Constants.MAX_LOOK
 local MAX_HELD: number = Constants.MAX_HELD
 local DEPTH: number = Constants.CHANGE_DEPTH -- Relay runs of records the history keeps, so a baseline is 1 to 31 back
@@ -26,6 +27,9 @@ local WRAP: number = 2 ^ 16 -- The values a u16 wire number wraps through
 local SEQUENCES: number = WRAP - Constants.FIRST_SEQUENCE -- A viewer's sequences run 1 to 65,535, so 0 still means none
 local SECTION_LIMIT: number = 2 ^ 8 - 1 -- The most entries a block's u8 counts hold
 local FRAME_BYTES: number = 3 -- Volt's event id and the buffer's u16 length in front of each block it sends
+local WORD_AT: number = 13 -- Where a record's state word sits, as Record writes it
+local EPOCH_AT: number = 16 - Constants.EPOCH_BITS -- The word's top bits, its epoch parity
+local MILLISECONDS: number = 1000 -- A second's
 
 -- A target's record goes on each of this many band ticks after it stops changing, then once every STILL_SECONDS
 -- while it stays still, so a lost last update freezes a pose for at most that long
@@ -62,8 +66,9 @@ local LAP: { [string]: number } = { head = 0, gather = 1, measure = 2, settle = 
 local LAPS: number = 7 -- The parts LAP numbers
 
 -- What a viewer holds for a slot, a bit each but the last three, which count the band edges the slot is inside, from
--- the outermost in, so 0 is the farthest band; an NPC's one edge is npcs.near. Bit 1 is free
+-- the outermost in, so 0 is the farthest band; an NPC's one edge is npcs.near
 local RELEVANT: number = 2 ^ 0 -- Inside its relevancy for the slot's kind
+local PAST: number = 2 ^ 1 -- The pending reveal is of a player its last run held culled, so it carries its past
 local CULLED: number = 2 ^ 2 -- Relevant and hidden by anti-ESP this run, so its steps may be heard
 local SENT: number = 2 ^ 3 -- Currently sent: from the tick its reveal is first carried until its hide is
 local REVEAL: number = 2 ^ 4 -- A reveal pending
@@ -79,7 +84,7 @@ local EDGES_AT: number = 13 -- The first of the edge count's bits
 local EDGES_WIDTH: number = 3 -- Its bits, which count up to Constants.MAX_BANDS less 1 edges
 local EDGES: number = (2 ^ EDGES_WIDTH - 1) * 2 ^ EDGES_AT -- All of them, cleared whenever relevancy is
 local LOOKS: number = LOOK + LOOK_CARRIED + HELD + HELD_CARRIED
-local STRETCH: number = SENT + REVEAL + HIDE + VISIBILITY_CARRIED + LOOKS -- All a stretch of being sent holds
+local STRETCH: number = SENT + REVEAL + HIDE + VISIBILITY_CARRIED + LOOKS + PAST -- All a stretch of being sent holds
 local KEEP: number = RELEVANT + SENT + REVEAL + HIDE + LOOK + HELD + OWN -- Any of these keeps a slot tracked
 
 -- What a watched target's withheld block holds for a slot, a bit each
@@ -112,6 +117,7 @@ export type Viewer = {
 	target: Key?, -- The viewer it spectates, whose blocks it gets copies of in place of its own; nil for none
 	look: vector?, -- The newest look its client sent, a unit vector on the ground; nil before any
 	zoomed: boolean?, -- Whether its players go at the nearest band's rates wherever they stand; nil as false
+	delay: number?, -- The interpolation delay in milliseconds its client's newest Move gave, 0 to 255; nil as 0
 }
 
 -- The out-of-view rate as a turn reads it: the rate, the radius squared, and the cone's half-angle as its cosine
@@ -145,6 +151,9 @@ export type Settings = {
 	outOfView: OutOfView?, -- Nil while the game gives none, so no player is held to it
 	changes: boolean, -- Whether records go as changes
 	clocks: boolean, -- Whether each turn times its parts, as relay.clocks says
+	past: boolean, -- Whether a reveal of a player anti-ESP had hidden carries its past, as relay.past says
+	delayMin: number, -- rewind.delayMin and delayMax in seconds, which a viewer's delay is held to for its past
+	delayMax: number,
 }
 
 -- The distance bands as a run's turns read them, which the front works out from tiers.bands and tiers.edges and hands
@@ -192,6 +201,7 @@ export type Steps = {
 -- held items the front sets between runs
 export type World = {
 	present: buffer, -- u32: the last run it was handed in with an entry
+	since: buffer, -- u32: the first run of its streak of runs handed in one after another with this life and kind
 	generations: buffer, -- u8: its life
 	kinds: buffer, -- u8: its kind's code
 	unparked: buffer, -- u32: the last run it was in the states and not Parked
@@ -363,6 +373,7 @@ local Clock: { on: boolean, laps: buffer, from: number } = { on = false, laps = 
 
 -- The world's buffers, each also held here so a turn reads it as an upvalue
 local Present: buffer = buffer.create(SLOTS * 4)
+local Since: buffer = buffer.create(SLOTS * 4)
 local Generations: buffer = buffer.create(SLOTS)
 local Kinds: buffer = buffer.create(SLOTS)
 local Unparked: buffer = buffer.create(SLOTS * 4)
@@ -420,6 +431,7 @@ local Carry: {
 
 local World: World = {
 	present = Present,
+	since = Since,
 	generations = Generations,
 	kinds = Kinds,
 	unparked = Unparked,
@@ -471,6 +483,18 @@ local Open: boolean = false
 local Filled: number = 0 -- The open block's bytes
 local Spent: number = 0 -- The viewer's bytes this tick, framing included
 local Used: number? = nil -- Volt's count of its bytes over the last second, nil until its turn first needs room
+
+-- With relay.past on, what a reveal's past reads: whether it is on, rewind's range in seconds, and the relay ticks
+-- back the viewer whose turn it is needs, from its delay held to that range. Beside them, the open block's past
+-- entries and the bytes they fill. One table, since Luau caps a chunk's locals
+local Past: { on: boolean, delayMin: number, delayMax: number, span: number, data: buffer, filled: number } = {
+	on = false,
+	delayMin = 0,
+	delayMax = 0,
+	span = 0,
+	data = buffer.create(BLOCK_BYTES),
+	filled = 0,
+}
 
 -- Whiteoak TODO: Volt sends a buffer field whole, so each block goes in a buffer of its exact length, kept here
 -- once per length and reused, at most 889 buffers and Volt's copy of each block, and more for the taps' expanded
@@ -618,6 +642,11 @@ function Turn.start(settings: Settings, ports: Ports)
 		Deltas.stamps = buffer.create(SLOTS * DEPTH * 4)
 		Deltas.lengths = buffer.create(SLOTS * DEPTH)
 	end
+
+	-- A reveal's past comes from the history, which only records as changes keep
+	Past.on = settings.past == true and Deltas.on
+	Past.delayMin = settings.delayMin
+	Past.delayMax = settings.delayMax
 end
 
 --[[
@@ -1006,7 +1035,7 @@ local function clear(view: View, slot: number, part: number, sequence: number)
 	if part == VISIBILITY then
 		local from: number = buffer.readu16(view.visibilityFrom, slot * 2)
 		if bit32.btest(flags, VISIBILITY_CARRIED) and Sequence.difference(sequence, from) >= 0 then
-			flags = bit32.band(flags, bit32.bnot(REVEAL + HIDE + VISIBILITY_CARRIED))
+			flags = bit32.band(flags, bit32.bnot(REVEAL + HIDE + VISIBILITY_CARRIED + PAST))
 		end
 	elseif part == LOOK_PART then
 		if
@@ -1121,6 +1150,8 @@ local function open(view: View)
 	Out.footstepData = Steps.data
 	Out.recordData = Records
 	Out.changeData = Deltas.encoded
+	Out.pastData = Past.data
+	Past.filled = 0
 
 	buffer.writeu32(view.ringSequences, ring * 4, sequence + 1)
 	buffer.writeu32(view.ringRuns, ring * 4, Run)
@@ -1190,6 +1221,7 @@ local function flush()
 		tapped.tick = Out.tick
 		tapped.revealCount = Out.revealCount
 		tapped.reveals = Out.reveals
+		tapped.pastData = Out.pastData
 		tapped.hideCount = Out.hideCount
 		tapped.hides = Out.hides
 		tapped.lookCount = Out.lookCount
@@ -1439,17 +1471,71 @@ local function addHide(view: View, slot: number)
 	buffer.writeu16(view.flags, slot * 2, bit32.band(flags, bit32.bnot(SENT)))
 end
 
--- A reveal, its look entry and its whole record, all in one block or not at all
+--[[
+    How many of a slot's records from the runs before this one its reveal
+    carries: each run back while the history's plane still holds that run,
+    it was handed in that run with this life and kind, and its record has
+    this run's epoch parity, up to PAST_RECORDS, through the first record
+    at least the viewer's span of relay ticks old, and none DEPTH or more
+--]]
+
+local function pastOf(slot: number): number
+	local runs: buffer = Deltas.runs
+	local ticks: buffer = Deltas.ticks
+	local history: buffer = World.history
+	local first: number = math.max(buffer.readu32(Since, slot * 4), 1)
+	local epoch: number = bit32.rshift(buffer.readu16(Records, slot * RECORD_BYTES + WORD_AT), EPOCH_AT)
+	local count: number = 0
+
+	for back: number = 1, Constants.PAST_RECORDS do
+		local run: number = Run - back
+		local plane: number = run % DEPTH
+		if run < first or buffer.readu32(runs, plane * 4) ~= run then
+			break
+		end
+
+		local word: number = buffer.readu16(history, (plane * SLOTS + slot) * RECORD_BYTES + WORD_AT)
+		local age: number = (TickWire - buffer.readu16(ticks, plane * 2)) % WRAP
+		if bit32.rshift(word, EPOCH_AT) ~= epoch or age >= DEPTH then
+			break
+		end
+
+		count = back
+		if age >= Past.span then
+			break
+		end
+	end
+
+	return count
+end
+
+--[[
+    A reveal, its look entry and its whole record, all in one block or not
+    at all, and for a player anti-ESP had hidden, its past from the history
+    while the soft room holds it all, or none in the hard room when that
+    doesn't
+--]]
+
 local function addReveal(view: View, slot: number)
 	local flags: number = buffer.readu16(view.flags, slot * 2)
 	local dressing: boolean = bit32.btest(flags, LOOK + HELD)
+	local kind: number = buffer.readu8(view.kinds, slot)
 
 	local bytes: number = REVEAL_BYTES + RECORD_BYTES
 	if dressing then
 		bytes += lookBytes(slot, flags)
 	end
 
-	if not fits(view, bytes, math.max(Out.revealCount, Out.lookCount), Hard) then
+	local entries: number = math.max(Out.revealCount, Out.lookCount)
+	local past: number = 0
+	if bit32.btest(flags, PAST) and kind == PLAYER then
+		past = pastOf(slot)
+		if past > 0 and not fits(view, bytes + past * PAST_BYTES, entries, Soft) then
+			past = 0
+		end
+	end
+
+	if past == 0 and not fits(view, bytes, entries, Hard) then
 		return
 	end
 
@@ -1458,8 +1544,27 @@ local function addReveal(view: View, slot: number)
 
 	reveal.slot = slot
 	reveal.generation = buffer.readu8(Generations, slot)
-	reveal.kind = Block.KINDS[buffer.readu8(view.kinds, slot) + 1]
+	reveal.kind = Block.KINDS[kind + 1]
+	reveal.pastCount = nil
+	reveal.pastAt = nil
 	Out.revealCount = count
+
+	-- Oldest first, each its age in relay ticks before the block's and its record as the history keeps it
+	if past > 0 then
+		local data: buffer = Past.data
+		local at: number = Past.filled
+		reveal.pastCount = past
+		reveal.pastAt = at
+
+		for back: number = past, 1, -1 do
+			local plane: number = (Run - back) % DEPTH
+			buffer.writeu8(data, at, (TickWire - buffer.readu16(Deltas.ticks, plane * 2)) % WRAP)
+			buffer.copy(data, at + 1, World.history, (plane * SLOTS + slot) * RECORD_BYTES, RECORD_BYTES)
+			at += PAST_BYTES
+		end
+
+		Past.filled = at
+	end
 
 	if dressing then
 		flags = writeLook(view, slot, flags)
@@ -1709,7 +1814,7 @@ local function claim(view: View, own: number?)
 	end
 
 	local flags: number = bit32.band(buffer.readu16(view.flags, own * 2), bit32.bnot(RELEVANT + EDGES + CULLED))
-	flags = bit32.band(flags, bit32.bnot(SENT + REVEAL + HIDE + VISIBILITY_CARRIED))
+	flags = bit32.band(flags, bit32.bnot(SENT + REVEAL + HIDE + VISIBILITY_CARRIED + PAST))
 
 	local generation: number = buffer.readu8(Generations, own)
 	if bit32.btest(flags, OWN) and buffer.readu8(view.generations, own) == generation then
@@ -1863,6 +1968,7 @@ local function consider(view: View, viewer: Viewer, own: number?)
 	local enters: { number } = Tune.enters
 	local leaves: { number } = Tune.leaves
 	local outermost: number = Tune.bands - 1
+	local past: boolean = Past.on
 
 	for index: number = 1, count do
 		local slot: number
@@ -1913,10 +2019,15 @@ local function consider(view: View, viewer: Viewer, own: number?)
 			end
 		end
 
-		-- Whether anti-ESP culls it is found afresh below
+		-- Whether anti-ESP culls it is found afresh below, and a player still relevant after a run that held it culled
+		-- is marked for its past, which only a reveal pending below keeps
 		local flags: number = bit32.band(kept, bit32.bnot(RELEVANT + EDGES + CULLED))
 		if relevant then
 			flags = bit32.replace(bit32.bor(flags, RELEVANT), within, EDGES_AT, EDGES_WIDTH)
+
+			if past and bit32.btest(kept, CULLED) and kind == PLAYER then
+				flags = bit32.bor(flags, PAST)
+			end
 		end
 
 		if flags ~= 0 then
@@ -1999,6 +2110,12 @@ local function consider(view: View, viewer: Viewer, own: number?)
 			flags = bit32.band(flags, bit32.bnot(REVEAL + VISIBILITY_CARRIED + LOOKS))
 		else
 			flags = settle(view, slot, flags, wanted, generation)
+		end
+
+		-- A culled run leaves no reveal pending, so one pending now after it is this run's, and only that reveal and its
+		-- repeats until acknowledged carry the past
+		if past and not bit32.btest(flags, REVEAL) then
+			flags = bit32.band(flags, bit32.bnot(PAST))
 		end
 
 		if bit32.btest(flags, KEEP) and buffer.readu16(places, slot * 2) == 0 then
@@ -2818,6 +2935,12 @@ function Turn.turn(viewer: Viewer, back: number?, missed: boolean?)
 	LeaveSquared = distance * distance
 	SleeperSquared = math.min(Radii.sleepers, distance) ^ 2
 	NpcRangeSquared = math.min(Radii.npcs, distance) ^ 2
+
+	-- A reveal's past reaches back past its client's delay, held to the rewind's range, by one relay tick
+	if Past.on then
+		local delay: number = math.clamp((viewer.delay or 0) / MILLISECONDS, Past.delayMin, Past.delayMax)
+		Past.span = math.ceil(delay * RelayRate) + 1
+	end
 
 	-- Back from a spectate, its client may acknowledge the target's blocks a while yet, so its own go on past them,
 	-- and its records go whole until it acknowledges one of them

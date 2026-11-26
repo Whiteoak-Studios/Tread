@@ -11,8 +11,11 @@ local Environment = require("../../Environment")
 local StandIn = require("../../Fixtures/Relay/StandIn")
 
 local GLOBALS: string = "tests/Fixtures/Environment/Globals.luau"
+local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 local POOL: string = "ReplicatedStorage.Packages.Tread.Server.RelayWorkers.Pool"
 local WORKERS: number = 2
+local TICK_SLACK: number = 1e-9 -- Ticks a slice's time times the rate may fall short of its tick and still be in it
+local RATE: number = Environment.load(EXAMPLE).shared().rates.simulation -- The example's ticks a second
 local SLOTS: number = 4096 -- Constants.SLOTS
 local INVALID_SLOT: number = SLOTS -- A slot the slot table never has, whose viewer's turn throws
 local MASK_BITS: number = 16 -- The sequences before the newest a client's acknowledgment covers
@@ -431,8 +434,10 @@ return function (): (boolean, string | nil)
 				budget = STARVED
 			end
 
+			-- On the simulation tick its time falls in, which a near hidden pair's recheck waits for
+			local tick: number = math.floor(now * RATE + TICK_SLACK)
 			for _, built: Side in sides do
-				built.AntiEsp.run(budget, now)
+				built.AntiEsp.run(budget, now, tick)
 			end
 		end
 

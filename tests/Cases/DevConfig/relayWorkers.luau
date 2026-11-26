@@ -42,26 +42,32 @@ return function (): (boolean, string | nil)
 		end
 	end
 
-	-- 1) Absent or 0, the relay table holds records as changes and the budget alone, as it did before workers
+	-- 1) Absent or 0, the relay table holds records as changes, the past and the budget alone, as before workers
 	local absent: { [string]: any } = place.load(CONFIG)
 	workspace:SetAttribute(ATTRIBUTE, 0)
 	local none: { [string]: any } = place.load(CONFIG)
-	local alone: { [string]: any } = { changes = true, budget = RELAY_BUDGET }
+	local alone: { [string]: any } = { changes = true, budget = RELAY_BUDGET, past = true }
 
 	if Config.hash(absent.relay) ~= Config.hash(alone) or Config.hash(none) ~= Config.hash(absent) then
-		return false, `With {ATTRIBUTE} absent or 0, relay holds more than changes and the budget, or the two differ`
+		return false, `With {ATTRIBUTE} absent or 0, relay holds more than changes, past and budget, or the two differ`
 	end
 
 	-- 2) Above 0, that many workers and the timeout they need, nothing else changed
 	workspace:SetAttribute(ATTRIBUTE, WORKERS)
 	local some: { [string]: any } = place.load(CONFIG)
-	local expected: { [string]: any } = { changes = true, budget = RELAY_BUDGET, workers = WORKERS, timeout = TIMEOUT }
+	local expected: { [string]: any } = {
+		changes = true,
+		budget = RELAY_BUDGET,
+		workers = WORKERS,
+		timeout = TIMEOUT,
+		past = true,
+	}
 
 	local restored: { [string]: any } = table.clone(some)
 	restored.relay = absent.relay
 
 	if Config.hash(some.relay) ~= Config.hash(expected) then
-		return false, `With {ATTRIBUTE} {WORKERS}, relay is not changes, {WORKERS} workers and a {TIMEOUT} s timeout`
+		return false, `With {ATTRIBUTE} {WORKERS}, relay is not changes, past, {WORKERS} workers, a {TIMEOUT} s timeout`
 	elseif Config.hash(restored) ~= Config.hash(absent) then
 		return false, `With {ATTRIBUTE} {WORKERS}, a setting besides relay changed`
 	end

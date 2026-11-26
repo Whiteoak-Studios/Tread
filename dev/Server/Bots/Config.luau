@@ -51,14 +51,12 @@ export type Timing = {
 	interval: number,
 }
 
--- One load of the step benchmark: its scenario, each half's levers in the order the halves run, off for before, the
--- one lever its halves flip by name in a run whose loads each flip their own, and the levers it holds for both its
--- halves, by name, each at the state given
+-- One load of the step benchmark: its scenario, each half's levers in the order the halves run, off for before, and
+-- the one lever its halves flip by name in a run whose loads each flip their own
 export type StepLoad = {
 	scenario: string,
 	order: { boolean },
 	lever: string?,
-	hold: { [string]: boolean }?,
 }
 
 -- A distance band's rates in Hz, the one it aims for and its floor, and an edge between two bands in studs
@@ -424,13 +422,8 @@ return {
 			{ scenario = "Spread300", order = { false, true }, lever = "bands" },
 		} :: { StepLoad },
 
-		-- The near-rate run: S3 twice with the raised near rate flipped alone in its halves, off then on with anti-ESP's
-		-- workers held off, then on then off with them held on
-		near = {
-			{ scenario = "S3", order = { false, true }, lever = "nearRate60", hold = { antiEspWorkers = false } },
-			{ scenario = "S3", order = { true, false }, lever = "nearRate60", hold = { antiEspWorkers = true } },
-		} :: { StepLoad },
-		nearRaised = 60, -- Hz, anti-ESP's near rate while nearRate60 is on, the server's own while it is off
+		-- The near rate run: S3 alone, with anti-ESP's workers flipped alone in its halves, off then on
+		near = { scenario = "S3", order = { false, true }, lever = "antiEspWorkers" } :: StepLoad,
 	},
 
 	stage = "bots", -- The stage every bot sends from, after the relay

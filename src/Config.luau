@@ -192,6 +192,7 @@ local SERVER: Specs = {
 		["clocks?"] = "boolean",
 		["budget?"] = "nonNegative",
 		["split?"] = "boolean",
+		["past?"] = "boolean",
 	},
 
 	["owner?"] = { ["checks?"] = "boolean" },
@@ -206,7 +207,6 @@ local SERVER: Specs = {
 		slice = "positive",
 		hiddenRate = "positive",
 		nearRadius = "positive",
-		nearRate = "positive",
 		visibleRate = "positive",
 		hold = "nonNegative",
 		failOpen = "positive",
@@ -476,8 +476,9 @@ export type ServerSettings = {
 	-- many Actor workers take the viewers' turns, left out or 0 none, the seconds a round out on them may take before
 	-- it is given up, which workers need, whether the relay times each part of its runs for stats, left out or false
 	-- not, the seconds of the server's own script a run may take before the viewers left wait for the next, left
-	-- out no limit, and whether a calm tick sends its blocks a Heartbeat later to spread its work over its frames, left
-	-- out or false not. Read only, as tiers.outOfView is, so a game's own relay table fits
+	-- out no limit, whether a calm tick sends its blocks a Heartbeat later to spread its work over its frames, left
+	-- out or false not, and whether a reveal of a player anti-ESP had hidden carries its last few records, which needs
+	-- changes, left out or false not. Read only, as tiers.outOfView is, so a game's own relay table fits
 	read relay: {
 		read changes: boolean?,
 		read workers: number?,
@@ -485,6 +486,7 @@ export type ServerSettings = {
 		read clocks: boolean?,
 		read budget: number?,
 		read split: boolean?,
+		read past: boolean?,
 	}?,
 
 	-- Whether a player whose check agrees with the server's state is sent an acknowledgment in place of its OwnerState,
@@ -501,9 +503,10 @@ export type ServerSettings = {
 		lookAheadMax: number,
 		slice: number, -- Seconds it may take a Heartbeat
 		hiddenRate: number, -- Hz
-		nearRadius: number, -- Studs from the viewer's eye inside which a hidden pair is rechecked at nearRate instead
-		nearRate: number, -- Hz
-		visibleRate: number,
+		-- Studs from the viewer's eye inside which a hidden pair is rechecked once every server tick, in place of
+		-- hiddenRate
+		nearRadius: number,
+		visibleRate: number, -- Hz
 		hold: number, -- Seconds
 		failOpen: number,
 		lyingShare: number, -- Seconds of each slice, at most slice, kept for sleeper and body pairs while any wait
@@ -925,15 +928,24 @@ local function checkAim(server: any)
 	end
 end
 
--- Refuses relay workers with no timeout for the rounds they take, since every round out waits on it
+--[[
+    Refuses relay workers with no timeout for the rounds they take, since
+    every round out waits on it, and a reveal's past without records as
+    changes, since only they keep the history it comes from
+--]]
+
 local function checkRelay(server: any)
 	local relay: any = server.relay
-	if relay == nil or relay.workers == nil or relay.workers == 0 or relay.timeout ~= nil then
+	if relay == nil then
 		return
 	end
 
 	local path: string = `{SERVER_PATH}.relay`
-	refuse(`{path}.timeout`, `{EXPECTED.positive}, since {path}.workers is {relay.workers}`, nil)
+	if relay.workers ~= nil and relay.workers ~= 0 and relay.timeout == nil then
+		refuse(`{path}.timeout`, `{EXPECTED.positive}, since {path}.workers is {relay.workers}`, nil)
+	elseif relay.past == true and relay.changes ~= true then
+		refuse(`{path}.changes`, `true, since {path}.past is true`, relay.changes)
+	end
 end
 
 -- Refuses the far rate under load with no relay budget, since its runs are counted over and under that budget

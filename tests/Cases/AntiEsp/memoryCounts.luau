@@ -10,8 +10,10 @@ local roblox: any = require("@lune/roblox") -- Its typedefs leave out the dataty
 local Environment = require("../../Environment")
 
 local HARNESS: string = "tests/Fixtures/AntiEsp/Harness.luau"
+local EXAMPLE: string = "tests/Fixtures/Config/Example.luau"
 local CONSTANTS: string = "src/Constants.luau"
-local AGAIN: number = 1 / 30 -- Seconds to a near hidden pair's recheck, the example's nearRate of 30
+local RATE: number = Environment.load(EXAMPLE).shared().rates.simulation -- The example's server ticks a second
+local AGAIN: number = 1 / RATE -- Seconds to a near hidden pair's recheck, at the next tick
 local SLICE: number = 60 -- Seconds a slice may take, so no recheck's test runs out on a loaded machine
 local RECHECKS: number = 3 -- Rechecks run in each stretch with memory off
 local WALL_SIZE: any = roblox.Vector3.new(12, 12, 1)

@@ -9,8 +9,8 @@
 local Environment = require("../../Environment")
 
 local HARNESS: string = "tests/Fixtures/AntiEsp/Harness.luau"
-local WALLED: vector = vector.create(0, 0, -30) -- Inside the example's 250-stud near radius, so rechecked at 30 Hz
-local KEPT_AT: number = 0.05 -- Its first recheck, past its 1/30 s, which its kept answer settles
+local WALLED: vector = vector.create(0, 0, -30) -- Inside the example's 250-stud near radius, so rechecked once a server tick
+local KEPT_AT: number = 0.05 -- Its first recheck, at the next server tick, which its kept answer settles
 local CUT_AT: number = 0.1 -- Its next, in the cut slice
 local LATE_READ: number = 3 -- The deadline, the near queue's entry, then the tests' start, found passed
 local NEXT: number = 0.11

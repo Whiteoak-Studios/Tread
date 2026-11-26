@@ -32,7 +32,6 @@ return function (): (boolean, string | nil)
 		{ "moved", 0 },
 		{ "leave", viewer.key },
 		{ "aimPoints", vector.zero, {} },
-		{ "setNearRate", 60 },
 	}
 
 	for _, row: { any } in early do

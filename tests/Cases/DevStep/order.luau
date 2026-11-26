@@ -45,14 +45,11 @@ local CAPS_ON: string = table.concat({
 	"farUnderLoad (session 3, live) on",
 }, ", ")
 
--- And the raised near rate, left off by every run but its own
-local NEAR_OFF: string = "nearRate60 (session 3, live) off"
-
 -- The levers each half's header part names: session 3's caps off before and on after, and on in both halves of a
 -- noise run, beside step 1's as they stood
-local BEFORE: string = `{STEP_1}, {BOOT}, {STEP_2}, {SPLIT_OFF}, {CAPS_OFF}, {NEAR_OFF}`
-local AFTER: string = `{STEP_1}, {BOOT}, {STEP_2}, {SPLIT_OFF}, {CAPS_ON}, {NEAR_OFF}`
-local NOISE_LEVERS: string = `{STEP_1_OFF}, {BOOT}, {STEP_2}, {SPLIT_OFF}, {CAPS_ON}, {NEAR_OFF}`
+local BEFORE: string = `{STEP_1}, {BOOT}, {STEP_2}, {SPLIT_OFF}, {CAPS_OFF}`
+local AFTER: string = `{STEP_1}, {BOOT}, {STEP_2}, {SPLIT_OFF}, {CAPS_ON}`
+local NOISE_LEVERS: string = `{STEP_1_OFF}, {BOOT}, {STEP_2}, {SPLIT_OFF}, {CAPS_ON}`
 
 -- What the header says of step 3's build in every run, between its workers and its levers
 local NOTES: string = table.concat({

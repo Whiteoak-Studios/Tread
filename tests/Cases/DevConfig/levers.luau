@@ -1,7 +1,7 @@
 --[[
-    The dev server's settings keep the out-of-view rate and records as
-    changes on when Workspace's TreadLeversOff is absent or false, turn both
-    off when it is true, and change nothing else but the owner's checks
+    The dev server's settings keep the out-of-view rate, records as changes
+    and a reveal's past on with Workspace's TreadLeversOff absent or false,
+    turn them off with it true, and change nothing but the owner's checks
 --]]
 
 --!strict
@@ -44,23 +44,23 @@ return function (): (boolean, string | nil)
 	workspace:SetAttribute(ATTRIBUTE, true)
 	local off: { [string]: any } = place.load(CONFIG)
 
-	-- 1) Absent or false, both levers are on at the dev place's values
+	-- 1) Absent or false, the three levers are on at the dev place's values
 	if Config.hash(unset) ~= Config.hash(absent) then
 		return false, `{ATTRIBUTE} false gave other settings than with it absent`
 	elseif absent.tiers.outOfView == nil or Config.hash(absent.tiers.outOfView) ~= Config.hash(OUT_OF_VIEW) then
 		return false, `With {ATTRIBUTE} absent, tiers.outOfView is not the dev place's rate, cone and radius`
-	elseif Config.hash(absent.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET }) then
-		return false, `With {ATTRIBUTE} absent, relay holds more or less than changes set true and the budget`
+	elseif Config.hash(absent.relay) ~= Config.hash({ changes = true, budget = RELAY_BUDGET, past = true }) then
+		return false, `With {ATTRIBUTE} absent, relay holds more or less than changes and past set true and the budget`
 	end
 
-	-- 2) True, both levers are off
+	-- 2) True, the three levers are off, the past left out
 	if off.tiers.outOfView ~= nil then
 		return false, `With {ATTRIBUTE} true, tiers.outOfView is still given`
 	elseif Config.hash(off.relay) ~= Config.hash({ changes = false, budget = RELAY_BUDGET }) then
 		return false, `With {ATTRIBUTE} true, relay holds more or less than changes set false and the budget`
 	end
 
-	-- 3) True, nothing else changed: the three levers put back, the settings hash as they do absent
+	-- 3) True, nothing else changed: the four levers put back, the settings hash as they do absent
 	local tiers: { [string]: any } = table.clone(off.tiers)
 	tiers.outOfView = absent.tiers.outOfView
 
@@ -70,7 +70,7 @@ return function (): (boolean, string | nil)
 	restored.owner = absent.owner
 
 	if Config.hash(restored) ~= Config.hash(absent) then
-		return false, `With {ATTRIBUTE} true, a setting besides the three levers changed`
+		return false, `With {ATTRIBUTE} true, a setting besides the four levers changed`
 	end
 
 	return true, nil

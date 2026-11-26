@@ -72,6 +72,7 @@ local LiveRuns = {
 		{ name = "BenchS7", minutes = 7.5 },
 		{ name = "BenchRelevancy", minutes = 8 }, -- S3 and S4 at 3 render distances, one seed of a 15 s warm-up and 60 s each
 		{ name = "Openings", minutes = 1 }, -- The city block's markers 20 at a time, 3 s a batch
+		{ name = "GapCrossing", minutes = 2 }, -- Four passes of three sprints across the 2-stud gap, the player still
 		{ name = "LateReveals", minutes = 31.5 }, -- 3 seeds of a 30 s warm-up and a 600 s window
 		{ name = "Corrections", minutes = 0.1 }, -- Prints the counts kept since each player joined
 		{ name = "HitAgreement", minutes = 8.4 }, -- A 3 s settle, then 4 cases of a 3 s warm-up, 120 s firing, 2 s drain
@@ -86,7 +87,7 @@ local LiveRuns = {
 		{ name = "BenchStepSplit", minutes = 7 }, -- The step loads with the split by stage off and on, 10 s and 50 s each
 		{ name = "BenchStepNpcs", minutes = 2.5 }, -- S4Npcs with the NPCs' budget off then on, 10 s and 50 s
 		{ name = "BenchStepLevers", minutes = 7 }, -- Session 2's levers each alone, S4 twice and Spread300, 10 s and 50 s
-		{ name = "BenchStepNear", minutes = 5 }, -- S3's near rate alone, anti-ESP's workers off then on, 10 s and 50 s
+		{ name = "BenchStepNear", minutes = 2.5 }, -- S3's near rechecks with anti-ESP's workers off then on, 10 s and 50 s
 		{ name = "ClientParallel", minutes = 3 }, -- P6 then P8 on every real client, each beside G5, 10 s and 60 s
 	} :: { Run },
 

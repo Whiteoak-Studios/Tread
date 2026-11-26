@@ -203,9 +203,7 @@ local LyingRays: number = 0
 local LookAheadMin: number = 0
 local LookAheadMax: number = 0
 local HiddenInterval: number = 0
-local NearRate: number = 0 -- Hz, as start or AntiEsp.setNearRate last set it
-local NearInterval: number = 0 -- A hidden pair's, while its target is within NearSquared of the viewer's eye
-local NearSquared: number = 0
+local NearSquared: number = 0 -- Inside which of the viewer's eye a hidden pair is retested once each server tick
 local VisibleInterval: number = 0
 local Hold: number = 0
 local FailOpen: number = 0
@@ -218,6 +216,7 @@ local RelayInterval: number = 0 -- Seconds a relay tick takes, the most a packin
 
 local Now: number = 0 -- The schedule's clock at the last slice, which an ask's fail-open is measured on
 local Slice: number = 0 -- The slices run since start
+local SliceTick: number = 0 -- The server tick whose bodies the running slice tests
 local Round: number = 0 -- The relay's runs that asked about a pair
 local Ran: boolean = true -- Whether a slice ran since the relay last asked, so its next ask starts a round
 
@@ -309,6 +308,7 @@ local PairLives: { number } = {} -- And the target's generation
 local PairLying: { boolean } = {} -- A sleeper or body, on the sleepers' schedule
 local PairVerdicts: { number } = {} -- Why it is sent, or why not
 local PairChecked: { number } = {} -- When it was last tested, made or moved to another schedule
+local PairTicks: { number } = {} -- The server tick its last test was aimed at, the packing slice's on a worker
 local PairSeen: { number } = {} -- When a test last found it visible, -math.huge for never
 local PairAsked: { number } = {} -- The round the relay last asked about it
 local PairStamps: { number } = {} -- Moves on at each change of its schedule, so only its newest entry counts
@@ -333,7 +333,8 @@ local GroupTop: number = 0
 
 -- The schedules whose due times nearly always come in the order they are set, as the schedule's clock never runs
 -- back but for a worker's result settled on the clock it was aimed at, which goes in its place, so each interval
--- keeps a queue of its own
+-- keeps a queue of its own. The near queue holds server ticks in place of times, each the tick after the one its
+-- pair's test was aimed at, which never runs back but for a worker's result packed a tick before a later one
 local NowQueue: Queue = { ids = {}, stamps = {}, times = {}, head = 1, tail = 0 }
 local HiddenQueue: Queue = { ids = {}, stamps = {}, times = {}, head = 1, tail = 0 }
 local NearQueue: Queue = { ids = {}, stamps = {}, times = {}, head = 1, tail = 0 }
@@ -463,8 +464,6 @@ function AntiEsp.start(
 	LookAheadMin = server.antiEsp.lookAheadMin
 	LookAheadMax = server.antiEsp.lookAheadMax
 	HiddenInterval = 1 / server.antiEsp.hiddenRate
-	NearRate = server.antiEsp.nearRate
-	NearInterval = 1 / NearRate
 	NearSquared = server.antiEsp.nearRadius ^ 2
 	VisibleInterval = 1 / server.antiEsp.visibleRate
 	Hold = server.antiEsp.hold
@@ -515,7 +514,8 @@ local function enqueue(queue: Queue, id: number, stamp: number, time: number)
 	end
 
 	-- A worker's answer settles on its batch's reach, a lead past the slice that packed it, which can pass the clock a
-	-- later test settles on, so an entry due before the one ahead waits behind it, later by no more than a lead
+	-- later test settles on, so an entry due before the one ahead waits behind it, later by no more than a lead. On the
+	-- near queue a batch landing a slice late can follow a test aimed at a later tick, and waits behind it the same way
 	local times: { number } = queue.times
 	if tail >= head and time < times[tail] then
 		time = times[tail]
@@ -1504,10 +1504,13 @@ end
     Settles one pair's test from whether a ray was open, on the schedule's
     clock now, and schedules its next. An open ray shows it; every ray
     blocked hides it, unless it was visible and a test found it so inside
-    the hold, which keeps it sent until a test after the hold. A sleeper's
-    or body's pair joins its viewer's group for this slice. A player pair
-    hidden by its test before and left hidden on the near schedule counts
-    as a near recheck, with the seconds since that test
+    the hold, which keeps it sent until a test after the hold. A hidden
+    player pair whose target stands within the near radius is due again at
+    the server tick after the one its test was aimed at, and a farther one
+    at the hidden rate. A sleeper's or body's pair joins its viewer's group
+    for this slice. A player pair hidden by its test before and left hidden
+    on the near schedule counts as a near recheck, with the seconds since
+    that test
 --]]
 
 local function settle(pair: number, open: boolean, now: number)
@@ -1565,7 +1568,7 @@ local function settle(pair: number, open: boolean, now: number)
 				NearSeconds += now - last
 			end
 
-			schedule(pair, NearQueue, now + NearInterval)
+			schedule(pair, NearQueue, PairTicks[pair] + 1)
 		else
 			schedule(pair, HiddenQueue, now + HiddenInterval)
 		end
@@ -1760,14 +1763,17 @@ local function remember(pair: number, world: World, now: number): boolean
 end
 
 --[[
-    Tests one due pair: casts its rays here, until the first open one, and
-    settles it at once, or while the slice packs, packs them for a worker
-    under a new stamp, so no entry it waited with can pack it again in flight.
-    A player pair goes to verdict memory while it is on, and it gives
-    whether a kept answer settled the pair
+    Tests one due pair, first marking it aimed at the slice's server tick:
+    casts its rays here, until the first open one, and settles it at once,
+    or while the slice packs, packs them for a worker under a new stamp, so
+    no entry it waited with can pack it again in flight. A player pair goes
+    to verdict memory while it is on, and it gives whether a kept answer
+    settled the pair
 --]]
 
 local function test(pair: number, world: World, now: number): boolean
+	PairTicks[pair] = SliceTick
+
 	if Remembering and not PairLying[pair] then
 		return remember(pair, world, now)
 	end
@@ -2036,9 +2042,10 @@ local Steps: { Step } = {
 		return false, took, false
 	end,
 
-	-- Each schedule's front. Running whole, each drain reads the clock every DRAIN_CHECK entries, and the drains start
-	-- at the queue the last cut stopped in when it took nothing from it, else at the one after it, so no queue waits on
-	-- its place in the order, and at the first once the drains end
+	-- Each schedule's front, the near queue's by the slice's server tick with no lead and the rest by due. Running
+	-- whole, each drain reads the clock every DRAIN_CHECK entries, and the drains start at the queue the last cut
+	-- stopped in when it took nothing from it, else at the one after it, so no queue waits on its place in the order,
+	-- and at the first once the drains end
 	function (_: World, _: number, due: number, deadline: number, whole: boolean): (boolean, boolean, boolean)
 		local queues: number = #Queues
 		local from: number = whole and Whole.drain or 1
@@ -2051,7 +2058,8 @@ local Steps: { Step } = {
 
 		for step: number = 0, queues - 1 do
 			local at: number = (from + step - 1) % queues + 1
-			local finished: boolean, taken: boolean = drain(Queues[at], due, stop)
+			local by: number = Queues[at] == NearQueue and SliceTick or due
+			local finished: boolean, taken: boolean = drain(Queues[at], by, stop)
 			took = took or taken
 
 			if not finished then
@@ -2109,14 +2117,18 @@ local Steps: { Step } = {
     seconds of the clock have passed. Running whole, its timers, walks and
     drains stop at that deadline too, and the next slice goes on from where
     they stopped, beginning at the step the deadline cut. now is the
-    schedule's clock every due time is on. With workers it first takes back
-    what they landed, and while one is idle packs its tests, up to a relay
-    tick ahead, and sends them last, cut or not; with workers on and none
-    free it casts here. It is refused inside a hold, whose asks must find
-    the verdicts as the round's answers gave them
+    schedule's clock every due time is on, and tick the server tick whose
+    bodies have stepped, the world's clock when left out, which each near
+    hidden pair is due by, once a tick from the first slice that finds its
+    tick come. With workers it first takes back what they landed, and while
+    one is idle packs its tests, the timed ones up to a relay tick ahead
+    and a near one at the tick it falls due, and sends them last, cut or
+    not; with workers on and none free it casts here. It is refused inside
+    a hold, whose asks must find the verdicts as the round's answers gave
+    them
 --]]
 
-function AntiEsp.run(budget: number, now: number)
+function AntiEsp.run(budget: number, now: number, tick: number?)
 	local world: World? = Space
 	if world == nil then
 		error("AntiEsp.run ran before AntiEsp.start", 2)
@@ -2126,6 +2138,8 @@ function AntiEsp.run(budget: number, now: number)
 		error(`AntiEsp.run takes a budget in seconds of 0 or more, not {budget}`, 2)
 	elseif type(now) ~= "number" or not (math.abs(now) < math.huge) then
 		error(`AntiEsp.run takes the schedule's clock as a finite number, not {now}`, 2)
+	elseif tick ~= nil and (type(tick) ~= "number" or not (math.abs(tick) < math.huge) or tick % 1 ~= 0) then
+		error(`AntiEsp.run takes the server tick as a whole number or nil, not {tick}`, 2)
 	end
 
 	local deadline: number = Clock() + budget
@@ -2134,6 +2148,7 @@ function AntiEsp.run(budget: number, now: number)
 
 	Now = now
 	Slice += 1
+	SliceTick = tick or world.clock
 	Ran = true
 
 	-- 0) What the workers landed since the last slice, settled before anything comes due, while their pool exists,
@@ -2149,7 +2164,8 @@ function AntiEsp.run(budget: number, now: number)
 
 	-- A worker's verdict lands a slice after its rays are packed, so a slice that packs reaches as far ahead as the
 	-- last one was behind, at most a relay tick so a stall drains no pair a whole stall early, and the verdict lands
-	-- at the slice the pair falls due in, settled on that reach
+	-- at the slice the pair falls due in, settled on that reach. A near pair takes no reach: it is due by the tick, and
+	-- a test before its tick's bodies step would test the tick before
 	local due: number = now
 	if Packing and Slice > 1 then
 		due += math.min(math.max(now - last, 0), RelayInterval)
@@ -2298,32 +2314,6 @@ end
 
 function AntiEsp.memory(): (number, number)
 	return KeptTests, BoxRays
-end
-
---[[
-    Sets the near rate, the Hz a hidden pair is retested at while its
-    target stands within antiEsp.nearRadius of its viewer's eye, from each
-    pair's next test, for a dev bench's before and after on one server. An
-    entry queued keeps its due time, and a new one waits behind the
-    queue's last, so no pair comes due early. It is refused before start,
-    which sets the rate the settings give, and for any rate but a finite
-    number above 0, leaving the rate as it was
---]]
-
-function AntiEsp.setNearRate(rate: number)
-	if not Started then
-		error("AntiEsp.setNearRate ran before AntiEsp.start", 2)
-	elseif type(rate) ~= "number" or not (rate > 0 and rate < math.huge) then
-		error(`AntiEsp.setNearRate takes a rate in Hz as a finite number above 0, not {rate}`, 2)
-	end
-
-	NearRate = rate
-	NearInterval = 1 / rate
-end
-
--- The near rate in Hz, as start or AntiEsp.setNearRate last set it
-function AntiEsp.nearRate(): number
-	return NearRate
 end
 
 --[[

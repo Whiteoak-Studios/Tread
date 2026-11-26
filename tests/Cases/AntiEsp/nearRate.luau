@@ -1,6 +1,6 @@
 --[[
     A hidden player pair whose target stands within antiEsp.nearRadius of the
-    viewer's eye comes due again 1/30 s after its test, one 300 studs apart
+    viewer's eye comes due again at the next server tick, one 300 studs apart
     after the hidden rate's 1/10 s, and a visible pair after 1/2 s at both
 --]]
 
@@ -13,35 +13,35 @@ local FAR: number = 300
 local EARLY: number = 0.9 -- The share of an interval at which a slice comes before the recheck is due
 
 -- One pair's run: how far its target stands, whether every ray is blocked, and the interval its recheck keeps
-type Trial = { distance: number, blocked: boolean, interval: (server: any) -> number }
+type Trial = { distance: number, blocked: boolean, interval: (harness: any) -> number }
 
 local TRIALS: { Trial } = {
 	{
 		distance = NEAR,
 		blocked = true,
-		interval = function (server: any): number
-			return 1 / server.antiEsp.nearRate
+		interval = function (harness: any): number
+			return 1 / harness.shared.rates.simulation
 		end,
 	},
 	{
 		distance = FAR,
 		blocked = true,
-		interval = function (server: any): number
-			return 1 / server.antiEsp.hiddenRate
+		interval = function (harness: any): number
+			return 1 / harness.server.antiEsp.hiddenRate
 		end,
 	},
 	{
 		distance = NEAR,
 		blocked = false,
-		interval = function (server: any): number
-			return 1 / server.antiEsp.visibleRate
+		interval = function (harness: any): number
+			return 1 / harness.server.antiEsp.visibleRate
 		end,
 	},
 	{
 		distance = FAR,
 		blocked = false,
-		interval = function (server: any): number
-			return 1 / server.antiEsp.visibleRate
+		interval = function (harness: any): number
+			return 1 / harness.server.antiEsp.visibleRate
 		end,
 	},
 }
@@ -58,8 +58,9 @@ return function (): (boolean, string | nil)
 		local target: number = harness:body("Player", vector.create(0, 0, -trial.distance))
 		Harness.AntiEsp.isHidden(viewer, target)
 
-		-- The module's own sum, so each recheck lands on its slice's time to the bit
-		local interval: number = trial.interval(harness.server)
+		-- The module's own sum, so each recheck lands on its slice's time to the bit, and each slice on the tick its
+		-- time falls in
+		local interval: number = trial.interval(harness)
 		local slices: { { number | boolean } } = {
 			{ 0, true },
 			{ interval * EARLY, false },
