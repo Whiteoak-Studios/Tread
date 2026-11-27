@@ -269,6 +269,12 @@ return {
 		},
 	},
 
+	-- The gap check's client: the relay ticks of frames, by render time, it keeps before a GapCrossing window opens,
+	-- so the window's capture still holds them when its attribute arrives late
+	gap = {
+		preroll = 10, -- Half a second at the 20 Hz relay
+	},
+
 	-- The dev place's exploit kit: what its panel counts, what each tool does, and how the ESP draws
 	exploits = {
 		small = 0.1, -- Studs: a correction this far or less with no flag flipped counts small on the panel

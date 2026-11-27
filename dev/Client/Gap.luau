@@ -1,7 +1,7 @@
 --[[
-    The gap check's client side: while the Workspace attribute names a
-    window, each frame's render time and whether the target's rig is drawn,
-    its reveal's arrival, and where its frozen rig stood and was thawed to
+    The gap check's client side: each window's frames, by render time and
+    whether the target's rig is drawn, from a few ticks before its Workspace
+    attribute opens it, with its reveal's arrival and its frozen rig's places
 --]]
 
 --!strict
@@ -21,15 +21,18 @@ local Interpolate = require(Packages.Tread.Client.Interpolate)
 
 local GapLine = require(ReplicatedStorage.Shared.Dev.GapLine)
 
+local PREROLL: number = require(script.Parent.Config).gap.preroll -- Relay ticks of frames held before a window opens
+
 type Slot = Tread.Slot
 type Capture = GapLine.Capture
+type Frame = GapLine.Frame
 type Place = GapLine.Place
+type Thaw = GapLine.Thaw
 
--- The window recording: the label the server opened it with, what it holds, and whether a reveal of the target came
+-- The window recording: the label the server opened it with, and what it holds
 type Window = {
 	label: string,
 	capture: Capture,
-	arrived: boolean,
 }
 
 -- Where the target's rig stood when a hide froze it, with that rig
@@ -44,6 +47,9 @@ local Rigs: { [number]: Model } = {} -- Each remote slot's rig as its last spawn
 local Drawn: { [number]: true } = {} -- Each remote slot onSpawned named and onDespawned hasn't ended
 local Stood: Frozen? = nil -- The target's frozen rig, nil while none stands
 local Open: Window? = nil -- The window recording, nil between windows
+local Held: { GapLine.Held } = {} -- The frames recorded while no window is open, the last PREROLL ticks of them
+local Arrived: boolean = false -- Whether a reveal of the target came since the last frame recorded
+local Pending: Thaw? = nil -- A thaw heard while no window is open, until a frame held carries it
 
 local Gap = {}
 
@@ -86,45 +92,50 @@ local function changed()
 		frozen = stood.place
 	end
 
-	Open = {
-		label = label,
-		capture = { frames = {}, arrival = nil, frozen = frozen, thawed = nil, cut = 0 },
-		arrived = false,
-	}
+	Open = { label = label, capture = GapLine.begin(Held, frozen, Pending) }
+	table.clear(Held)
+	Pending = nil
 end
 
--- The slot attribute changed: the target it names, its frozen rig forgotten
+-- The slot attribute changed: the target it names, and everything heard of the last one forgotten
 local function retarget()
 	local slot: any = Workspace:GetAttribute(GapLine.SLOT)
 	Target = type(slot) == "number" and slot or nil
 	Stood = nil
+	table.clear(Held)
+	Arrived = false
+	Pending = nil
 end
 
 --[[
-    Each frame while a window is open, after Tread's client has drawn it:
-    its render time and whether the target's rig stands drawn, the frame a
-    reveal of the target arrived before marked, and frames past what the
-    line can carry counted as cut
+    Each frame after Tread's client has drawn it, its render time and
+    whether the target's rig stands drawn: into the open window, the frame a
+    reveal of the target arrived before marked and frames past what the line
+    can carry counted as cut, or held while a target is named and no window
 --]]
 
 local function record(client: Tread.Client)
-	local window: Window? = Open
-	if not window then
-		return
-	end
-
-	local capture: Capture = window.capture
-	if #capture.frames >= GapLine.LINE_BYTES then
-		capture.cut += 1
-		return
-	end
-
 	local target: number? = Target
-	local drawn: boolean = target ~= nil and Drawn[target] == true
-	table.insert(capture.frames, { render = client:getRenderTime(), drawn = drawn })
+	local frame: Frame = { render = client:getRenderTime(), drawn = target ~= nil and Drawn[target] == true }
+	local arrived: boolean = Arrived
+	Arrived = false
 
-	if window.arrived and capture.arrival == nil then
-		capture.arrival = #capture.frames
+	local window: Window? = Open
+	if window then
+		local capture: Capture = window.capture
+		if #capture.frames >= GapLine.LINE_BYTES then
+			capture.cut += 1
+			return
+		end
+
+		table.insert(capture.frames, frame)
+		if arrived and capture.arrival == nil then
+			capture.arrival = #capture.frames
+		end
+	elseif target ~= nil then
+		local thaw: Thaw? = Pending
+		Pending = nil
+		GapLine.hold(Held, { frame = frame, arrived = arrived, thaw = thaw }, PREROLL)
 	end
 end
 
@@ -157,7 +168,9 @@ function Gap.start(client: Tread.Client)
 		Stood = nil
 
 		local window: Window? = Open
-		if window and window.capture.thawed == nil then
+		if not window then
+			Pending = { from = stood.place, to = placeOf(rig) }
+		elseif window.capture.thawed == nil then
 			window.capture.thawed = placeOf(rig)
 		end
 	end)
@@ -183,9 +196,8 @@ function Gap.start(client: Tread.Client)
 	end)
 
 	Interpolate.onReveal(function (slot: number)
-		local window: Window? = Open
-		if window and slot == Target then
-			window.arrived = true
+		if slot == Target then
+			Arrived = true
 		end
 	end)
 

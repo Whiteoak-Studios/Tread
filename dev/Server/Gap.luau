@@ -70,6 +70,7 @@ export type Crossing = {
 	direction: number, -- 1 for one along +Z, -1 along -Z
 	open: { [number]: boolean }, -- The hull set's open ticks in the zone, by their low 16 bits
 	bodyOpen: { [number]: boolean }, -- And the body set's
+	bodyTicks: { number }, -- The body set's open ticks in the zone again, as the server counts them, in order
 	entered: number?, -- The first tick in the zone the hull set found the target visible
 	bodyEntered: number?,
 	closed: number?, -- The first one in the zone after that it didn't
@@ -86,6 +87,7 @@ export type Crossing = {
 	missing: string?, -- Why the client's part is missing, nil while it isn't
 	late: number?, -- The client's frames in the body set's open ticks with the rig undrawn
 	hullLate: number?, -- And in the hull set's
+	unwatched: { number }?, -- The body set's open ticks the client drew no frame in, nil until its frames are judged
 	drawnAt: number?, -- The first frame from the arrival on with the rig drawn
 	jump: boolean?, -- Whether the frozen rig's place and its thawed place were both hidden by the walls
 }
@@ -159,6 +161,7 @@ function Gap.crossing(pass: string, kind: string, index: number, direction: numb
 		direction = direction,
 		open = {},
 		bodyOpen = {},
+		bodyTicks = {},
 		entered = nil,
 		bodyEntered = nil,
 		closed = nil,
@@ -175,6 +178,7 @@ function Gap.crossing(pass: string, kind: string, index: number, direction: numb
 		missing = nil,
 		late = nil,
 		hullLate = nil,
+		unwatched = nil,
 		drawnAt = nil,
 		jump = nil,
 	}
@@ -231,6 +235,7 @@ function Gap.track(crossing: Crossing, seen: Seen)
 
 		if seen.body then
 			crossing.bodyOpen[Gap.wire(tick)] = true
+			table.insert(crossing.bodyTicks, tick)
 			crossing.bodyEntered = crossing.bodyEntered or tick
 		elseif crossing.bodyEntered ~= nil and crossing.bodyClosed == nil then
 			crossing.bodyClosed = tick
@@ -287,6 +292,28 @@ function Gap.judge(frames: { Frame }, arrival: number?, open: { [number]: boolea
 	return late, nil
 end
 
+--[[
+    The ticks given that the client drew no frame in, in their order, a
+    frame's render time meeting a tick by the low 16 bits a block carries,
+    as the judge meets them
+--]]
+
+function Gap.unwatched(frames: { Frame }, ticks: { number }): { number }
+	local watched: { [number]: boolean } = {}
+	for _, frame: Frame in frames do
+		watched[Gap.wire(frame.render)] = true
+	end
+
+	local unwatched: { number } = {}
+	for _, tick: number in ticks do
+		if not watched[Gap.wire(tick)] then
+			table.insert(unwatched, tick)
+		end
+	end
+
+	return unwatched
+end
+
 -- Whether the frozen rig's jump stayed behind the walls: both its places known, and the server's test hides each
 function Gap.behind(frozen: Place?, thawed: Place?, hidden: (place: Place) -> boolean): boolean
 	if frozen == nil or thawed == nil then
@@ -294,6 +321,16 @@ function Gap.behind(frozen: Place?, thawed: Place?, hidden: (place: Place) -> bo
 	end
 
 	return hidden(frozen) and hidden(thawed)
+end
+
+-- Numbers as a line lists them, such as a reveal's past ages or a crossing's ticks
+function Gap.list(values: { number }): string
+	local parts: { string } = {}
+	for _, value: number in values do
+		table.insert(parts, tostring(value))
+	end
+
+	return table.concat(parts, ", ")
 end
 
 local function text(value: number?): string
@@ -361,6 +398,15 @@ local function clientPart(crossing: Crossing): string
 		drawn = `drawn at frame {drawnAt} ({drawnAt - arrival} after)`
 	end
 
+	local unwatched: { number }? = crossing.unwatched
+	local unseen: string = `unwatched {NONE}`
+	if unwatched then
+		unseen = `unwatched {#unwatched}`
+		if #unwatched > 0 then
+			unseen = `{unseen} (ticks {Gap.list(unwatched)})`
+		end
+	end
+
 	local parts: { string } = {
 		`client {#capture.frames} frames`,
 		arrived,
@@ -369,6 +415,7 @@ local function clientPart(crossing: Crossing): string
 		`frozen at {placeText(capture.frozen)}`,
 		`thawed at {placeText(capture.thawed)}`,
 		`lateFrames {text(crossing.late)} (hull set {text(crossing.hullLate)})`,
+		unseen,
 		`jump behind the walls {crossing.jump == true}`,
 	}
 
@@ -405,12 +452,7 @@ function Gap.line(crossing: Crossing, rate: number, pastOn: boolean): string
 	if crossing.rode ~= nil and past then
 		carried = `rode {crossing.rode} with past {#past}`
 		if #past > 0 then
-			local ages: { string } = {}
-			for _, age: number in past do
-				table.insert(ages, tostring(age))
-			end
-
-			carried = `{carried} (ages {table.concat(ages, ", ")})`
+			carried = `{carried} (ages {Gap.list(past)})`
 		end
 
 		if not pastOn then

@@ -224,8 +224,9 @@ end
 
 --[[
     Ends a crossing: G8's episodes counted, the client's frames judged
-    against each set's open ticks, the frozen rig's jump tested from the
-    viewer's eye on a body like the target's, and its line printed
+    against each set's open ticks, the body set's it drew no frame in named,
+    the frozen rig's jump tested from the viewer's eye on a body like the
+    target's, and its line printed
 --]]
 
 local function finish(crossing: Gap.Crossing, context: Context, episodes: { Reveals.Episode }, target: Tread.Character)
@@ -247,6 +248,7 @@ local function finish(crossing: Gap.Crossing, context: Context, episodes: { Reve
 
 		crossing.late = late
 		crossing.hullLate = hullLate
+		crossing.unwatched = Gap.unwatched(capture.frames, crossing.bodyTicks)
 		crossing.drawnAt = drawnAt
 		crossing.jump = Gap.behind(capture.frozen, capture.thawed, hidden)
 	end
@@ -421,7 +423,12 @@ local function pass(context: Context, at: Gap.Pass, made: Made, problems: { stri
 	return crossings
 end
 
--- Every pass in turn, then the line that sums their crossings
+--[[
+    Every pass in turn, then the line that sums their crossings. A crossing
+    whose client drew no frame in some of the body set's open ticks adds a
+    problem, since those ticks can't be judged
+--]]
+
 local function drive(context: Context, made: Made, problems: { string }): string
 	made.moved = true
 
@@ -433,11 +440,21 @@ local function drive(context: Context, made: Made, problems: { string }): string
 	end
 
 	local late: number = 0
+	local unwatched: number = 0
 	local atArrival: number = 0
 	local behind: number = 0
 	local carried: number = 0
 	for _, crossing: Gap.Crossing in all do
 		late += crossing.late or 0
+
+		local ticks: { number }? = crossing.unwatched
+		if ticks and #ticks > 0 then
+			unwatched += #ticks
+
+			local where: string = `{crossing.pass} crossing {crossing.index}`
+			local drew: string = `the client drew no frame in {#ticks} of the body set's open ticks ({Gap.list(ticks)})`
+			table.insert(problems, `{where}: {drew}, so the check can't say whether the rig was drawn in them`)
+		end
 
 		local capture: GapLine.Capture? = crossing.client
 		if capture and capture.arrival ~= nil and crossing.drawnAt == capture.arrival then
@@ -455,7 +472,8 @@ local function drive(context: Context, made: Made, problems: { string }): string
 	end
 
 	local relay: string = context.pastOn and "on" or "off"
-	local counts: string = `{late} late frames by the body set, {atArrival} drawn at the reveal's arrival frame`
+	local bodySet: string = `{late} late frames by the body set, {unwatched} of its open ticks unwatched`
+	local counts: string = `{bodySet}, {atArrival} drawn at the reveal's arrival frame`
 	local rest: string = `{behind} jumps behind the walls, {carried} reveals with a past, relay.past {relay}`
 
 	return `{#all} crossings over {#context.layout.passes} passes: {counts}, {rest}`

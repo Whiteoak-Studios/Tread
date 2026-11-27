@@ -1,7 +1,7 @@
 --[[
     A crossing's printed line from ticks tracked as the server sees them
     and the client's frames carried through its line and back: every field
-    with a known answer, a reveal with no past, and a crossing with nothing
+    with a known answer, a late window, a reveal with no past, and nothing
 --]]
 
 --!strict
@@ -60,9 +60,19 @@ local NEAR: string = "GapCrossing viewer 60 path 2 (near) crossing 1 along +Z: e
 	.. "found 202 (-3 from entered), rode 202 with past 3 (ages 3, 2, 1), client 13 frames, "
 	.. "reveal arrived at render 199.50, frame 3, drawn at frame 3 (0 after), "
 	.. "off 198.00-198.75 on 199.50-205.50 off 206.25-206.25 on 207.00-207.00, "
-	.. "frozen at (1999.50, -2027.25), thawed at (1999.50, -2003.75), lateFrames 1 (hull set 1), "
+	.. "frozen at (1999.50, -2027.25), thawed at (1999.50, -2003.75), lateFrames 1 (hull set 1), unwatched 0, "
 	.. "jump behind the walls true, closed 209 (body 208), hide rode 230, hold 0.55 s from the last Clear, "
 	.. "G8 body episodes lenient 0 strict 0"
+
+-- The same ticks with a window that opened late, its first frame at render 207.25, the reveal arrived and drawn in it,
+-- so the body set's open tick 206 has no frame; the thaw stood clear of the walls
+local LATE_RENDERS: { number } = { 207.25, 208, 208.75 }
+local LATE: string = "GapCrossing viewer 60 path 2 (near) crossing 3 along +Z: entered 205 (body 206), "
+	.. "found 202 (-3 from entered), rode 202 with past 3 (ages 3, 2, 1), client 3 frames, "
+	.. "reveal arrived at render 207.25, frame 1, drawn at frame 1 (0 after), on 207.25-208.75, "
+	.. "frozen at (1999.50, -2027.25), thawed at (1999.50, -1997.25), lateFrames 0 (hull set 0), "
+	.. "unwatched 1 (ticks 206), jump behind the walls false, closed 209 (body 208), hide rode 230, "
+	.. "hold 0.55 s from the last Clear, G8 body episodes lenient 0 strict 0"
 
 local BARE: string = "GapCrossing viewer 300 path 30 (far) crossing 2 along -Z: entered - (body -), found 202, "
 	.. "rode 202 with past 0 (relay.past is off), client missing: Mike sent no line within 3 s, "
@@ -71,6 +81,11 @@ local BARE: string = "GapCrossing viewer 300 path 30 (far) crossing 2 along -Z: 
 local EMPTY: string = "GapCrossing viewer 60 path 30 (near) crossing 3 along +Z: entered - (body -), found -, "
 	.. "no reveal rode, client missing: no line came, closed - (body -), hide rode -, hold - from the last Clear, "
 	.. "G8 body episodes lenient 0 strict 0"
+
+-- The server's test of a place as the case stands it in: the walls hide every place short of Z -2001
+local function behindWalls(place: any): boolean
+	return place.z < -2001
+end
 
 return function (): (boolean, string | nil)
 	local loaded: Harness.Loaded = Harness.load()
@@ -136,17 +151,48 @@ return function (): (boolean, string | nil)
 	crossing.client = capture
 	crossing.late = late
 	crossing.hullLate = Gap.judge(capture.frames, capture.arrival, crossing.open)
+	crossing.unwatched = Gap.unwatched(capture.frames, crossing.bodyTicks)
 	crossing.drawnAt = drawnAt
-	crossing.jump = Gap.behind(capture.frozen, capture.thawed, function (place: any): boolean
-		return place.z < -2001
-	end)
+	crossing.jump = Gap.behind(capture.frozen, capture.thawed, behindWalls)
 
 	local line: string = Gap.line(crossing, RATE, true)
 	if line ~= NEAR then
 		return false, `The near crossing printed "{line}", not "{NEAR}"`
 	end
 
-	-- 4) A reveal with no past while relay.past is off, and no line from the client
+	-- 4) The same ticks with a window that opened after the body set's first open tick, which it names
+	local lateFrames: { Frame } = {}
+	for _, render: number in LATE_RENDERS do
+		table.insert(lateFrames, { render = render, drawn = true })
+	end
+
+	local opened: any = {
+		frames = lateFrames,
+		arrival = 1,
+		frozen = { x = 1999.5, z = -2027.25 },
+		thawed = { x = 1999.5, z = -1997.25 },
+		cut = 0,
+	}
+
+	local lateWindow: any = Gap.crossing("viewer 60 path 2", "near", 3, 1)
+	for _, seen: Seen in TICKS do
+		Gap.track(lateWindow, seen)
+	end
+
+	late, drawnAt = Gap.judge(opened.frames, opened.arrival, lateWindow.bodyOpen)
+	lateWindow.client = opened
+	lateWindow.late = late
+	lateWindow.hullLate = Gap.judge(opened.frames, opened.arrival, lateWindow.open)
+	lateWindow.unwatched = Gap.unwatched(opened.frames, lateWindow.bodyTicks)
+	lateWindow.drawnAt = drawnAt
+	lateWindow.jump = Gap.behind(opened.frozen, opened.thawed, behindWalls)
+
+	line = Gap.line(lateWindow, RATE, true)
+	if line ~= LATE then
+		return false, `A window that opened late printed "{line}", not "{LATE}"`
+	end
+
+	-- 5) A reveal with no past while relay.past is off, and no line from the client
 	local bare: any = Gap.crossing("viewer 300 path 30", "far", 2, -1)
 	Gap.track(
 		bare,
@@ -163,7 +209,7 @@ return function (): (boolean, string | nil)
 		return false, `A reveal with no past printed "{line}", not "{BARE}"`
 	end
 
-	-- 5) A crossing that saw nothing at all
+	-- 6) A crossing that saw nothing at all
 	line = Gap.line(Gap.crossing("viewer 60 path 30", "near", 3, 1), RATE, true)
 	if line ~= EMPTY then
 		return false, `An empty crossing printed "{line}", not "{EMPTY}"`
