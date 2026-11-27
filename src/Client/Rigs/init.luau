@@ -1,0 +1,1622 @@
+--[[
+    The client's rig pool: rigs cloned from the game's template, dressed for
+    a slot and given back, posed at the detail their distance earns, laid down
+    or ragdolled as bodies, outlined for spectate, and the owner's own view
+--]]
+
+--!strict
+local Rigs = {}
+Rigs.__index = Rigs
+
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local Animate = require(script.Animate)
+local Config = require(script.Parent.Parent.Config)
+local Constants = require(script.Parent.Parent.Constants)
+local FirstPerson = require(script.FirstPerson)
+local Math = require(script.Parent.Parent.Step.Math)
+local Ragdoll = require(script.Ragdoll)
+local State = require(script.Parent.Parent.Step.State)
+
+local SLOTS: number = Constants.SLOTS
+local MOVE_EVENTS: Enum.BulkMoveMode = Enum.BulkMoveMode.FireCFrameChanged -- A placed root fires only its CFrame change
+local WORLD_RIG: boolean = false -- The dress hook's copy flag for a world rig, the body other viewers see
+local FIRST_PERSON: boolean = true -- Its flag for the owner's copy, which leaves off what the copy never shows
+local NEAR: number = 0 -- Studs from the eye the copy is posed at, since the eye is inside it, so at full detail
+local LEVEL: number = 0 -- The copy's aim pitch, radians: the torso turns with the camera for other viewers only
+local IN_PLACE: number = 0 -- Studs behind the state's place every rig but the copy is drawn
+local AUTHORED: number = 1 -- The track speed every rig starts at, each track's own
+-- The track speed a rig holds its pose at: a dying one while its ragdoll waits for the frame's end, and a frozen one
+local HELD: number = 0
+local OUTLINED: string = "TreadOutlined" -- The model the outlined rigs are drawn in, under the one Highlight
+local THROUGH_WALLS: Enum.HighlightDepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- The outline shows through walls
+local UNCAPPED: PerFrame = {} -- The caps of a pool given none, under which every request starts at once
+
+-- The engine draws a long frame when a rig's root that stopped being moved is moved again, and a root written its
+-- same CFrame counts as not moved, so a drawn rig standing still has its root this far above its target every
+-- other frame, under the step's quantum so nothing but the root's own CFrame shows it
+local NUDGE: number = 0.001 -- Studs along the world's Y
+
+-- The 15 R15 joints mode A's adapter maps, each a logical name the game's joints map names an instance for
+local JOINTS: { string } = {
+	"Root",
+	"Waist",
+	"Neck",
+	"LeftShoulder",
+	"LeftElbow",
+	"LeftWrist",
+	"RightShoulder",
+	"RightElbow",
+	"RightWrist",
+	"LeftHip",
+	"LeftKnee",
+	"LeftAnkle",
+	"RightHip",
+	"RightKnee",
+	"RightAnkle",
+}
+
+type Animated = Animate.Animated
+type ClientSettings = Config.ClientSettings
+type Collision = State.Collision
+type PerFrame = Config.PerFrame
+type Place = Animate.Place
+type State = State.State
+type World = State.World
+
+-- The client settings' keys the pool reads, each typed where the client settings declare it
+export type Joints = index<ClientSettings, "joints">
+export type Animations = index<ClientSettings, "animations">
+export type Lod = index<ClientSettings, "lod">
+export type Bodies = index<ClientSettings, "bodies">
+export type Limit = index<index<Bodies, "jointLimits">, string>
+export type Spectate = index<ClientSettings, "spectate">
+
+-- A slot's look and its held item, the game's declared fields by name
+export type Outfit = State.Values
+export type Held = State.Values
+
+-- The client settings the pool reads, under their own keys
+export type Settings = {
+	rig: index<ClientSettings, "rig">,
+	joints: Joints,
+	animations: Animations,
+	dress: index<ClientSettings, "dress">,
+	undress: index<ClientSettings, "undress">,
+	hold: index<ClientSettings, "hold">,
+	lod: Lod,
+	bodies: Bodies,
+	firstPerson: index<ClientSettings, "firstPerson">, -- Read at each pose, so a change takes at the copy's next move
+	read spectate: Spectate?, -- Read the first time a rig is outlined, which errors without it
+	read perFrame: PerFrame?, -- Read once, by new
+	read pool: index<ClientSettings, "pool">,
+}
+
+export type Marker = (slot: number, marker: string, value: string) -> ()
+
+-- One cosmetic recoil kick on a drawn rig's aim, in radians, eased out over its seconds from its os.clock start
+type Kick = { pitch: number, yaw: number, started: number, duration: number }
+
+type Entry = {
+	rig: Model,
+	root: BasePart,
+	joints: { [string]: AnimationConstraint }, -- Its own joint instances, by logical name
+	slot: number?, -- The slot it is checked out for, nil while pooled
+	holding: boolean, -- Whether hold has put an item on it
+	drawn: boolean, -- Whether it is in Workspace, inside the draw distance
+	outlined: boolean, -- Whether it is drawn under the spectate outline
+	placed: vector?, -- Where its last pose put its feet, nil before the first
+	facing: number,
+	target: CFrame, -- Where its root stands once the frame's move is made, which its feet plant from
+	raised: CFrame?, -- Its target the nudge higher, made at its first raise, nil from each change of target until then
+	lifts: boolean, -- Whether the frame's move puts its root at raised, on alternate frames its target holds
+	lying: boolean, -- Whether its last pose was in the Downed posture, which leaves its root unmoved once on its target
+	queued: boolean, -- Whether the frame's move holds its root
+	distance: number, -- Studs from the viewer at its last draw, the farthest before one
+	state: State?, -- What its last draw was handed, for a draw or a switch the frame's end grants
+	pitch: number,
+	back: number,
+	full: boolean,
+	admitted: boolean, -- Whether the frame's end let its next draw put it into the Workspace
+	dying: boolean, -- Whether it holds its pose while its ragdoll waits for the frame's end
+	frozen: boolean, -- Whether it stands in Workspace holding its pose, a hidden player's body, until its next pose
+	push: vector?, -- The attack's direction its ragdoll starts with, nil for no push
+	animated: Animated?, -- Its tracks, from its first draw until it ragdolls
+	body: Ragdoll.Body?, -- Its ragdoll, once it dies
+	kicks: { Kick }, -- The recoil kicks on its aim, still easing or not yet dropped
+	headYaw: number, -- Its head offset, radians, as turn last gave it
+	headPitch: number,
+}
+
+-- One kind of costly work's requests, each a rig's, which the frame's end grants up to the kind's cap
+type Gate = {
+	cap: number?, -- The most granted a frame, nil to start each request at once
+	held: boolean, -- Whether a request stands until granted, as a ragdoll's, or must be asked again each frame
+	waiting: { Entry }, -- Requests past the cap in frames before, in the order they came
+	waits: { [Entry]: boolean }, -- The same by rig
+	asked: { Entry }, -- Requests made since the frame before ended, in the order made
+	distances: { [Entry]: number }, -- Each standing request's studs from the viewer, nil once granted or dropped
+	ranks: { [Entry]: number }, -- Each of those since the frame before by its place in asked, which settles a tie
+	fresh: { Entry }, -- The frame's end's new requests, nearest first
+	order: { Entry }, -- The order the frame's end grants in
+	nearer: (a: Entry, b: Entry) -> boolean,
+}
+
+type Fields = {
+	_settings: Settings,
+	_template: Model, -- The pool's own readied clone of the game's template, which every rig is cloned from
+	_drawDistance: number,
+	_collision: Collision,
+	_world: World?, -- The world whose casts each plant reads as they stand then, nil to plant through _collision
+	_rootHeight: number, -- The template's root above its lowest point, so a rig's feet stand on a state's position
+	_places: { Place },
+	_folder: Folder,
+	_pool: { Entry }, -- Rigs ready for a slot, out of Workspace
+	_slots: { [number]: Entry },
+	_rigs: { Entry }, -- Every rig built and not yet destroyed, pooled or not
+	_markers: { [string]: { string } }, -- Each animation's marker names by its AnimationId, once read
+	_reading: { [string]: boolean }, -- The AnimationIds whose markers are being or have been read
+	_listeners: { [{ nil }]: Marker },
+	_layering: RBXScriptConnection?, -- The PreSimulation layer, from the first draw until destroy
+	_queued: { Entry }, -- The rigs whose roots the frame's move takes, in the order first posed
+	_frozen: { Entry }, -- The frozen rigs, which no pose reaches, so the frame's end queues the roots a pose would have
+	_moved: { BasePart }, -- BulkMoveTo's lists, reused for every frame's move
+	_targets: { CFrame },
+	_switches: Gate, -- Track switches from one track to another
+	_draws: Gate, -- Draws that put a rig into the Workspace
+	_ragdolls: Gate, -- Ragdolls started
+	_spare: number?, -- The rigs the pool keeps built outside the Workspace, nil for none
+	_builds: number?, -- The most of those built a frame, nil for every one missing at once
+	_own: number?, -- The slot checked out as the local player's own, nil while none is
+	_copy: Entry?, -- Its first-person copy, held apart from every slot, nil while it has none
+	_watched: number?, -- The spectated target's slot, whose world rig takes the local player's rig setting
+	_speed: number, -- Every rig's track speed, a share of each track's authored speed
+	_firstPerson: FirstPerson.FirstPerson, -- What the local player sees of their own rigs
+	_container: Model?, -- What the outlined rigs are drawn in, made the first time one is
+	_destroyed: boolean,
+}
+
+local Thrown: string = "" -- The last world rig's dress hook error, with its stack, which checkout raises again
+
+-- Errors naming a value that is no slot, from the caller of the member named
+local function checkSlot(slot: number, member: string)
+	if type(slot) ~= "number" or slot % 1 ~= 0 or slot < 0 or slot >= SLOTS then
+		error(`Rigs.{member} takes a slot from 0 to {SLOTS - 1}, not {slot}`, 3)
+	end
+end
+
+-- The joint instance a rig holds for a logical joint, erroring naming what is missing
+local function jointOf(rig: Model, names: Joints, logical: string): AnimationConstraint
+	local name: string? = names[logical]
+	if type(name) ~= "string" then
+		error(`The joints map names no joint for {logical}`, 3)
+	end
+
+	local found: Instance? = rig:FindFirstChild(name, true)
+	if not found or not found:IsA("AnimationConstraint") then
+		error(`The rig {rig.Name} has no AnimationConstraint named {name} for {logical}`, 3)
+	end
+
+	local attachment1: Attachment? = found.Attachment1
+	if not found.Attachment0 or not attachment1 or not attachment1.Parent or not attachment1.Parent:IsA("BasePart") then
+		error(`The rig {rig.Name}'s {name} joins no two parts by their attachments`, 3)
+	end
+
+	return found
+end
+
+local function partOf(joint: AnimationConstraint): BasePart
+	return (joint.Attachment1 :: Attachment).Parent :: BasePart
+end
+
+-- The lowest point of any part of a model, each part's extent along the world's Y read from its axes
+local function lowest(model: Model): number
+	local bottom: number = math.huge
+	for _, item: Instance in model:GetDescendants() do
+		if item:IsA("BasePart") then
+			local frame: CFrame = item.CFrame
+			local size: Vector3 = item.Size
+			local x: number = math.abs(frame.RightVector.Y) * size.X
+			local y: number = math.abs(frame.UpVector.Y) * size.Y
+			local z: number = math.abs(frame.LookVector.Y) * size.Z
+			bottom = math.min(bottom, frame.Position.Y - (x + y + z) / 2)
+		end
+	end
+
+	return bottom
+end
+
+-- Removes an entry from a list, wherever it sits
+local function forget(list: { Entry }, entry: Entry)
+	local index: number? = table.find(list, entry)
+	if index then
+		table.remove(list, index)
+	end
+end
+
+-- Runs where a callback's error was raised, so its warning keeps the callback's stack
+local function warnFailure(message: any)
+	warn(`A marker callback threw, and the other callbacks still ran: {debug.traceback(tostring(message), 2)}`)
+end
+
+-- Runs where a rig hook raised an error for the owner's first-person copy, so its warning keeps the hook's stack
+local function warnCopy(message: unknown)
+	local stack: string = debug.traceback(tostring(message), 2)
+	warn(`A rig hook threw for the first-person copy, and its world rig carried on without it: {stack}`)
+end
+
+-- Runs where an undress hook raised an error on a rig whose dress threw, so its warning keeps the hook's stack
+local function warnUndress(message: unknown)
+	local stack: string = debug.traceback(tostring(message), 2)
+	warn(`A rig's undress hook threw after its dress hook did, so the rig was destroyed: {stack}`)
+end
+
+-- Keeps the error a world rig's dress hook raised with the stack that raised it, taken before the stack unwinds
+local function keep(message: unknown)
+	Thrown = debug.traceback(tostring(message), 2)
+end
+
+--[[
+    The pool's own clone of the game's template, readied as every rig needs
+    it: no Humanoid, script, ball socket or no-collision pair, no part that
+    collides, is queried or is touched, the root alone anchored, and an
+    AnimationController with an Animator, so a stock R15 rig serves as it is
+--]]
+
+local function prepare(given: Model): Model
+	local template: Model = given:Clone()
+	local root: BasePart? = template.PrimaryPart
+
+	for _, item: Instance in template:GetDescendants() do
+		if
+			item:IsA("Humanoid")
+			or item:IsA("BaseScript")
+			or item:IsA("BallSocketConstraint")
+			or item:IsA("NoCollisionConstraint")
+		then
+			item:Destroy()
+		elseif item:IsA("BasePart") then
+			item.Anchored = item == root
+			item.CanCollide = false
+			item.CanQuery = false
+			item.CanTouch = false
+		end
+	end
+
+	-- A stock rig's Animator sits under its Humanoid, so it went with it
+	local controller: AnimationController = template:FindFirstChildOfClass("AnimationController")
+		or Instance.new("AnimationController")
+	controller.Parent = template
+	if not controller:FindFirstChildOfClass("Animator") then
+		Instance.new("Animator").Parent = controller
+	end
+
+	return template
+end
+
+-- Takes a rig's look off and puts a new one on
+local function restyle(settings: Settings, rig: Model, outfit: Outfit, copy: boolean)
+	settings.undress(rig)
+	settings.dress(rig, outfit, copy)
+end
+
+-- The aim, lean and head layer and the planted legs of one rig, if it is drawn. A frozen rig shows its tracks' own pose
+local function layer(entry: Entry)
+	local animated: Animated? = entry.animated
+	if animated and entry.drawn and not entry.frozen then
+		Animate.layer(animated)
+	end
+end
+
+--[[
+    The recoil a rig's kicks put on its aim now, in radians of pitch and
+    yaw: each eased from its whole size to nothing over its duration through
+    the one lerp, summed, with each one past its duration dropped
+--]]
+
+local function recoil(kicks: { Kick }): (number, number)
+	if #kicks == 0 then
+		return 0, 0
+	end
+
+	local now: number = os.clock()
+	local pitch: number = 0
+	local yaw: number = 0
+
+	for index: number = #kicks, 1, -1 do
+		local kick: Kick = kicks[index]
+		local eased: number = (now - kick.started) / kick.duration
+
+		if eased >= 1 then
+			table.remove(kicks, index)
+		else
+			pitch += Math.lerp(kick.pitch, 0, eased)
+			yaw += Math.lerp(kick.yaw, 0, eased)
+		end
+	end
+
+	return pitch, yaw
+end
+
+-- Whether a rig's root joins the frame's move. A rig standing still is moved all the same, but one lying down only to a
+-- new target or off the nudge, since a sleeper or a body lies still for as long as it is drawn
+local function joins(entry: Entry): boolean
+	return not entry.queued and (not entry.lying or not entry.lifts)
+end
+
+-- Takes every kick and the head offset off a rig, as a body or a pooled rig holds none
+local function settle(entry: Entry)
+	table.clear(entry.kicks)
+	entry.headYaw = 0
+	entry.headPitch = 0
+end
+
+-- A gate under a cap, nil to start every request at once, with no request yet
+local function newGate(cap: number?, held: boolean): Gate
+	local distances: { [Entry]: number } = {}
+	local ranks: { [Entry]: number } = {}
+
+	return {
+		cap = cap,
+		held = held,
+		waiting = {},
+		waits = {},
+		asked = {},
+		distances = distances,
+		ranks = ranks,
+		fresh = {},
+		order = {},
+
+		-- Nearest first, and of two as near the one asked first
+		nearer = function (a: Entry, b: Entry): boolean
+			local first: number, second: number = distances[a], distances[b]
+			if first ~= second then
+				return first < second
+			end
+
+			return ranks[a] < ranks[b]
+		end,
+	}
+end
+
+-- A rig's request of a gate at its studs from the viewer, the newest distance kept when it asks again
+local function ask(gate: Gate, entry: Entry, distance: number)
+	if gate.distances[entry] == nil then
+		table.insert(gate.asked, entry)
+		gate.ranks[entry] = #gate.asked
+	end
+
+	gate.distances[entry] = distance
+end
+
+-- Drops a rig's request, which the gate's next turn skips
+local function drop(gate: Gate, entry: Entry)
+	gate.distances[entry] = nil
+end
+
+--[[
+    A gate's turn at the frame's end: the requests still standing from
+    frames before go first in the order they came, then the new ones
+    nearest first, each granted up to the cap, and the rest wait in that
+    order. A request the gate doesn't hold must be asked again each frame,
+    as each pose asks again, so one no longer asked is let go
+--]]
+
+local function admit(self: Self, gate: Gate, grant: (self: Self, entry: Entry) -> ())
+	local cap: number? = gate.cap
+	if cap == nil then
+		return
+	end
+
+	local distances: { [Entry]: number } = gate.distances
+	local order: { Entry } = gate.order
+	for _, entry: Entry in gate.waiting do
+		if distances[entry] ~= nil then
+			table.insert(order, entry)
+		end
+	end
+
+	local fresh: { Entry } = gate.fresh
+	for _, entry: Entry in gate.asked do
+		if not gate.waits[entry] and distances[entry] ~= nil then
+			table.insert(fresh, entry)
+		end
+	end
+
+	table.sort(fresh, gate.nearer)
+	for _, entry: Entry in fresh do
+		table.insert(order, entry)
+	end
+
+	table.clear(fresh)
+	table.clear(gate.asked)
+	table.clear(gate.ranks)
+	table.clear(gate.waiting)
+	table.clear(gate.waits)
+	if not gate.held then
+		table.clear(distances)
+	end
+
+	for index: number, entry: Entry in order do
+		if index <= cap then
+			distances[entry] = nil
+			grant(self, entry)
+		else
+			table.insert(gate.waiting, entry)
+			gate.waits[entry] = true
+		end
+	end
+
+	table.clear(order)
+end
+
+--[[
+    A pool over its own readied clone of the game's rig template, any R15
+    model, Roblox's own included, while the game's model is never changed.
+    The clone is checked against what the pool needs from it: a PrimaryPart
+    as its root, each R15 joint as an AnimationConstraint, legs whose knees
+    can bend, an Animation for every state and the limits of every joint
+    but Root. The caps of perFrame and the spare rigs of pool, each read
+    once here, hold what its frame's end starts
+
+    @ drawDistance | this device class's character draw distance
+    @ collision | the step's own casts, which feet are planted with
+    @ world | the world whose casts feet are planted with in place of
+    collision, read at each plant, since a platform wraps them later
+--]]
+
+function Rigs.new(settings: Settings, drawDistance: number, collision: Collision, world: World?): Self
+	local given: Model = settings.rig
+	if typeof(given) ~= "Instance" or not given:IsA("Model") then
+		error(`Rigs.new takes a Model as the rig template, not a {typeof(given)}`, 2)
+	elseif not given.Archivable then
+		error(`The rig template {given.Name} is not Archivable, so it can't be cloned`, 2)
+	end
+
+	local template: Model = prepare(given)
+	local root: BasePart? = template.PrimaryPart
+	if not root then
+		error(`The rig template {template.Name} has no PrimaryPart, the root its rigs are placed by`, 2)
+	end
+
+	local joints: { [string]: AnimationConstraint } = {}
+	for _, logical: string in JOINTS do
+		joints[logical] = jointOf(template, settings.joints, logical)
+	end
+
+	Animate.check(settings.animations)
+	Ragdoll.check(settings.bodies, JOINTS)
+
+	if type(drawDistance) ~= "number" or not (drawDistance > 0) then
+		error(`Rigs.new takes a draw distance above 0, not {drawDistance}`, 2)
+	elseif type(collision) ~= "table" or type(collision.ray) ~= "function" then
+		error("Rigs.new takes the step's Collision, whose ray plants the feet", 2)
+	elseif world ~= nil and (type(world) ~= "table" or type(world.collision) ~= "table") then
+		error(`Rigs.new takes the step's World, whose casts plant the feet, or none, not a {typeof(world)}`, 2)
+	end
+
+	-- How each leg bends and where its foot sits on the template, which every rig shares
+	local places: { Place } = Animate.places(root, joints)
+	local rootHeight: number = root.CFrame.Position.Y - lowest(template)
+
+	local folder: Folder = Instance.new("Folder")
+	folder.Name = "TreadRigs"
+	folder.Parent = Workspace
+
+	local perFrame: PerFrame = settings.perFrame or UNCAPPED
+	local pool: index<Settings, "pool"> = settings.pool
+
+	return setmetatable({
+		_settings = settings,
+		_template = template,
+		_drawDistance = drawDistance,
+		_collision = collision,
+		_world = world,
+		_rootHeight = rootHeight,
+		_places = places,
+		_folder = folder,
+		_pool = {} :: { Entry },
+		_slots = {} :: { [number]: Entry },
+		_rigs = {} :: { Entry },
+		_markers = {} :: { [string]: { string } },
+		_reading = {} :: { [string]: boolean },
+		_listeners = {} :: { [{ nil }]: Marker },
+		_layering = nil :: RBXScriptConnection?,
+		_queued = {} :: { Entry },
+		_frozen = {} :: { Entry },
+		_moved = {} :: { BasePart },
+		_targets = {} :: { CFrame },
+		_switches = newGate(perFrame.switches, false),
+		_draws = newGate(perFrame.draws, false),
+		_ragdolls = newGate(perFrame.ragdolls, true),
+		_spare = pool and pool.spare,
+		_builds = perFrame.builds,
+		_own = nil :: number?,
+		_copy = nil :: Entry?,
+		_watched = nil :: number?,
+		_speed = AUTHORED,
+		_firstPerson = FirstPerson.new(),
+		_container = nil :: Model?,
+		_destroyed = false,
+	}, Rigs)
+end
+
+--[[
+    A rig dressed for a slot with the slot's look: one back from the pool,
+    or a new clone of the template when the pool is empty. It stays out of
+    Workspace until its first pose draws it. The local player's own rig is
+    hidden on this screen, and a second rig from the pool comes out with it
+    as its first-person copy. A dress hook that throws gives the rig back
+    and raises its error again, with the hook's stack
+
+    @ own | whether the slot is the local player's own
+--]]
+
+function Rigs.checkout(self: Self, slot: number, outfit: Outfit, own: boolean?): Model
+	checkSlot(slot, "checkout")
+	if self._slots[slot] then
+		error(`Slot {slot} already has a rig checked out`, 2)
+	elseif type(outfit) ~= "table" then
+		error(`Rigs.checkout takes the slot's look as a table, not a {typeof(outfit)}`, 2)
+	elseif own and self._own ~= nil then
+		error(`Slot {self._own}'s rig is already the local player's own, so slot {slot}'s can't be`, 2)
+	end
+
+	local entry: Entry = table.remove(self._pool) or self:_build()
+	local dressed: boolean = xpcall(self._settings.dress, keep, entry.rig, outfit, WORLD_RIG)
+	if not dressed then
+		self:_giveBack(entry)
+		error(Thrown, 0)
+	end
+
+	entry.slot = slot
+	self._slots[slot] = entry
+
+	if own then
+		local copy: Entry? = self:_take(outfit)
+		self._own = slot
+		self._copy = copy
+		self._firstPerson:build(entry.rig, copy)
+	end
+
+	return entry.rig
+end
+
+--[[
+    The local player's first-person copy, a rig from the pool dressed with
+    their look as the copy and held apart from every slot, so its markers
+    reach nobody. A dress hook that throws is warned, and gives the rig back
+    with no copy
+--]]
+
+function Rigs._take(self: Self, outfit: Outfit): Entry?
+	local entry: Entry = table.remove(self._pool) or self:_build()
+	local dressed: boolean = xpcall(self._settings.dress, warnCopy, entry.rig, outfit, FIRST_PERSON)
+	if not dressed then
+		self:_giveBack(entry)
+		return nil
+	end
+
+	return entry
+end
+
+--[[
+    Gives back a rig whose dress hook threw before any slot held it:
+    undressed under its own guard and pooled, or, when its undress throws
+    too, destroyed and dropped from the pool's rigs
+--]]
+
+function Rigs._giveBack(self: Self, entry: Entry)
+	local undressed: boolean = xpcall(self._settings.undress, warnUndress, entry.rig)
+	if undressed then
+		table.insert(self._pool, entry)
+		return
+	end
+
+	local animated: Animated? = entry.animated
+	if animated then
+		Animate.release(animated)
+	end
+
+	forget(self._rigs, entry)
+	entry.rig:Destroy()
+end
+
+function Rigs._build(self: Self): Entry
+	local settings: Settings = self._settings
+	local rig: Model = self._template:Clone()
+
+	local joints: { [string]: AnimationConstraint } = {}
+	for _, logical: string in JOINTS do
+		joints[logical] = jointOf(rig, settings.joints, logical)
+	end
+
+	local root: BasePart = rig.PrimaryPart :: BasePart
+	local entry: Entry = {
+		rig = rig,
+		root = root,
+		joints = joints,
+		slot = nil,
+		holding = false,
+		drawn = false,
+		outlined = false,
+		placed = nil,
+		facing = 0,
+		target = root.CFrame,
+		raised = nil,
+		lifts = false,
+		lying = false,
+		queued = false,
+		distance = math.huge,
+		state = nil,
+		pitch = 0,
+		back = 0,
+		full = false,
+		admitted = false,
+		dying = false,
+		frozen = false,
+		push = nil,
+		animated = nil,
+		body = nil,
+		kicks = {},
+		headYaw = 0,
+		headPitch = 0,
+	}
+	table.insert(self._rigs, entry)
+
+	return entry
+end
+
+function Rigs._entry(self: Self, slot: number, member: string): Entry
+	local entry: Entry? = self._slots[slot]
+	if not entry then
+		error(`Rigs.{member} takes a slot with a rig checked out, not {slot}`, 3)
+	end
+
+	return entry
+end
+
+--[[
+    Puts a new look on a slot's rig, the old one taken off first, and on
+    the local player's own first-person copy too, each of their parts then
+    hidden on this screen as before, as are the spectated target's
+--]]
+
+function Rigs.dress(self: Self, slot: number, outfit: Outfit)
+	local entry: Entry = self:_entry(slot, "dress")
+	if type(outfit) ~= "table" then
+		error(`Rigs.dress takes the slot's look as a table, not a {typeof(outfit)}`, 2)
+	end
+
+	local settings: Settings = self._settings
+	restyle(settings, entry.rig, outfit, WORLD_RIG)
+
+	if slot == self._own then
+		local copy: Entry? = self._copy
+		if copy then
+			xpcall(restyle, warnCopy, settings, copy.rig, outfit, FIRST_PERSON)
+		end
+
+		self._firstPerson:refresh()
+	elseif slot == self._watched then
+		self._firstPerson:refresh()
+	end
+end
+
+--[[
+    Puts the held item a slot's held-item fields name on its rig, or clears
+    the hands with nil, and on the local player's own first-person copy
+    too, each of their parts then hidden on this screen as before, as are
+    the spectated target's
+--]]
+
+function Rigs.hold(self: Self, slot: number, held: Held?)
+	local entry: Entry = self:_entry(slot, "hold")
+	local settings: Settings = self._settings
+	settings.hold(entry.rig, held)
+	entry.holding = held ~= nil
+
+	if slot == self._own then
+		local copy: Entry? = self._copy
+		if copy then
+			local holds: boolean = xpcall(settings.hold, warnCopy, copy.rig, held)
+			if holds then
+				copy.holding = held ~= nil
+			end
+		end
+
+		self._firstPerson:refresh()
+	elseif slot == self._watched then
+		self._firstPerson:refresh()
+	end
+end
+
+--[[
+    Undresses a slot's rig and gives it back to the pool, its held item
+    cleared first, and the local player's own first-person copy with it. A
+    rig that ragdolled is a body, which leaves the pool, so it is destroyed
+    instead
+--]]
+
+function Rigs.release(self: Self, slot: number)
+	local entry: Entry = self:_entry(slot, "release")
+	if slot == self._own then
+		self:_disown()
+	elseif slot == self._watched then
+		self:watch(nil)
+	end
+
+	self._slots[slot] = nil
+	entry.slot = nil
+	self:_put(entry)
+end
+
+--[[
+    Ends the local player's own rig as their own: both their rigs shown on
+    this screen again, as the pool and a body need them, and the copy back
+    in the pool, its hooks under their own guard
+--]]
+
+function Rigs._disown(self: Self)
+	self._own = nil
+	self._firstPerson:release()
+
+	local copy: Entry? = self._copy
+	if copy then
+		self._copy = nil
+		xpcall(self._put, warnCopy, self, copy)
+	end
+end
+
+--[[
+    Stops, clears and undresses a rig no slot holds any more, then pools
+    it, or destroys it once it is a body. Its requests waiting for the
+    frame's end are dropped and its freeze ends, so a rig whose ragdoll
+    waited, or a frozen one, goes back to the pool as any other
+--]]
+
+function Rigs._put(self: Self, entry: Entry)
+	local settings: Settings = self._settings
+	self:_forgo(entry)
+	self:_thaw(entry)
+	entry.dying = false
+	entry.admitted = false
+	entry.state = nil
+	entry.push = nil
+
+	local animated: Animated? = entry.animated
+	if animated then
+		Animate.stop(animated)
+	end
+
+	if entry.holding then
+		settings.hold(entry.rig, nil)
+		entry.holding = false
+	end
+	settings.undress(entry.rig)
+	settle(entry)
+
+	local body: Ragdoll.Body? = entry.body
+	if body then
+		Ragdoll.stop(body)
+		forget(self._rigs, entry)
+		entry.rig:Destroy()
+		return
+	end
+
+	entry.rig.Parent = nil
+	entry.drawn = false
+	entry.outlined = false
+	table.insert(self._pool, entry)
+end
+
+-- Drops every request a rig has waiting for the frame's end
+function Rigs._forgo(self: Self, entry: Entry)
+	drop(self._switches, entry)
+	drop(self._draws, entry)
+	drop(self._ragdolls, entry)
+end
+
+--[[
+    Sets the draw distance in studs, past which a rig's next pose takes it
+    out of Workspace, as the client's render distance changes
+--]]
+
+function Rigs.setDrawDistance(self: Self, distance: number)
+	if type(distance) ~= "number" or not (distance > 0) then
+		error(`Rigs.setDrawDistance takes a draw distance above 0, not {distance}`, 2)
+	end
+
+	self._drawDistance = distance
+end
+
+--[[
+    Poses a slot's rig from a step state at its distance from the viewer:
+    out of Workspace past the draw distance, and inside it placed by its
+    root, playing the state's track, with its lean, its aim and the recoil
+    kicks still easing on it within lod.aim, full detail and its head
+    offset within lod.full and its feet planted within lod.footIk. Its root
+    moves at the frame's end, with every other, and one standing still
+    that isn't lying down is moved too, the nudge above its target and back
+    on alternate frames, while under perFrame a draw into the Workspace or
+    a switch of track past its cap waits for it. A ragdoll is left to its
+    physics, and a frozen rig thaws first, its tracks at the pool's speed
+    again, then is posed like any other with no draw grant. The local
+    player's own first-person copy is posed from the same state
+    firstPerson.back studs behind where its world rig stands, along its
+    facing, at full detail, leaning with no aim pitch. Past a rig's first
+    draw it makes no table, closure or string; a move, a new aim, lean or
+    head offset and a planted foot's cast make the engine's own CFrames
+    and results, and joining the frame's move while standing still makes
+    none
+
+    @ distance | studs from the viewer's eye to the rig
+    @ pitch | the character's aim pitch, radians, up positive
+--]]
+
+function Rigs.pose(self: Self, slot: number, state: State, distance: number, pitch: number)
+	local entry: Entry = self:_entry(slot, "pose")
+	self:_draw(entry, state, distance, pitch, IN_PLACE)
+
+	local copy: Entry? = self._copy
+	if copy and slot == self._own then
+		self:_draw(copy, state, NEAR, LEVEL, self._settings.firstPerson.back)
+	end
+end
+
+-- Draws one rig from a state, its root back studs behind the state's place along its facing
+function Rigs._draw(self: Self, entry: Entry, state: State, distance: number, pitch: number, back: number)
+	if entry.body or entry.dying then
+		return
+	end
+
+	-- A frozen rig's first draw thaws it where it stands, already drawn and loaded, so it takes no draw grant. A
+	-- landing held still is given the pool's speed here, since a pose gives one its speed only as it starts
+	if entry.frozen then
+		self:_thaw(entry)
+
+		local animated: Animated? = entry.animated
+		if animated then
+			Animate.speed(animated, self._speed)
+		end
+	end
+
+	entry.distance = distance
+
+	if distance > self._drawDistance then
+		drop(self._draws, entry)
+		drop(self._switches, entry)
+
+		if entry.drawn then
+			entry.drawn = false
+			entry.rig.Parent = nil
+
+			local animated: Animated? = entry.animated
+			if animated then
+				Animate.stop(animated)
+			end
+		end
+
+		return
+	end
+
+	if not entry.drawn then
+		-- Past the cap, the rig waits for the frame's end to put it into the Workspace, with what this draw was handed
+		if self._draws.cap ~= nil and not entry.admitted then
+			entry.state = state
+			entry.pitch = pitch
+			entry.back = back
+			ask(self._draws, entry, distance)
+
+			return
+		end
+
+		entry.admitted = false
+		entry.drawn = true
+		entry.rig.Parent = self:_holder(entry)
+	end
+
+	local animated: Animated = entry.animated or self:_animate(entry)
+
+	-- The root's target is where the state's feet are, turned to its facing, once the place changes, and the frame's
+	-- end moves it there
+	local position: vector = state.position
+	local facing: number = state.facing
+	local moved: boolean = position ~= entry.placed or facing ~= entry.facing
+	if moved then
+		entry.placed = position
+		entry.facing = facing
+
+		-- Back along the facing is (sin, 0, cos), since the facing's look vector is (-sin, 0, -cos)
+		local x: number = position.x + math.sin(facing) * back
+		local z: number = position.z + math.cos(facing) * back
+		local height: number = position.y + self._rootHeight
+		entry.target = CFrame.new(x, height, z) * CFrame.Angles(0, facing, 0)
+		entry.raised = nil
+		entry.lifts = false
+	end
+
+	entry.lying = state.posture == "Downed"
+	if joins(entry) then
+		entry.queued = true
+		table.insert(self._queued, entry)
+	end
+
+	local lod: Lod = self._settings.lod
+	local full: boolean = distance <= lod.full
+	local velocity: vector = state.velocity
+
+	-- Whiteoak TODO: feet plant only while the body stands still; plant each foot through its walk's stance
+	-- too, from the foot's own speed, if playtests show feet sliding or floating on slopes and stairs
+	local planting: boolean = distance <= lod.footIk
+		and state.mode == "Ground"
+		and state.posture ~= "Downed"
+		and velocity.x == 0
+		and velocity.z == 0
+
+	-- The world's casts as they stand at this plant, since the first platform registered wraps them after the start
+	-- Whiteoak TODO: a plant meets a moving platform's boxes on the world's tick, the owner's newest predicted one,
+	-- up to a tick of the platform's move from the copy drawn; cast against the boxes at the copy's drawn place once
+	-- a playtest shows feet off a moving lift
+	local collision: Collision = self._collision
+	local world: World? = self._world
+	if world then
+		collision = world.collision
+	end
+
+	-- The aim, with the kicks still easing on it, shows within lod.aim and the head offset within lod.full
+	local aimPitch: number = 0
+	local aimYaw: number = 0
+	if distance <= lod.aim then
+		local kickPitch: number, kickYaw: number = recoil(entry.kicks)
+		aimPitch = pitch + kickPitch
+		aimYaw = kickYaw
+	end
+
+	local turnYaw: number = 0
+	local turnPitch: number = 0
+	if full then
+		turnYaw = entry.headYaw
+		turnPitch = entry.headPitch
+	end
+
+	Animate.detail(animated, full)
+	Animate.pose(animated, state, full, self._speed)
+
+	-- A switch past the cap waits for the frame's end, which plays it with what this draw was handed
+	if animated.wanted then
+		entry.state = state
+		entry.full = full
+		ask(self._switches, entry, distance)
+	end
+
+	Animate.aim(animated, aimPitch, state.lean, aimYaw, turnYaw, turnPitch)
+	Animate.plant(animated, entry.target, position.y, self._rootHeight, collision, planting, moved)
+end
+
+--[[
+    Ends a frame's poses, once after the last, before the frame renders:
+    grants the track switches, the draws into the Workspace and the
+    ragdolls waiting, each up to its cap, those that waited from frames
+    before first and then the nearest, builds the pool toward pool.spare,
+    and then moves every root posed since with one BulkMoveTo, a still
+    rig's the nudge above its target on alternate frames, and with them
+    each frozen rig's root that its poses would have moved, so one frozen
+    lying at rest stays unwritten, on the main thread, since BulkMoveTo is
+    Unsafe in parallel. Past the rigs it builds and the draws and ragdolls
+    it starts, it makes no table, closure or string, and a still rig makes
+    its raised CFrame once, at its first raise after its target changes
+--]]
+
+function Rigs.frame(self: Self)
+	if self._destroyed then
+		return
+	end
+
+	admit(self, self._switches, Rigs._switch)
+	admit(self, self._draws, Rigs._first)
+	admit(self, self._ragdolls, Rigs._start)
+	self:_stock()
+
+	-- No pose reaches a frozen rig, so its root is queued here just as its poses would have queued it: a root that
+	-- starts or stops being written brings the long frame back, so the freeze changes neither
+	local queued: { Entry } = self._queued
+	for _, entry: Entry in self._frozen do
+		if joins(entry) then
+			entry.queued = true
+			table.insert(queued, entry)
+		end
+	end
+
+	self:_move()
+end
+
+-- A switch the frame's end granted, posed through Animate's own table with what the rig's draw was handed
+function Rigs._switch(self: Self, entry: Entry)
+	local animated: Animated? = entry.animated
+	local state: State? = entry.state
+	if animated and state then
+		animated.granted = true
+		Animate.pose(animated, state, entry.full, self._speed)
+	end
+end
+
+-- A draw into the Workspace the frame's end granted, drawn through the pool's own table with what it was handed
+function Rigs._first(self: Self, entry: Entry)
+	local state: State? = entry.state
+	if state then
+		entry.admitted = true
+		self:_draw(entry, state, entry.distance, entry.pitch, entry.back)
+		entry.admitted = false
+	end
+end
+
+-- Builds the pool toward its spare rigs, up to perFrame.builds a frame
+function Rigs._stock(self: Self)
+	local spare: number? = self._spare
+	if spare == nil then
+		return
+	end
+
+	local missing: number = spare - #self._pool
+	local builds: number? = self._builds
+	if builds then
+		missing = math.min(missing, builds)
+	end
+
+	for _ = 1, missing do
+		table.insert(self._pool, self:_build())
+	end
+end
+
+--[[
+    Moves every root posed since the last move in one BulkMoveTo: to its
+    target, or the nudge above it on alternate frames that target holds, a
+    rig's first frame on a new target always on it
+--]]
+
+function Rigs._move(self: Self)
+	local queued: { Entry } = self._queued
+	if #queued == 0 then
+		return
+	end
+
+	local moved: { BasePart } = self._moved
+	local targets: { CFrame } = self._targets
+	for index: number, entry: Entry in queued do
+		local target: CFrame = entry.target
+		if entry.lifts then
+			local raised: CFrame = entry.raised or target + Vector3.new(0, NUDGE, 0)
+			entry.raised = raised
+			target = raised
+		end
+
+		moved[index] = entry.root
+		targets[index] = target
+		entry.queued = false
+		entry.lifts = not entry.lifts
+	end
+
+	Workspace:BulkMoveTo(moved, targets, MOVE_EVENTS)
+
+	table.clear(queued)
+	table.clear(moved)
+	table.clear(targets)
+end
+
+--[[
+    Kicks a slot's drawn rig with a cosmetic recoil: the pitch and yaw join
+    its drawn aim from its next pose and ease back to nothing over the
+    duration, a kick on one still easing adding to it. A rig out of
+    Workspace, a ragdoll and the local player's own take none
+
+    @ yaw | radians off the facing, turning as a facing does
+    @ duration | seconds, which the client handle has checked are above 0
+--]]
+
+function Rigs.kick(self: Self, slot: number, pitch: number, yaw: number, duration: number)
+	local entry: Entry = self:_entry(slot, "kick")
+	if not entry.drawn or entry.body or entry.dying or slot == self._own then
+		return
+	end
+
+	-- The kicks eased out go first, so a rig kicked while it is not posed holds only those still easing
+	recoil(entry.kicks)
+	table.insert(entry.kicks, { pitch = pitch, yaw = yaw, started = os.clock(), duration = duration })
+end
+
+--[[
+    Turns a slot's rig's head by its head offset on top of its aim, drawn
+    within lod.full from its next pose, a yaw and pitch of 0 for none
+
+    @ headYaw | radians, already held to the head cone, turning as a facing
+    does, and then the pitch, up positive
+--]]
+
+function Rigs.turn(self: Self, slot: number, headYaw: number, headPitch: number)
+	local entry: Entry = self:_entry(slot, "turn")
+	entry.headYaw = headYaw
+	entry.headPitch = headPitch
+end
+
+--[[
+    Loads a rig's tracks at its first draw, its switches waiting for the
+    frame's end under perFrame.switches, starts the layer the first time
+    any rig is drawn, and connects the markers of every animation whose
+    names are read, reading the rest
+--]]
+
+function Rigs._animate(self: Self, entry: Entry): Animated
+	local settings: Settings = self._settings
+	local animated: Animated = Animate.load(
+		entry.rig,
+		entry.joints,
+		settings.animations,
+		self._places,
+		function (marker: string, value: string)
+			self:_publish(entry, marker, value)
+		end
+	)
+	animated.waits = self._switches.cap ~= nil
+	entry.animated = animated
+
+	-- Disconnected by destroy
+	if not self._layering then
+		self._layering = RunService.PreSimulation:Connect(function ()
+			self:_layer()
+		end)
+	end
+
+	for state: string in animated.tracks do
+		local animation: Animation = settings.animations[state]
+		local id: string = animation.AnimationId
+		local names: { string }? = self._markers[id]
+
+		if names then
+			Animate.watch(animated, state, names)
+		elseif not self._reading[id] then
+			self:_read(id, animation)
+		end
+	end
+
+	return animated
+end
+
+--[[
+    Reads an animation's marker names on a thread of its own, then connects
+    them on every rig loaded by then. The engine's read ends the thread, by
+    answering or by erroring, and a pool destroyed meanwhile drops it
+--]]
+
+function Rigs._read(self: Self, id: string, animation: Animation)
+	self._reading[id] = true
+
+	task.spawn(function ()
+		local read: boolean, result: any = pcall(Animate.markers, animation)
+		if self._destroyed then
+			return
+		end
+
+		local names: { string } = {}
+		if read then
+			names = result
+		else
+			warn(`Tread raises no markers of {id}, since its clip could not be read: {result}`)
+		end
+		self._markers[id] = names
+
+		for _, entry: Entry in self._rigs do
+			local animated: Animated? = entry.animated
+			if animated then
+				for state: string in animated.tracks do
+					if self._settings.animations[state].AnimationId == id then
+						Animate.watch(animated, state, names)
+					end
+				end
+			end
+		end
+	end)
+end
+
+-- The aim, lean and head layer and the planted legs of every drawn rig, the copy's included, at each simulation step
+function Rigs._layer(self: Self)
+	for _, entry: Entry in self._slots do
+		layer(entry)
+	end
+
+	local copy: Entry? = self._copy
+	if copy then
+		layer(copy)
+	end
+end
+
+--[[
+    Tells every marker callback of a marker a rig reached, with the slot it
+    is drawn for. Each runs under its own xpcall, so one that throws is
+    warned with its stack and never stops the others
+--]]
+
+function Rigs._publish(self: Self, entry: Entry, marker: string, value: string)
+	local slot: number? = entry.slot
+	if slot == nil then
+		return
+	end
+
+	-- A copy, so a callback connected mid-fire waits for the next marker and one disconnected mid-fire is skipped
+	for token: { nil }, callback: Marker in table.clone(self._listeners) do
+		if self._listeners[token] then
+			xpcall(callback, warnFailure, slot, marker, value)
+		end
+	end
+end
+
+--[[
+    Ragdolls a dying slot's rig, re-keyed to its body's slot: its tracks
+    stop at once and its joints go limp under the bodies settings, pushed
+    along the death's attack direction, none for a death with no push.
+    Under perFrame.ragdolls the rig holds its pose until the frame's end
+    starts its ragdoll, nearest first. The local player's own rig shows on
+    this screen again as a body, and its first-person copy goes back to
+    the pool
+
+    @ body | the body's slot, which the rig is drawn for from now on
+    @ push | the attack's direction, nil for no push
+--]]
+
+function Rigs.ragdoll(self: Self, slot: number, body: number, push: vector?)
+	local entry: Entry = self:_entry(slot, "ragdoll")
+	if entry.body or entry.dying then
+		error(`Slot {slot}'s rig is already a ragdoll`, 2)
+	end
+
+	checkSlot(body, "ragdoll")
+	if body ~= slot and self._slots[body] then
+		error(`Slot {body} already has a rig, so slot {slot}'s body can't take its rig`, 2)
+	end
+
+	self:_rekey(entry, slot, body)
+	entry.push = push
+
+	local ragdolls: Gate = self._ragdolls
+	if ragdolls.cap == nil then
+		self:_start(entry)
+		return
+	end
+
+	entry.dying = true
+
+	local animated: Animated? = entry.animated
+	if animated then
+		Animate.speed(animated, HELD)
+	end
+
+	ask(ragdolls, entry, entry.distance)
+end
+
+--[[
+    Starts a dying rig's ragdoll, once any move still waiting has put its
+    root where it was posed: its tracks stop, and its joints go limp under
+    the bodies settings with the push its death carried
+--]]
+
+function Rigs._start(self: Self, entry: Entry)
+	if entry.queued then
+		self:_move()
+	end
+
+	entry.dying = false
+
+	if not entry.drawn then
+		entry.drawn = true
+		entry.rig.Parent = self._folder
+	end
+
+	local animated: Animated? = entry.animated
+	if animated then
+		Animate.stop(animated)
+		Animate.release(animated)
+		entry.animated = nil
+	end
+
+	local bodies: Bodies = self._settings.bodies
+	local torso: BasePart = partOf(entry.joints.Waist)
+	entry.body = Ragdoll.start(entry.rig, entry.joints, torso, bodies, Ragdoll.push(entry.push, bodies))
+	entry.push = nil
+end
+
+--[[
+    Lays a dying slot's rig down as its body, re-keyed to the body's slot
+    with no ragdoll, for a client too far from the death or reached too
+    late: its tracks stop at once, so its next pose plays the lying clip
+    from the start, and it stays a drawn rig posed like any other. The
+    local player's own rig shows on this screen again as a body, and its
+    first-person copy goes back to the pool
+
+    @ body | the body's slot, which the rig is drawn for from now on
+--]]
+
+function Rigs.lie(self: Self, slot: number, body: number)
+	local entry: Entry = self:_entry(slot, "lie")
+	if entry.body or entry.dying then
+		error(`Slot {slot}'s rig is already a ragdoll`, 2)
+	end
+
+	checkSlot(body, "lie")
+	if body ~= slot and self._slots[body] then
+		error(`Slot {body} already has a rig, so slot {slot}'s body can't take its rig`, 2)
+	end
+
+	self:_rekey(entry, slot, body)
+
+	local animated: Animated? = entry.animated
+	if animated then
+		Animate.stop(animated)
+	end
+end
+
+--[[
+    Keys a dying slot's rig to its body's slot, a body no longer the local
+    player's own, the spectated target, outlined or frozen, with no kick,
+    head offset or request waiting for the frame's end
+--]]
+
+function Rigs._rekey(self: Self, entry: Entry, slot: number, body: number)
+	self:_forgo(entry)
+	self:_thaw(entry)
+
+	if slot == self._own then
+		self:_disown()
+	elseif slot == self._watched then
+		self:watch(nil)
+	end
+
+	if entry.outlined then
+		entry.outlined = false
+
+		if entry.drawn then
+			entry.rig.Parent = self._folder
+		end
+	end
+
+	self._slots[slot] = nil
+	self._slots[body] = entry
+	entry.slot = body
+	settle(entry)
+end
+
+--[[
+    Freezes a slot's drawn rig where it stands, as a player anti-ESP hid
+    stays on screen, until its next pose thaws it or it is released: its
+    tracks hold their pose, its layer goes unwritten and its requests
+    waiting for the frame's end are dropped. Its root is written as before:
+    in every frame's move with the nudge, or, lying Downed at rest, in
+    none. Gives whether it is frozen. A rig out of Workspace, the local
+    player's own, the spectated target's, an outlined one, a ragdoll and a
+    dying one are refused and left as they were
+--]]
+
+function Rigs.freeze(self: Self, slot: number): boolean
+	local entry: Entry = self:_entry(slot, "freeze")
+	if entry.frozen then
+		return true
+	elseif not entry.drawn or entry.outlined or entry.body or entry.dying then
+		return false
+	elseif slot == self._own or slot == self._watched then
+		return false
+	end
+
+	self:_forgo(entry)
+	entry.frozen = true
+	table.insert(self._frozen, entry)
+
+	local animated: Animated? = entry.animated
+	if animated then
+		Animate.speed(animated, HELD)
+	end
+
+	return true
+end
+
+-- Ends a rig's freeze, leaving its tracks' speed to what its caller does with it next
+function Rigs._thaw(self: Self, entry: Entry)
+	if entry.frozen then
+		entry.frozen = false
+		forget(self._frozen, entry)
+	end
+end
+
+--[[
+    Where a slot's drawn rig stands in the world: the feet its last pose
+    inside the draw distance put it at. A rider's is on its platform's copy
+    as that pose drew it, where the state it was posed from may be back in
+    its platform's space. A rig no pose has drawn for its slot has none, or
+    the place the slot it was pooled from left it
+--]]
+
+function Rigs.placeOf(self: Self, slot: number): vector?
+	return self:_entry(slot, "placeOf").placed
+end
+
+--[[
+    Names the spectated target's slot, whose world rig takes the local
+    player's own "rig" setting on this screen as their own does, its look
+    and held item included; nil for none. Its rig must be checked out, and
+    the slot is let go of when the rig is released or becomes a body
+--]]
+
+function Rigs.watch(self: Self, slot: number?)
+	if slot == nil then
+		self._watched = nil
+		self._firstPerson:watch(nil)
+
+		return
+	end
+
+	local entry: Entry = self:_entry(slot, "watch")
+	self._watched = slot
+	self._firstPerson:watch(entry.rig)
+end
+
+--[[
+    Draws a slot's rig under the spectate outline, one Highlight over the
+    model every outlined rig is drawn in, seen through walls in the client
+    settings' spectate.outline, or back out of it. A body is never outlined
+--]]
+
+function Rigs.outline(self: Self, slot: number, outlined: boolean)
+	local entry: Entry = self:_entry(slot, "outline")
+	if type(outlined) ~= "boolean" then
+		error(`Rigs.outline takes outlined as a boolean, not a {typeof(outlined)}`, 2)
+	elseif outlined and self._settings.spectate == nil then
+		error("Rigs.outline needs the client settings' spectate.outline, and the pool was given none", 2)
+	elseif entry.outlined == outlined or entry.body or entry.dying then
+		return
+	end
+
+	entry.outlined = outlined
+	if entry.drawn then
+		entry.rig.Parent = self:_holder(entry)
+	end
+end
+
+-- What a drawn rig is parented to: the outlined model while it is outlined, the pool's folder otherwise
+function Rigs._holder(self: Self, entry: Entry): Instance
+	if not entry.outlined then
+		return self._folder
+	end
+
+	local container: Model? = self._container
+	if container then
+		return container
+	end
+
+	-- One Highlight over a model, since Roblox is reported to draw only so many at once. Outline has checked
+	-- the pool was given its settings
+	local outline: index<Spectate, "outline"> = (self._settings.spectate :: Spectate).outline
+	local made: Model = Instance.new("Model")
+	made.Name = OUTLINED
+
+	local highlight: Highlight = Instance.new("Highlight")
+	highlight.Adornee = made
+	highlight.DepthMode = THROUGH_WALLS
+	highlight.FillColor = outline.fill
+	highlight.FillTransparency = outline.fillTransparency
+	highlight.OutlineColor = outline.outline
+	highlight.OutlineTransparency = outline.outlineTransparency
+	highlight.Parent = made
+
+	made.Parent = self._folder
+	self._container = made
+
+	return made
+end
+
+--[[
+    Shows or hides part of the local player's own body on this screen: the
+    first-person copy's arms or chest, the whole copy, or the world rig,
+    each setting kept from one body to the next
+--]]
+
+function Rigs.show(self: Self, part: FirstPerson.Part, shown: boolean)
+	local problem: string? = FirstPerson.refuse(part, shown)
+	if problem then
+		error(`Rigs.show {problem}`, 2)
+	end
+
+	self._firstPerson:show(part, shown)
+end
+
+--[[
+    Sets every rig's track speed, a share of each track's authored speed,
+    on the rigs drawn now and on every pose after, the first-person copy's
+    included: 0 holds each rig's pose where it is, as a paused clip's
+    rigs hold, and 1 plays each track as it was authored. A dying rig
+    keeps holding its pose until its ragdoll starts, and a frozen one
+    until its next pose
+--]]
+
+function Rigs.setSpeed(self: Self, speed: number)
+	if type(speed) ~= "number" or not (speed >= 0 and speed < math.huge) then
+		error(`Rigs.setSpeed takes a finite speed of 0 or more, not {speed}`, 2)
+	end
+
+	self._speed = speed
+
+	for _, entry: Entry in self._slots do
+		local animated: Animated? = entry.animated
+		if animated and not entry.dying and not entry.frozen then
+			Animate.speed(animated, speed)
+		end
+	end
+
+	local copy: Entry? = self._copy
+	local copied: Animated? = copy and copy.animated
+	if copied then
+		Animate.speed(copied, speed)
+	end
+end
+
+--[[
+    Calls back on every animation marker a drawn rig's track reaches, with
+    its slot, the marker's name and its value. Returns the closure that
+    disconnects the callback
+--]]
+
+function Rigs.onMarker(self: Self, callback: Marker): () -> ()
+	if type(callback) ~= "function" then
+		error(`Rigs.onMarker takes a function, not a {typeof(callback)}`, 2)
+	end
+
+	local token: { nil } = {}
+	self._listeners[token] = callback
+
+	-- Cleanup
+	return function ()
+		self._listeners[token] = nil
+	end
+end
+
+--[[
+    Destroys every rig, pooled, drawn or lying, disconnects the layer and
+    every marker callback, and cancels each ragdoll's next check
+--]]
+
+function Rigs.destroy(self: Self)
+	self._destroyed = true
+
+	local layering: RBXScriptConnection? = self._layering
+	if layering then
+		layering:Disconnect()
+		self._layering = nil
+	end
+
+	for _, entry: Entry in self._rigs do
+		local body: Ragdoll.Body? = entry.body
+		if body then
+			Ragdoll.stop(body)
+		end
+
+		local animated: Animated? = entry.animated
+		if animated then
+			Animate.release(animated)
+		end
+
+		entry.rig:Destroy()
+	end
+
+	table.clear(self._rigs)
+	table.clear(self._pool)
+	table.clear(self._slots)
+	table.clear(self._frozen)
+	table.clear(self._listeners)
+	self._own = nil
+	self._copy = nil
+	self._folder:Destroy()
+	self._template:Destroy()
+end
+
+export type Rigs = Self
+type Self = typeof(setmetatable({} :: Fields, Rigs))
+
+return Rigs

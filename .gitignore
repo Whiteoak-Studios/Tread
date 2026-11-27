@@ -20,3 +20,7 @@ graphify-out/
 *.pem
 *.key
 auth.toml
+.volt/
+wally.lock
+*.rbxm
+*.rbxmx

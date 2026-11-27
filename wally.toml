@@ -1,0 +1,17 @@
+[package]
+name = "fadeluc-123/tread"
+description = "Whiteoak's server-authoritative character controller for Roblox, with client prediction, on Volt"
+version = "1.0.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+license = "Apache-2.0"
+authors = ["Michael Sumner <mike@whiteoak.studio>"]
+
+exclude = ["**"]
+include = ["src", "src/**", "default.project.json", "wally.toml", "README.md", "LICENSE"]
+
+[dependencies]
+Promise = "evaera/promise@4.0.0"
+
+[dev-dependencies]
+Volt = "fadeluc-123/volt@0.1.0"
